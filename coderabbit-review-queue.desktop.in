@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=CodeRabbit Review Queue
+Comment=Monitor and reorder CodeRabbit reviews across GitHub repositories
+Exec="@EXEC@" --gui
+Icon=system-software-update
+Terminal=false
+Categories=Development;
+Keywords=GitHub;CodeRabbit;Pull Request;Review;
+StartupNotify=true

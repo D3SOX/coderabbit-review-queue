@@ -1,0 +1,1625 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-only
+set -euo pipefail
+
+repo=''
+owner=''
+name=''
+repo_key=''
+script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
+script_dir=${script_path%/*}
+codex_home=${CODEX_HOME:-"$HOME/.codex"}
+codex_sessions_root="$codex_home/sessions"
+state_root="${XDG_STATE_HOME:-"$HOME/.local/state"}/coderabbit-review-queue"
+gui_script="$script_dir/coderabbit-review-queue-gui.py"
+monitor_pid_file=''
+monitor_lock_file=''
+monitor_lock_fd=''
+dispatch_lock_file=''
+dispatch_lock_fd=''
+routed_threads_file=''
+queue_order_file=''
+quota_expiry_file=''
+review_requests_file=''
+auto_delegate_file=''
+stop_when_empty_file=''
+quota_remaining=-1
+quota_expiry=0
+quota_response_attempts=60
+quota_retry_delay=120
+review_request_window=600
+# CodeRabbit countdowns can lag behind their GitHub comment timestamp.
+review_window_safety=30
+github_quota_threshold=100
+github_poll_interval=5
+acceptance_response_attempts=36
+completion_response_attempts=120
+force_delegation=0
+empty_announced=0
+declare -A attempted_route_threads=()
+declare -A completed_review_heads=()
+
+desktop_notify() {
+  local title=$1
+  local message=$2
+  local urgency=${3:-normal}
+
+  notify-send \
+    --app-name='CodeRabbit Review Queue' \
+    --app-icon='system-software-update' \
+    --hint='string:desktop-entry:coderabbit-review-queue' \
+    --urgency="$urgency" \
+    "$title" \
+    "$message" >/dev/null 2>&1 || true
+}
+
+github_low_quota() {
+  gh api rate_limit 2>/dev/null |
+    jq -r --argjson threshold "$github_quota_threshold" '
+      [
+        {
+          name: "REST",
+          remaining: .resources.core.remaining,
+          reset: .resources.core.reset
+        },
+        {
+          name: "GraphQL",
+          remaining: .resources.graphql.remaining,
+          reset: .resources.graphql.reset
+        }
+      ]
+      | map(select(.remaining <= $threshold))
+      | if length == 0 then
+          empty
+        else
+          max_by(.reset)
+          | [.name, .remaining, .reset]
+          | @tsv
+        end
+    '
+}
+
+wait_for_github_quota() {
+  local row name remaining reset now delay wake
+
+  while true; do
+    row=$(github_low_quota) || return 0
+    [[ -n $row ]] || return 0
+    IFS=$'\t' read -r name remaining reset <<<"$row"
+    now=$(date -u +%s)
+    delay=$((reset - now + 10))
+    (( delay >= 30 )) || delay=30
+    wake=$(human_expiry "$((now + delay))")
+    printf 'GitHub %s quota is low (%s remaining); waiting until %s.\n' \
+      "$name" "$remaining" "$wake" >&2
+    desktop_notify \
+      'GitHub API quota low' \
+      "$name has $remaining requests remaining. The $repo monitor will resume $wake."
+    sleep "$delay"
+  done
+}
+
+status_quota_available() {
+  local row name remaining reset
+
+  row=$(github_low_quota) || return 0
+  [[ -n $row ]] || return 0
+  IFS=$'\t' read -r name remaining reset <<<"$row"
+  printf 'GITHUB_QUOTA_LOW\t%s\t%s\t%s\n' \
+    "$reset" "$name" "$remaining" >&2
+  return 75
+}
+
+read -r -d '' query <<'GRAPHQL' || true
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: 50, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        title
+        updatedAt
+        headRefOid
+        headRefName
+        commits(last: 1) {
+          nodes {
+            commit {
+              committedDate
+              statusCheckRollup {
+                contexts(first: 100) {
+                  nodes {
+                    ... on StatusContext {
+                      context
+                      state
+                      description
+                      createdAt
+                      updatedAt
+                      creator {
+                        login
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        comments(last: 50) {
+          nodes {
+            author {
+              login
+            }
+            body
+            createdAt
+            updatedAt
+          }
+        }
+        reviews(last: 50) {
+          nodes {
+            author {
+              login
+            }
+            commit {
+              oid
+            }
+            submittedAt
+          }
+        }
+      }
+    }
+  }
+}
+GRAPHQL
+
+snapshot() {
+  gh api graphql \
+    -f query="$query" \
+    -F owner="$owner" \
+    -F name="$name"
+}
+
+configure_repo() {
+  local selected=$1
+
+  if [[ ! $selected =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    printf 'Repository must be in OWNER/NAME format: %s\n' "$selected" >&2
+    return 2
+  fi
+
+  repo=$selected
+  owner=${repo%%/*}
+  name=${repo#*/}
+  repo_key=${repo//\//__}
+  monitor_pid_file="/tmp/coderabbit-review-queue-$repo_key.pid"
+  monitor_lock_file="/tmp/coderabbit-review-queue-$repo_key.lock"
+  dispatch_lock_file="/tmp/coderabbit-review-queue-$owner-dispatch.lock"
+  mkdir -p "$state_root"
+  routed_threads_file="$state_root/$repo_key-routed-threads.txt"
+  queue_order_file="$state_root/$repo_key-order.txt"
+  quota_expiry_file="$state_root/$owner-quota-expiry.txt"
+  review_requests_file="$state_root/$repo_key-review-requests.tsv"
+  auto_delegate_file="$state_root/$repo_key-auto-delegate"
+  stop_when_empty_file="$state_root/$repo_key-stop-when-empty"
+}
+
+stale_rows() {
+  jq -r '
+    def latest_rate_limit:
+      [
+        .comments.nodes[]?
+        | select(
+            (.author.login // "") == "coderabbitai"
+            and (
+              (.body | contains("rate limited by coderabbit.ai"))
+              or (.body | test("More reviews will be available in"; "i"))
+            )
+          )
+      ]
+      | sort_by(.updatedAt)
+      | last // null;
+
+    .data.repository.pullRequests.nodes
+    | map(
+        . as $pr
+        | select(
+            (.title | startswith("[pull] "))
+            | not
+          )
+        | select(
+            any(
+              .reviews.nodes[]?;
+              (.author.login // "") == "coderabbitai"
+              and (.commit.oid // "") == $pr.headRefOid
+            )
+            | not
+          )
+        | select(
+            any(
+              .comments.nodes[]?;
+              (.author.login // "") == "coderabbitai"
+              and (
+                .body
+                | contains(
+                    "Currently processing new changes in this PR. This may take a few minutes, please wait"
+                  )
+              )
+            )
+            | not
+          )
+        | select(
+            any(
+              .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
+              (.context // "") == "CodeRabbit"
+              and (.creator.login // "") == "coderabbitai"
+              and (
+                (.state // "") == "PENDING"
+                or (
+                  (.description // "")
+                  | test("review (in progress|processing)"; "i")
+                )
+              )
+            )
+            | not
+          )
+        | select(
+            any(
+              .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
+              (.context // "") == "CodeRabbit"
+              and (.creator.login // "") == "coderabbitai"
+              and (.state // "") == "SUCCESS"
+              and (.description // "") == "Review completed"
+            )
+            | not
+          )
+        | select(
+            any(
+              .comments.nodes[]?;
+              (.author.login // "") == "coderabbitai"
+              and (.body | contains("No actionable comments were generated in the recent review"))
+              and (.body | contains($pr.headRefOid))
+              and ((.body | contains("rate limited by coderabbit.ai")) | not)
+            )
+            | not
+          )
+        | (latest_rate_limit) as $rate_limit
+        | . + {
+            queueLimitAt: ($rate_limit.updatedAt // ""),
+            queueSortAt: (.commits.nodes[0].commit.committedDate // .updatedAt)
+          }
+      )
+    | sort_by(.queueSortAt)
+    | reverse
+    | .[]
+    | [
+        .number,
+        .queueSortAt,
+        .headRefName,
+        .headRefOid,
+        .title,
+        (if .queueLimitAt == "" then "-" else .queueLimitAt end)
+      ]
+    | @tsv
+  '
+}
+
+load_stale_rows() {
+  local state=$1
+  local row wanted pr index head_sha completed_key
+  local -a loaded=()
+  local -a ordered=()
+
+  while IFS= read -r row; do
+    [[ -n $row ]] || continue
+    IFS=$'\t' read -r pr _updated_at _branch_name head_sha _title _limit_at <<<"$row"
+    completed_key="$pr:$head_sha"
+    if [[ -n ${completed_review_heads[$completed_key]+present} ]]; then
+      continue
+    fi
+    loaded+=("$row")
+  done < <(stale_rows <<<"$state")
+
+  if [[ -f $queue_order_file ]]; then
+    while IFS= read -r wanted; do
+      [[ $wanted =~ ^[0-9]+$ ]] || continue
+      for index in "${!loaded[@]}"; do
+        IFS=$'\t' read -r pr _ <<<"${loaded[$index]}"
+        if [[ $pr == "$wanted" ]]; then
+          ordered+=("${loaded[$index]}")
+          unset 'loaded[index]'
+          break
+        fi
+      done
+    done <"$queue_order_file"
+  fi
+
+  for row in "${loaded[@]}"; do
+    ordered+=("$row")
+  done
+  stale=("${ordered[@]}")
+}
+
+mark_head_verified() {
+  local pr=$1
+  local head_sha=$2
+  local verified_key="$pr:$head_sha"
+
+  completed_review_heads["$verified_key"]=1
+}
+
+eligible_rows() {
+  jq -r '
+    .data.repository.pullRequests.nodes[]
+    | select((.title | startswith("[pull] ")) | not)
+    | [.number, .headRefName, .headRefOid, .title]
+    | @tsv
+  '
+}
+
+timer_rows() {
+  jq -r '
+    def latest_rate_limit:
+      [
+        .comments.nodes[]?
+        | select(
+            (.author.login // "") == "coderabbitai"
+            and (
+              (.body | contains("rate limited by coderabbit.ai"))
+              or (.body | test("More reviews will be available in"; "i"))
+            )
+          )
+      ]
+      | sort_by(.updatedAt)
+      | last // null;
+
+    .data.repository.pullRequests.nodes[]
+    | select((.title | startswith("[pull] ")) | not)
+    | (latest_rate_limit) as $rate_limit
+    | (
+        if $rate_limit == null then null
+        else
+          (
+            $rate_limit.body
+            | try capture(
+                "(?:Next review available in:\\*{0,2}\\s*\\*{0,2}|More reviews will be available in\\s+)(?<amount>[0-9]+)\\s+(?<unit>seconds?|minutes?|hours?)";
+                "i"
+              )
+              catch null
+          )
+        end
+      ) as $timer
+    | select(
+        $rate_limit != null
+        and $timer != null
+      )
+    | [
+        .number,
+        .headRefOid,
+        $rate_limit.updatedAt,
+        $timer.amount,
+        $timer.unit
+      ]
+    | @tsv
+  '
+}
+
+latest_expiry() {
+  local state=$1
+  local latest_update=0
+  local selected_expiry=0
+  local _pr _head_sha updated_at amount unit updated_epoch expiry
+
+  while IFS=$'\t' read -r _pr _head_sha updated_at amount unit; do
+    [[ -n ${updated_at:-} && ${amount:-} =~ ^[0-9]+$ ]] || continue
+    case $unit in
+      second|seconds|minute|minutes|hour|hours) ;;
+      *) continue ;;
+    esac
+    updated_epoch=$(date -u -d "$updated_at" +%s)
+    expiry=$(date -u -d "$updated_at + $amount $unit" +%s)
+    if (( updated_epoch > latest_update )); then
+      latest_update=$updated_epoch
+      selected_expiry=$((expiry + review_window_safety))
+    fi
+  done < <(timer_rows <<<"$state")
+
+  printf '%s\n' "$selected_expiry"
+}
+
+shared_expiry() {
+  local expiry=0
+
+  if [[ -f $quota_expiry_file ]]; then
+    read -r expiry <"$quota_expiry_file" || true
+  fi
+  [[ $expiry =~ ^[0-9]+$ ]] || expiry=0
+  printf '%s\n' "$expiry"
+}
+
+remember_shared_expiry() {
+  local expiry=$1
+  local current
+
+  [[ $expiry =~ ^[0-9]+$ ]] || return 0
+  current=$(shared_expiry)
+  (( expiry > current )) || return 0
+  printf '%s\n' "$expiry" >"$quota_expiry_file"
+}
+
+record_review_request() {
+  local pr=$1
+  local head_sha=$2
+  local requested_at=$3
+
+  printf '%s\t%s\t%s\n' "$pr" "$head_sha" "$requested_at" \
+    >>"$review_requests_file"
+}
+
+clear_review_request() {
+  local pr=$1
+  local head_sha=$2
+
+  record_review_request "$pr" "$head_sha" 0
+}
+
+recent_review_request_expiry() {
+  local pr=$1
+  local head_sha=$2
+  local now cutoff cutoff_iso comments github_at github_epoch local_epoch=0
+  local expiry=0
+
+  now=$(date -u +%s)
+  cutoff=$((now - review_request_window))
+  cutoff_iso=$(date -u -d "@$cutoff" +%Y-%m-%dT%H:%M:%SZ)
+
+  if [[ -f $review_requests_file ]]; then
+    local_epoch=$(
+      awk -F '\t' -v pr="$pr" -v head="$head_sha" '
+        $1 == pr && $2 == head { requested_at = $3 }
+        END { print requested_at + 0 }
+      ' "$review_requests_file"
+    )
+  fi
+  if (( local_epoch > cutoff )); then
+    expiry=$((local_epoch + review_request_window))
+  fi
+
+  if ! comments=$(
+    gh api --paginate "repos/$repo/issues/$pr/comments"
+  ); then
+    return 1
+  fi
+  github_at=$(
+    jq -r --arg cutoff "$cutoff_iso" '
+      . as $comments
+      | [
+          .[]
+          | select(
+              .user.login != "coderabbitai[bot]"
+              and .created_at >= $cutoff
+              and ((.body | gsub("^\\s+|\\s+$"; "")) == "@coderabbitai review")
+            )
+      ]
+      | sort_by(.created_at)
+      | last // null
+      | . as $request
+      | if . == null then
+          empty
+        elif any(
+          $comments[];
+          .user.login == "coderabbitai[bot]"
+          and .updated_at >= $request.created_at
+          and (.body | contains("rate limited by coderabbit.ai"))
+        ) then
+          empty
+        else
+          .created_at
+        end
+    ' <<<"$comments"
+  )
+  if [[ -n $github_at ]]; then
+    github_epoch=$(date -u -d "$github_at" +%s)
+    if (( github_epoch + review_request_window > expiry )); then
+      expiry=$((github_epoch + review_request_window))
+    fi
+  fi
+
+  printf '%s\n' "$expiry"
+}
+
+wait_until() {
+  local expiry=$1
+  local now delay wake
+
+  now=$(date -u +%s)
+  (( expiry > now )) || return 0
+  delay=$((expiry - now))
+  wake=$(human_expiry "$expiry")
+  printf 'Waiting until CodeRabbit expiry %s (%s seconds).\n' "$wake" "$delay"
+  desktop_notify \
+    'CodeRabbit queue waiting' \
+    "Next review window opens $wake."
+  sleep "$delay"
+}
+
+human_expiry() {
+  local expiry=$1
+  local today tomorrow target time
+
+  today=$(date +%F)
+  tomorrow=$(date -d tomorrow +%F)
+  target=$(date -d "@$expiry" +%F)
+  time=$(date -d "@$expiry" +%H:%M)
+
+  if [[ $target == "$today" ]]; then
+    printf 'today at %s' "$time"
+  elif [[ $target == "$tomorrow" ]]; then
+    printf 'tomorrow at %s' "$time"
+  else
+    date -d "@$expiry" '+%a, %d %b at %H:%M'
+  fi
+}
+
+quota_row_from_comments() {
+  local since=$1
+
+  jq -r --arg since "$since" '
+    [
+      .[]
+      | select(
+          .user.login == "coderabbitai[bot]"
+          and .created_at >= $since
+        )
+      | . as $comment
+      | .body as $body
+      | (
+          [
+            $body
+            | capture(
+                "(?<remaining>[0-9]+)(?:\\s*/\\s*[0-9]+)?\\s+reviews? remaining";
+                "i"
+              )
+          ]
+          | first // null
+        ) as $remaining_match
+      | (
+          if $remaining_match == null then null
+          else ($remaining_match.remaining | tonumber)
+          end
+        ) as $remaining
+      | (
+          [
+            $body
+            | capture(
+                "(?:refill(?:s)? in|next review available in:?\\*{0,2}|more reviews will be available in)\\s*\\*{0,2}(?<amount>[0-9]+)\\s+(?<unit>seconds?|minutes?|hours?)";
+                "i"
+              )
+          ]
+          | first // null
+        ) as $timer
+      | if ($body | test("reviews are available now"; "i")) then
+          {
+            remaining: -1,
+            at: $comment.created_at,
+            timer: null
+          }
+        elif $remaining != null then
+          {
+            remaining: $remaining,
+            at: $comment.created_at,
+            timer: $timer
+          }
+        elif (
+          $timer != null
+          and (
+            $body
+            | test(
+                "review limit|no reviews? remaining|couldn.t start this review|more reviews will be available";
+                "i"
+              )
+          )
+        ) then
+          {
+            remaining: 0,
+            at: $comment.created_at,
+            timer: $timer
+          }
+        else
+          empty
+        end
+    ]
+    | sort_by(.at)
+    | last // empty
+    | [
+        .remaining,
+        .at,
+        (.timer.amount // 0),
+        (.timer.unit // "seconds")
+      ]
+    | @tsv
+  '
+}
+
+query_quota() {
+  local pr=$1
+  local title=$2
+  local command command_at comments row amount unit attempt
+
+  printf 'Checking CodeRabbit quota on PR #%s: %s\n' "$pr" "$title"
+  desktop_notify \
+    'Checking CodeRabbit quota' \
+    "PR #$pr — $title"
+  command=$(
+    gh api -X POST "repos/$repo/issues/$pr/comments" \
+      -f body='@coderabbitai rate limit'
+  )
+  command_at=$(jq -r .created_at <<<"$command")
+
+  for ((attempt = 1; attempt <= quota_response_attempts; attempt++)); do
+    (( attempt % 12 != 1 )) || wait_for_github_quota
+    comments=$(gh api --paginate "repos/$repo/issues/$pr/comments")
+    row=$(quota_row_from_comments "$command_at" <<<"$comments")
+    if [[ -n $row ]]; then
+      IFS=$'\t' read -r quota_remaining response_at amount unit <<<"$row"
+      quota_expiry=0
+      if [[ $amount =~ ^[0-9]+$ ]] && (( amount > 0 )); then
+        quota_expiry=$(
+          date -u -d "$response_at + $amount $unit" +%s
+        )
+        quota_expiry=$((quota_expiry + review_window_safety))
+      fi
+
+      if (( quota_remaining < 0 )); then
+        printf 'CodeRabbit reports reviews are available now.\n'
+        desktop_notify \
+          'CodeRabbit quota available' \
+          "PR #$pr — $title"$'\n''Reviews are available now.'
+      elif (( quota_remaining == 0 )); then
+        printf 'CodeRabbit reports no reviews currently available.\n'
+        desktop_notify \
+          'CodeRabbit quota exhausted' \
+          "PR #$pr — $title"$'\n''No reviews are currently available.'
+      else
+        printf 'CodeRabbit reports %s review(s) available.\n' "$quota_remaining"
+        desktop_notify \
+          'CodeRabbit quota available' \
+          "PR #$pr — $title"$'\n'"$quota_remaining review(s) available."
+      fi
+      return 0
+    fi
+    sleep "$github_poll_interval"
+  done
+
+  printf 'CodeRabbit did not answer the quota check within five minutes; retrying in two minutes.\n' >&2
+  desktop_notify \
+    'CodeRabbit quota check delayed' \
+    "PR #$pr — $title"$'\n''No response after five minutes. Retrying in two minutes; the monitor remains active.'
+  return 1
+}
+
+wait_for_acceptance() {
+  local pr=$1
+  local triggered_at=$2
+  local head_sha=$3
+  local title=$4
+  local attempt comments statuses result
+
+  for ((attempt = 1; attempt <= acceptance_response_attempts; attempt++)); do
+    (( attempt % 12 != 1 )) || wait_for_github_quota
+    comments=$(gh api --paginate "repos/$repo/issues/$pr/comments")
+    statuses=$(gh api "repos/$repo/commits/$head_sha/status")
+    result=$(
+      jq -r \
+        --arg since "$triggered_at" \
+        --arg head "$head_sha" \
+        --argjson statuses "$statuses" '
+        if (
+          any(
+            .[];
+            .user.login == "coderabbitai[bot]"
+            and .updated_at >= $since
+            and (.body | contains("rate limited by coderabbit.ai"))
+          )
+          or any(
+            $statuses.statuses[];
+            .context == "CodeRabbit"
+            and .created_at >= $since
+            and .description == "Review rate limited"
+          )
+        ) then
+          "limited"
+        elif (
+          any(
+            .[];
+            .user.login == "coderabbitai[bot]"
+            and (
+              (
+                .created_at >= $since
+                and (.body | contains("Review triggered"))
+              )
+              or (
+                .updated_at >= $since
+                and (.body | contains("No actionable comments were generated in the recent review"))
+                and (.body | contains($head))
+                and ((.body | contains("rate limited by coderabbit.ai")) | not)
+              )
+            )
+          )
+          or any(
+            $statuses.statuses[];
+            .context == "CodeRabbit"
+            and .created_at >= $since
+            and .description != "Review rate limited"
+          )
+        ) then
+          "accepted"
+        else
+          "waiting"
+        end
+      ' <<<"$comments"
+    )
+    if [[ $result == accepted ]]; then
+      printf 'CodeRabbit accepted PR #%s.\n' "$pr"
+      desktop_notify \
+        'CodeRabbit review accepted' \
+        "PR #$pr — $title"$'\n'"Review request accepted."
+      return 0
+    fi
+    if [[ $result == limited ]]; then
+      printf 'CodeRabbit rate-limited PR #%s; waiting for its updated countdown.\n' "$pr"
+      desktop_notify \
+        'CodeRabbit review rate-limited' \
+        "PR #$pr — $title"$'\n'"Still queued until CodeRabbit's updated countdown expires."
+      return 2
+    fi
+    sleep "$github_poll_interval"
+  done
+
+  printf 'Timed out waiting for CodeRabbit to accept PR #%s; stopping safely.\n' "$pr" >&2
+  desktop_notify \
+    'CodeRabbit queue stopped' \
+    "PR #$pr — $title"$'\n'"Timed out waiting for CodeRabbit to accept the request." \
+    'critical'
+  return 1
+}
+
+wait_for_review_completion() {
+  local pr=$1
+  local triggered_at=$2
+  local head_sha=$3
+  local title=$4
+  local attempt statuses result
+
+  for ((attempt = 1; attempt <= completion_response_attempts; attempt++)); do
+    (( attempt % 12 != 1 )) || wait_for_github_quota
+    statuses=$(gh api "repos/$repo/commits/$head_sha/status")
+    result=$(
+      jq -r --arg since "$triggered_at" '
+        [
+          .statuses[]
+          | select(
+              .context == "CodeRabbit"
+              and .created_at >= $since
+          )
+        ]
+        | sort_by(.created_at)
+        | last // null
+        | if .description == "Review completed" then "finished"
+          elif .description == "Review rate limited" then "limited"
+          else "waiting"
+          end
+      ' <<<"$statuses"
+    )
+    if [[ $result == finished ]]; then
+      printf 'CodeRabbit finished PR #%s.\n' "$pr"
+      return 0
+    fi
+    if [[ $result == limited ]]; then
+      printf 'CodeRabbit rate-limited PR #%s before completion.\n' "$pr"
+      return 2
+    fi
+    sleep "$github_poll_interval"
+  done
+
+  printf 'CodeRabbit did not finish PR #%s within ten minutes; stopping safely.\n' "$pr" >&2
+  desktop_notify \
+    'CodeRabbit queue stopped' \
+    "PR #$pr — $title"$'\n'"CodeRabbit did not finish within ten minutes." \
+    'critical'
+  return 1
+}
+
+unresolved_coderabbit_rows() {
+  local pr=$1
+  local cursor='' page has_next
+  local thread_query
+  local -a args
+
+  read -r -d '' thread_query <<'GRAPHQL' || true
+query(
+  $owner: String!,
+  $name: String!,
+  $number: Int!,
+  $cursor: String
+) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          comments(first: 1) {
+            nodes {
+              author {
+                login
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+GRAPHQL
+
+  while true; do
+    args=(
+      api graphql
+      -f query="$thread_query"
+      -F owner="$owner"
+      -F name="$name"
+      -F number="$pr"
+    )
+    [[ -z $cursor ]] || args+=(-F cursor="$cursor")
+    page=$(gh "${args[@]}")
+    jq -r '
+      .data.repository.pullRequest.reviewThreads.nodes[]
+      | select(
+          (.isResolved | not)
+          and (.comments.nodes | length) > 0
+          and ((.comments.nodes[0].author.login // "") == "coderabbitai")
+        )
+      | [
+          .id,
+          .path,
+          (.line // .originalLine // 0),
+          .isOutdated
+        ]
+      | @tsv
+    ' <<<"$page"
+
+    has_next=$(
+      jq -r \
+        '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' \
+        <<<"$page"
+    )
+    [[ $has_next == true ]] || break
+    cursor=$(
+      jq -r \
+        '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor' \
+        <<<"$page"
+    )
+  done
+}
+
+matching_codex_session() {
+  local branch_name=$1
+  local head_sha=$2
+  local file meta parsed timestamp session_id cwd metadata_branch metadata_head
+  local live_branch live_head remote key
+  local -A branch_sessions=()
+  local -A branch_timestamps=()
+  local -A head_sessions=()
+  local -A head_timestamps=()
+  local -A metadata_branch_sessions=()
+  local -A metadata_branch_timestamps=()
+  local -A metadata_head_sessions=()
+  local -A metadata_head_timestamps=()
+
+  while IFS= read -r file; do
+    [[ -n ${file:-} ]] || continue
+    meta=$(head -n 1 "$file")
+    parsed=$(
+      jq -r \
+        --arg repo "$repo" '
+        (.payload.git.repository_url // "") as $url
+        | select(
+          .type == "session_meta"
+          and .payload.originator == "Codex Desktop"
+          and (.payload.thread_source // "") != "subagent"
+          and (
+            ($url | endswith("github.com:" + $repo + ".git"))
+            or ($url | endswith("github.com/" + $repo + ".git"))
+            or ($url | endswith("github.com/" + $repo))
+          )
+        )
+        | [
+            (.timestamp // ""),
+            (.payload.session_id // .payload.id // ""),
+            (.payload.cwd // ""),
+            (.payload.git.branch // ""),
+            (.payload.git.commit_hash // "")
+          ]
+        | @tsv
+      ' <<<"$meta"
+    )
+    [[ -n $parsed ]] || continue
+    IFS=$'\t' read -r timestamp session_id cwd metadata_branch metadata_head <<<"$parsed"
+    [[ -n $timestamp && -n $session_id && -n $cwd ]] || continue
+
+    if [[ $metadata_branch == "$branch_name" ]]; then
+      if [[ $timestamp > ${metadata_branch_timestamps[$cwd]:-} ]]; then
+        metadata_branch_timestamps["$cwd"]=$timestamp
+        metadata_branch_sessions["$cwd"]=$session_id
+      fi
+    fi
+    if [[ $metadata_head == "$head_sha" ]]; then
+      if [[ $timestamp > ${metadata_head_timestamps[$cwd]:-} ]]; then
+        metadata_head_timestamps["$cwd"]=$timestamp
+        metadata_head_sessions["$cwd"]=$session_id
+      fi
+    fi
+
+    if ! git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
+      continue
+    fi
+    remote=$(git -C "$cwd" remote get-url origin 2>/dev/null || true)
+    if [[ $remote != *"github.com:$repo.git" &&
+      $remote != *"github.com/$repo.git" &&
+      $remote != *"github.com/$repo" ]]; then
+      continue
+    fi
+    live_branch=$(git -C "$cwd" branch --show-current 2>/dev/null || true)
+    live_head=$(git -C "$cwd" rev-parse HEAD 2>/dev/null || true)
+    if [[ $live_branch == "$branch_name" ]]; then
+      if [[ $timestamp > ${branch_timestamps[$cwd]:-} ]]; then
+        branch_timestamps["$cwd"]=$timestamp
+        branch_sessions["$cwd"]=$session_id
+      fi
+    fi
+    if [[ $live_head == "$head_sha" ]]; then
+      if [[ $timestamp > ${head_timestamps[$cwd]:-} ]]; then
+        head_timestamps["$cwd"]=$timestamp
+        head_sessions["$cwd"]=$session_id
+      fi
+    fi
+  done < <(
+    rg -l --fixed-strings \
+      "$repo" \
+      "$codex_sessions_root" 2>/dev/null || true
+  )
+
+  for key in branch_sessions head_sessions metadata_branch_sessions metadata_head_sessions; do
+    local -n candidates=$key
+    if (( ${#candidates[@]} == 1 )); then
+      printf '%s\t%s\n' "${candidates[@]}" "${!candidates[@]}"
+      return 0
+    fi
+    if (( ${#candidates[@]} > 1 )); then
+      return 1
+    fi
+  done
+  return 1
+}
+
+auto_delegation_enabled() {
+  [[ -f $auto_delegate_file ]] &&
+    [[ $(head -n 1 "$auto_delegate_file") != 0 ]]
+}
+
+stop_when_empty_enabled() {
+  [[ -f $stop_when_empty_file ]] &&
+    [[ $(head -n 1 "$stop_when_empty_file") == 1 ]]
+}
+
+wait_on_empty_queue() {
+  if stop_when_empty_enabled; then
+    printf 'Every open PR has a current CodeRabbit review.\n'
+    desktop_notify \
+      'CodeRabbit queue complete' \
+      "Every queued $repo PR has a current CodeRabbit review."
+    return 1
+  fi
+
+  if (( empty_announced == 0 )); then
+    printf 'Queue is empty; continuing to monitor %s for future work.\n' "$repo"
+    empty_announced=1
+  fi
+  sleep 60
+  return 0
+}
+
+codex_session_running() {
+  local session_id=$1
+  local session_file
+
+  session_file=$(
+    rg --files "$codex_sessions_root" |
+      rg "/rollout-.*-${session_id}\\.jsonl$" |
+      head -n 1
+  )
+  [[ -n $session_file ]] || return 1
+  jq -s -e '
+    reduce (
+      .[]
+      | select(
+          .type == "event_msg"
+          and (
+            .payload.type == "task_started"
+            or .payload.type == "task_complete"
+            or .payload.type == "turn_aborted"
+          )
+        )
+    ) as $event (
+      {};
+      if $event.payload.type == "task_started" then
+        .[$event.payload.turn_id] = true
+      else
+        del(.[$event.payload.turn_id])
+      end
+    )
+    | length > 0
+  ' "$session_file" >/dev/null
+}
+
+route_unresolved_review() {
+  local pr=$1
+  local branch_name=$2
+  local head_sha=$3
+  local title=$4
+  local row thread_id path line outdated
+  local match session_id session_cwd git_common_dir prompt
+  local routing_lock_path routing_lock_fd
+  local -a new_threads=()
+  local -a new_ids=()
+
+  (( force_delegation == 1 )) || auto_delegation_enabled || return 0
+
+  while IFS=$'\t' read -r thread_id path line outdated; do
+    [[ -n ${thread_id:-} ]] || continue
+    if [[ -f $routed_threads_file ]] &&
+      rg -q --fixed-strings --line-regexp "$thread_id" "$routed_threads_file"; then
+      continue
+    fi
+    if [[ -n ${attempted_route_threads[$thread_id]+present} ]]; then
+      continue
+    fi
+    new_threads+=("$thread_id ($path:$line, outdated=$outdated)")
+    new_ids+=("$thread_id")
+  done < <(unresolved_coderabbit_rows "$pr")
+
+  (( ${#new_threads[@]} > 0 )) || return 0
+
+  if ! match=$(matching_codex_session "$branch_name" "$head_sha"); then
+    printf 'No unambiguous Codex task match for PR #%s; not routing review.\n' "$pr"
+    desktop_notify \
+      'CodeRabbit review needs routing' \
+      "PR #$pr — $title"$'\n'"Unresolved feedback has no matching Codex task." \
+      'critical'
+    return 0
+  fi
+  IFS=$'\t' read -r session_id session_cwd <<<"$match"
+  git_common_dir=$(
+    git -C "$session_cwd" rev-parse --path-format=absolute --git-common-dir
+  )
+  routing_lock_path="/tmp/coderabbit-review-queue-$repo_key-codex-$session_id.lock"
+  exec {routing_lock_fd}>"$routing_lock_path"
+  if ! flock -n "$routing_lock_fd"; then
+    printf 'Codex routing for PR #%s is already being dispatched; skipping duplicate.\n' \
+      "$pr"
+    exec {routing_lock_fd}>&-
+    return 0
+  fi
+  if codex_session_running "$session_id"; then
+    printf 'Codex task %s for PR #%s is already running; deferring review routing.\n' \
+      "$session_id" "$pr"
+    flock -u "$routing_lock_fd"
+    exec {routing_lock_fd}>&-
+    return 0
+  fi
+  prompt=$(
+    printf \
+      'PR #%s (%s) has unresolved CodeRabbit review threads: %s. Inspect the live unresolved CodeRabbit threads on https://github.com/%s/pull/%s, verify each finding against the current code, address every valid actionable issue, run appropriate validation, and resolve the addressed GitHub review threads. Do not act on non-CodeRabbit feedback.' \
+      "$pr" \
+      "$title" \
+      "$(IFS=', '; printf '%s' "${new_threads[*]}")" \
+      "$repo" \
+      "$pr"
+  )
+
+  sleep 1
+  if codex_session_running "$session_id"; then
+    printf 'Codex task %s for PR #%s started while routing; deferring review routing.\n' \
+      "$session_id" "$pr"
+    flock -u "$routing_lock_fd"
+    exec {routing_lock_fd}>&-
+    return 0
+  fi
+  for thread_id in "${new_ids[@]}"; do
+    attempted_route_threads["$thread_id"]=1
+  done
+
+  printf 'Routing unresolved CodeRabbit review on PR #%s to Codex task %s.\n' \
+    "$pr" "$session_id"
+  if (
+    cd "$session_cwd"
+    codex exec --add-dir "$git_common_dir" resume --all "$session_id" "$prompt"
+  ); then
+    for thread_id in "${new_ids[@]}"; do
+      printf '%s\n' "$thread_id" >>"$routed_threads_file"
+    done
+    desktop_notify \
+      'CodeRabbit review routed' \
+      "PR #$pr — $title"$'\n'"Sent unresolved feedback to its Codex task."
+  else
+    printf 'Codex task resume failed for PR #%s; leaving it eligible for retry.\n' "$pr" >&2
+    desktop_notify \
+      'CodeRabbit routing failed' \
+      "PR #$pr — $title"$'\n'"Could not resume the matching Codex task." \
+      'critical'
+  fi
+  flock -u "$routing_lock_fd"
+  exec {routing_lock_fd}>&-
+}
+
+route_all_unresolved() {
+  local state=$1
+  local pr branch_name head_sha title
+
+  while IFS=$'\t' read -r pr branch_name head_sha title; do
+    [[ -n ${pr:-} ]] || continue
+    if ! route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"; then
+      printf 'Codex routing failed for PR #%s; review monitoring will continue.\n' \
+        "$pr" >&2
+      desktop_notify \
+        'CodeRabbit routing failed' \
+        "PR #$pr — $title"$'\n'"Review monitoring remains active." \
+        'critical'
+    fi
+  done < <(eligible_rows <<<"$state")
+  return 0
+}
+
+codex_task_progress() {
+  local branch_name=$1
+  local head_sha=$2
+  local match session_id session_cwd session_file state message
+
+  if ! match=$(matching_codex_session "$branch_name" "$head_sha"); then
+    printf 'No matching task\n'
+    return 0
+  fi
+  IFS=$'\t' read -r session_id session_cwd <<<"$match"
+  session_file=$(
+    rg --files "$codex_sessions_root" |
+      rg "/rollout-.*-${session_id}\\.jsonl$" |
+      head -n 1
+  )
+  if [[ -z $session_file ]]; then
+    printf 'Matched %s\n' "${session_id:0:8}"
+    return 0
+  fi
+
+  if codex_session_running "$session_id"; then
+    state='Running'
+  else
+    state='Idle'
+  fi
+  message=$(
+    jq -s -r '
+      [
+        .[]
+        | select(
+            .type == "event_msg"
+            and .payload.type == "agent_message"
+          )
+        | .payload.message
+      ]
+      | last // ""
+      | gsub("[\\r\\n\\t]+"; " ")
+      | if length > 180 then .[0:177] + "..." else . end
+    ' "$session_file"
+  )
+
+  if [[ -n $message ]]; then
+    printf '%s (%s) — %s\n' "$state" "${session_id:0:8}" "$message"
+  else
+    printf '%s (%s)\n' "$state" "${session_id:0:8}"
+  fi
+}
+
+show_status() {
+  local state expiry now row pr branch_name head_sha title count task_progress
+  local unresolved=''
+
+  status_quota_available || return $?
+  state=$(snapshot)
+  load_stale_rows "$state"
+  printf 'Repository: %s\n' "$repo"
+  if (( ${#stale[@]} == 0 )); then
+    printf 'No eligible open PR has an outstanding CodeRabbit review request.\n'
+  else
+    printf 'Queued PRs:\n'
+    for row in "${stale[@]}"; do
+      IFS=$'\t' read -r pr _updated_at _branch_name _head_sha title _limit_at <<<"$row"
+      printf '  #%s %s\n' "$pr" "$title"
+    done
+
+    expiry=$(latest_expiry "$state")
+    quota_expiry=$(shared_expiry)
+    (( quota_expiry > expiry )) && expiry=$quota_expiry
+    now=$(date -u +%s)
+    if (( expiry > now )); then
+      printf 'Next outstanding rate limit expires at %s UTC.\n' \
+        "$(date -u -d "@$expiry" +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+  fi
+
+  while IFS=$'\t' read -r pr branch_name head_sha title; do
+    [[ -n ${pr:-} ]] || continue
+    count=$(
+      unresolved_coderabbit_rows "$pr" |
+        awk 'NF { count++ } END { print count + 0 }'
+    )
+    if (( count > 0 )); then
+      unresolved+=$'\n'"  #$pr $title ($count unresolved)"
+      task_progress=$(codex_task_progress "$branch_name" "$head_sha")
+      unresolved+=$'\n'"    Codex task: $task_progress"
+    fi
+  done < <(eligible_rows <<<"$state")
+
+  if [[ -n $unresolved ]]; then
+    printf '\nUnresolved CodeRabbit feedback:%s\n' "$unresolved"
+  fi
+}
+
+list_repositories() {
+  local org selection candidate
+  local -A seen=()
+  local -a orgs=()
+
+  mapfile -t orgs < <(
+    gh api --paginate user/orgs --jq '.[].login'
+  )
+
+  for org in "${orgs[@]}"; do
+    selection=$(
+      gh api "orgs/$org/installations" --jq '
+        [
+          .installations[]
+          | select((.app_slug | ascii_downcase) == "coderabbitai")
+          | .repository_selection
+        ][0] // empty
+      ' 2>/dev/null
+    ) || continue
+    [[ -n $selection ]] || continue
+
+    if [[ $selection == all ]]; then
+      while IFS= read -r candidate; do
+        [[ -n $candidate && -z ${seen[$candidate]:-} ]] || continue
+        seen[$candidate]=1
+        printf '%s\n' "$candidate"
+      done < <(
+        gh api --paginate -X GET "orgs/$org/repos" \
+          -f type=all \
+          -f sort=updated \
+          -f per_page=100 \
+          --jq '.[].full_name'
+      )
+    else
+      while IFS= read -r candidate; do
+        [[ -n $candidate && -z ${seen[$candidate]:-} ]] || continue
+        seen[$candidate]=1
+        printf '%s\n' "$candidate"
+      done < <(
+        gh api --paginate -X GET search/issues \
+          -f "q=org:$org is:pr commenter:coderabbitai[bot]" \
+          -f per_page=100 \
+          --jq '.items[].repository_url | split("/")[-2:] | join("/")'
+      )
+    fi
+  done
+}
+
+show_gui() {
+  python3 "$gui_script"
+}
+
+delegate_pr_now() {
+  local requested_pr=$1
+  local state pr branch_name head_sha title
+
+  state=$(snapshot)
+  while IFS=$'\t' read -r pr branch_name head_sha title; do
+    [[ $pr == "$requested_pr" ]] || continue
+    force_delegation=1
+    route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"
+    return 0
+  done < <(eligible_rows <<<"$state")
+
+  printf 'PR #%s is not an eligible open pull request.\n' "$requested_pr" >&2
+  return 1
+}
+
+claim_monitor() {
+  exec {monitor_lock_fd}>"$monitor_lock_file"
+  flock -n "$monitor_lock_fd" || return 1
+  printf '%s\n' "$$" >"$monitor_pid_file"
+}
+
+claim_dispatch() {
+  exec {dispatch_lock_fd}>"$dispatch_lock_file"
+  flock "$dispatch_lock_fd"
+}
+
+release_dispatch() {
+  flock -u "$dispatch_lock_fd"
+  exec {dispatch_lock_fd}>&-
+  dispatch_lock_fd=''
+}
+
+monitor_snapshot() {
+  local data
+  local warned=0
+
+  while true; do
+    wait_for_github_quota
+    if data=$(snapshot); then
+      break
+    fi
+    printf 'GitHub status refresh failed; retrying in 30 seconds.\n' >&2
+    if (( warned == 0 )); then
+      desktop_notify \
+        'CodeRabbit monitor waiting' \
+        "$repo status could not be refreshed. Retrying automatically."
+      warned=1
+    fi
+    sleep 30
+  done
+  printf '%s\n' "$data"
+}
+
+main() {
+  local action='run'
+  local selected_repo=''
+  local delegate_pr=''
+
+  while (( $# > 0 )); do
+    case $1 in
+      --repo)
+        (( $# >= 2 )) || {
+          printf '%s\n' '--repo requires OWNER/NAME.' >&2
+          return 2
+        }
+        selected_repo=$2
+        shift 2
+        ;;
+      --status|--gui|--list-repos)
+        action=${1#--}
+        shift
+        ;;
+      --delegate)
+        (( $# >= 2 )) && [[ $2 =~ ^[0-9]+$ ]] || {
+          printf '%s\n' '--delegate requires a PR number.' >&2
+          return 2
+        }
+        action='delegate'
+        delegate_pr=$2
+        shift 2
+        ;;
+      *)
+        printf 'Usage: %s [--repo OWNER/NAME] [--status|--gui|--list-repos|--delegate PR]\n' "$0" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  if [[ $action == gui ]]; then
+    show_gui
+    return 0
+  fi
+  if [[ $action == list-repos ]]; then
+    list_repositories
+    return 0
+  fi
+
+  if [[ -z $selected_repo ]]; then
+    selected_repo=$(
+      gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null
+    ) || {
+      printf 'Use --repo OWNER/NAME outside a local GitHub checkout.\n' >&2
+      return 2
+    }
+  fi
+  configure_repo "$selected_repo"
+
+  if [[ $action == status ]]; then
+    show_status
+    return $?
+  fi
+  if [[ $action == delegate ]]; then
+    delegate_pr_now "$delegate_pr"
+    return $?
+  fi
+
+  if ! claim_monitor; then
+    printf 'A CodeRabbit queue monitor is already running for %s.\n' "$repo" >&2
+    return 1
+  fi
+  trap 'rm -f "$monitor_pid_file"' EXIT
+
+while true; do
+  state=$(monitor_snapshot)
+  route_all_unresolved "$state"
+  load_stale_rows "$state"
+
+  if (( ${#stale[@]} == 0 )); then
+    if wait_on_empty_queue; then
+      continue
+    fi
+    exit 0
+  fi
+  empty_announced=0
+
+  expiry=$(latest_expiry "$state")
+  remember_shared_expiry "$expiry"
+  quota_expiry=$(shared_expiry)
+  (( quota_expiry > expiry )) && expiry=$quota_expiry
+  wait_until "$expiry"
+
+  state=$(monitor_snapshot)
+  load_stale_rows "$state"
+  if (( ${#stale[@]} == 0 )); then
+    if wait_on_empty_queue; then
+      continue
+    fi
+    exit 0
+  fi
+  empty_announced=0
+
+  current_expiry=$(latest_expiry "$state")
+  now=$(date -u +%s)
+  if (( current_expiry > now )); then
+    continue
+  fi
+
+  claim_dispatch
+
+  state=$(monitor_snapshot)
+  load_stale_rows "$state"
+  if (( ${#stale[@]} == 0 )); then
+    release_dispatch
+    continue
+  fi
+
+  current_expiry=$(latest_expiry "$state")
+  quota_expiry=$(shared_expiry)
+  (( quota_expiry > current_expiry )) && current_expiry=$quota_expiry
+  now=$(date -u +%s)
+  if (( current_expiry > now )); then
+    release_dispatch
+    wait_until "$current_expiry"
+    continue
+  fi
+
+  IFS=$'\t' read -r quota_pr _updated_at _branch_name _head_sha quota_title _limit_at \
+    <<<"${stale[0]}"
+  if ! query_quota "$quota_pr" "$quota_title"; then
+    release_dispatch
+    sleep "$quota_retry_delay"
+    continue
+  fi
+
+  if (( quota_remaining == 0 )); then
+    now=$(date -u +%s)
+    release_dispatch
+    if (( quota_expiry > now )); then
+      remember_shared_expiry "$quota_expiry"
+      wait_until "$quota_expiry"
+      continue
+    fi
+    printf 'CodeRabbit reported no available reviews without a refill time; stopping safely.\n' >&2
+    desktop_notify \
+      'CodeRabbit queue stopped' \
+      "PR #$quota_pr — $quota_title"$'\n''No reviews or refill time were reported.' \
+      'critical'
+    exit 1
+  fi
+
+  row=${stale[0]}
+  IFS=$'\t' read -r pr _updated_at branch_name head_sha title _limit_at <<<"$row"
+
+  if ! request_expiry=$(recent_review_request_expiry "$pr" "$head_sha"); then
+    printf 'Could not verify recent review requests for PR #%s; retrying in two minutes.\n' \
+      "$pr" >&2
+    desktop_notify \
+      'CodeRabbit duplicate check delayed' \
+      "PR #$pr — $title"$'\n''Could not verify recent requests. Retrying in two minutes; no review was triggered.'
+    release_dispatch
+    sleep "$quota_retry_delay"
+    continue
+  fi
+  now=$(date -u +%s)
+  if (( request_expiry > now )); then
+    delay=$((request_expiry - now))
+    wake=$(human_expiry "$request_expiry")
+    printf 'A recent review request already exists for PR #%s; rechecking %s.\n' \
+      "$pr" "$wake"
+    desktop_notify \
+      'CodeRabbit duplicate prevented' \
+      "PR #$pr — $title"$'\n'"A review was already requested recently. Rechecking $wake."
+    release_dispatch
+    sleep "$delay"
+    continue
+  fi
+
+  printf 'Triggering PR #%s: %s\n' "$pr" "$title"
+  desktop_notify \
+    'Triggering CodeRabbit review' \
+    "PR #$pr — $title"
+  triggered_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  record_review_request "$pr" "$head_sha" "$(date -u +%s)"
+  if ! gh api -X POST "repos/$repo/issues/$pr/comments" \
+    -f body='@coderabbitai review' >/dev/null; then
+    printf 'Posting the review request for PR #%s had an uncertain result; retrying safely later.\n' \
+      "$pr" >&2
+    desktop_notify \
+      'CodeRabbit request delayed' \
+      "PR #$pr — $title"$'\n''The post result was uncertain. A duplicate guard remains active.'
+    release_dispatch
+    sleep "$quota_retry_delay"
+    continue
+  fi
+
+  if wait_for_acceptance "$pr" "$triggered_at" "$head_sha" "$title"; then
+    :
+  else
+    acceptance_status=$?
+    if (( acceptance_status == 2 )); then
+      clear_review_request "$pr" "$head_sha"
+      state=$(monitor_snapshot)
+      remember_shared_expiry "$(latest_expiry "$state")"
+      release_dispatch
+      continue
+    fi
+    release_dispatch
+    exit "$acceptance_status"
+  fi
+
+  if wait_for_review_completion "$pr" "$triggered_at" "$head_sha" "$title"; then
+    mark_head_verified "$pr" "$head_sha"
+    clear_review_request "$pr" "$head_sha"
+  else
+    completion_status=$?
+    if (( completion_status == 2 )); then
+      clear_review_request "$pr" "$head_sha"
+      state=$(monitor_snapshot)
+      remember_shared_expiry "$(latest_expiry "$state")"
+      release_dispatch
+      continue
+    fi
+    release_dispatch
+    exit "$completion_status"
+  fi
+  release_dispatch
+
+  route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"
+
+  state=$(monitor_snapshot)
+  route_all_unresolved "$state"
+  load_stale_rows "$state"
+  if (( ${#stale[@]} == 0 )); then
+    continue
+  fi
+done
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
