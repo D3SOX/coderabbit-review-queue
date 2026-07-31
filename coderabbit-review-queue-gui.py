@@ -102,6 +102,12 @@ class QueueWindow(QMainWindow):
             "When disabled, an empty queue stays monitored for future PR updates."
         )
         self.stop_when_empty.toggled.connect(self.stop_when_empty_changed)
+        self.ignore_drafts = QCheckBox("Ignore draft pull requests")
+        self.ignore_drafts.setToolTip(
+            "Per repository. When enabled, draft PRs are left out of the review queue."
+        )
+        self.ignore_drafts.setChecked(True)
+        self.ignore_drafts.toggled.connect(self.ignore_drafts_changed)
 
         self.monitor_label = QLabel()
         self.timer_label = QLabel("Next review: —")
@@ -170,6 +176,7 @@ class QueueWindow(QMainWindow):
         layout.addLayout(repo_row)
         layout.addWidget(self.auto_delegate)
         layout.addWidget(self.stop_when_empty)
+        layout.addWidget(self.ignore_drafts)
         layout.addLayout(header_buttons)
         layout.addWidget(queue_label)
         layout.addWidget(self.queue, 1)
@@ -338,6 +345,7 @@ class QueueWindow(QMainWindow):
         self.repo_combo.blockSignals(False)
         self.load_auto_delegate(selected)
         self.load_stop_when_empty(selected)
+        self.load_ignore_drafts(selected)
         self.update_monitor_state()
         if selected:
             self.refresh()
@@ -360,6 +368,7 @@ class QueueWindow(QMainWindow):
         os.replace(temporary, SELECTED_REPO_FILE)
         self.load_auto_delegate(repo)
         self.load_stop_when_empty(repo)
+        self.load_ignore_drafts(repo)
         self.update_monitor_state()
         self.refresh()
 
@@ -424,6 +433,38 @@ class QueueWindow(QMainWindow):
             if enabled
             else "Monitor will remain active while the queue is empty"
         )
+
+    def ignore_drafts_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-ignore-drafts"
+
+    def load_ignore_drafts(self, repo: str) -> None:
+        self.ignore_drafts.blockSignals(True)
+        self.ignore_drafts.setEnabled(bool(repo))
+        if repo:
+            try:
+                enabled = self.ignore_drafts_file(repo).read_text().strip() != "0"
+            except OSError:
+                enabled = True
+            self.ignore_drafts.setChecked(enabled)
+        else:
+            self.ignore_drafts.setChecked(True)
+        self.ignore_drafts.blockSignals(False)
+
+    def ignore_drafts_changed(self, enabled: bool) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = self.ignore_drafts_file(repo)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text("1\n" if enabled else "0\n")
+        os.replace(temporary, target)
+        self.show_transient_status(
+            "Draft pull requests are ignored"
+            if enabled
+            else "Draft pull requests are included"
+        )
+        self.refresh(manual=True)
 
     def monitor_pid_file(self, repo: str | None = None) -> Path | None:
         repo = repo or self.selected_repo()

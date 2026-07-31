@@ -23,6 +23,7 @@ quota_expiry_file=''
 review_requests_file=''
 auto_delegate_file=''
 stop_when_empty_file=''
+ignore_drafts_file=''
 quota_remaining=-1
 quota_expiry=0
 quota_response_attempts=60
@@ -117,6 +118,7 @@ query($owner: String!, $name: String!) {
       nodes {
         number
         title
+        isDraft
         updatedAt
         headRefOid
         headRefName
@@ -200,10 +202,28 @@ configure_repo() {
   review_requests_file="$state_root/$repo_key-review-requests.tsv"
   auto_delegate_file="$state_root/$repo_key-auto-delegate"
   stop_when_empty_file="$state_root/$repo_key-stop-when-empty"
+  ignore_drafts_file="$state_root/$repo_key-ignore-drafts"
+}
+
+ignore_drafts_enabled() {
+  # Default on: missing file or anything other than 0.
+  if [[ -f $ignore_drafts_file ]]; then
+    [[ $(head -n 1 "$ignore_drafts_file") != 0 ]]
+  else
+    return 0
+  fi
+}
+
+ignore_drafts_json() {
+  if ignore_drafts_enabled; then
+    printf 'true\n'
+  else
+    printf 'false\n'
+  fi
 }
 
 stale_rows() {
-  jq -r '
+  jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" '
     def latest_rate_limit:
       [
         .comments.nodes[]?
@@ -225,6 +245,7 @@ stale_rows() {
             (.title | startswith("[pull] "))
             | not
           )
+        | select($ignoreDrafts == false or (.isDraft | not))
         | select(
             any(
               .reviews.nodes[]?;
@@ -349,9 +370,10 @@ mark_head_verified() {
 }
 
 eligible_rows() {
-  jq -r '
+  jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" '
     .data.repository.pullRequests.nodes[]
     | select((.title | startswith("[pull] ")) | not)
+    | select($ignoreDrafts == false or (.isDraft | not))
     | [.number, .headRefName, .headRefOid, .title]
     | @tsv
   '
