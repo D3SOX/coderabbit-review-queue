@@ -29,8 +29,10 @@ quota_expiry=0
 quota_response_attempts=60
 quota_retry_delay=120
 review_request_window=600
-# CodeRabbit countdowns can lag behind their GitHub comment timestamp.
-review_window_safety=30
+# CodeRabbit minute/hour countdowns are floored (e.g. "20 minutes" can mean
+# almost 21), and comment timestamps can lead the internal refill clock.
+review_window_safety_seconds=10
+review_window_safety_minutes=60
 github_quota_threshold=100
 github_poll_interval=5
 acceptance_response_attempts=36
@@ -379,6 +381,100 @@ eligible_rows() {
   '
 }
 
+# PRs CodeRabbit is currently reviewing, including ones we already triggered
+# that GitHub has not marked completed yet (still listed as queued otherwise).
+active_review_rows() {
+  local state=$1
+  local pr head_sha title now
+  local -A seen=()
+
+  while IFS=$'\t' read -r pr title; do
+    [[ -n ${pr:-} ]] || continue
+    seen[$pr]=1
+    printf '%s\t%s\n' "$pr" "$title"
+  done < <(
+    jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" '
+      .data.repository.pullRequests.nodes[]
+      | select((.title | startswith("[pull] ")) | not)
+      | select($ignoreDrafts == false or (.isDraft | not))
+      | select(
+          any(
+            .comments.nodes[]?;
+            (.author.login // "") == "coderabbitai"
+            and (
+              .body
+              | contains(
+                  "Currently processing new changes in this PR. This may take a few minutes, please wait"
+                )
+            )
+          )
+          or any(
+            .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
+            (.context // "") == "CodeRabbit"
+            and (.creator.login // "") == "coderabbitai"
+            and (
+              (.state // "") == "PENDING"
+              or (
+                (.description // "")
+                | test("review (in progress|processing)"; "i")
+              )
+            )
+          )
+        )
+      | [.number, .title]
+      | @tsv
+    ' <<<"$state"
+  )
+
+  [[ -f $review_requests_file ]] || return 0
+  now=$(date -u +%s)
+  while IFS=$'\t' read -r pr head_sha; do
+    [[ -n ${pr:-} && -n ${head_sha:-} ]] || continue
+    [[ -z ${seen[$pr]:-} ]] || continue
+    title=$(
+      jq -r --argjson pr "$pr" --arg head "$head_sha" '
+        .data.repository.pullRequests.nodes[]
+        | select(.number == ($pr | tonumber) and .headRefOid == $head)
+        | select(
+            any(
+              .reviews.nodes[]?;
+              (.author.login // "") == "coderabbitai"
+              and (.commit.oid // "") == $head
+              and ((.body // "") | gsub("^\\s+|\\s+$"; "") | length) > 0
+            )
+            | not
+          )
+        | select(
+            any(
+              .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
+              (.context // "") == "CodeRabbit"
+              and (.creator.login // "") == "coderabbitai"
+              and (.state // "") == "SUCCESS"
+              and (.description // "") == "Review completed"
+            )
+            | not
+          )
+        | .title
+      ' <<<"$state"
+    )
+    [[ -n $title && $title != null ]] || continue
+    seen[$pr]=1
+    printf '%s\t%s\n' "$pr" "$title"
+  done < <(
+    awk -F '\t' -v now="$now" -v max_age=900 '
+      NF >= 3 {
+        head[$1] = $2
+        ts[$1] = $3
+      }
+      END {
+        for (pr in ts)
+          if (ts[pr] + 0 > 0 && (now - ts[pr]) <= max_age)
+            printf "%s\t%s\n", pr, head[pr]
+      }
+    ' "$review_requests_file"
+  )
+}
+
 timer_rows() {
   jq -r '
     def latest_rate_limit:
@@ -426,11 +522,18 @@ timer_rows() {
   '
 }
 
+review_window_safety_for() {
+  case $1 in
+    minute|minutes|hour|hours) printf '%s\n' "$review_window_safety_minutes" ;;
+    *) printf '%s\n' "$review_window_safety_seconds" ;;
+  esac
+}
+
 latest_expiry() {
   local state=$1
   local latest_update=0
   local selected_expiry=0
-  local _pr _head_sha updated_at amount unit updated_epoch expiry
+  local _pr _head_sha updated_at amount unit updated_epoch expiry safety
 
   while IFS=$'\t' read -r _pr _head_sha updated_at amount unit; do
     [[ -n ${updated_at:-} && ${amount:-} =~ ^[0-9]+$ ]] || continue
@@ -442,7 +545,8 @@ latest_expiry() {
     expiry=$(date -u -d "$updated_at + $amount $unit" +%s)
     if (( updated_epoch > latest_update )); then
       latest_update=$updated_epoch
-      selected_expiry=$((expiry + review_window_safety))
+      safety=$(review_window_safety_for "$unit")
+      selected_expiry=$((expiry + safety))
     fi
   done < <(timer_rows <<<"$state")
 
@@ -689,7 +793,7 @@ query_quota() {
         quota_expiry=$(
           date -u -d "$response_at + $amount $unit" +%s
         )
-        quota_expiry=$((quota_expiry + review_window_safety))
+        quota_expiry=$((quota_expiry + $(review_window_safety_for "$unit")))
       fi
 
       if (( quota_remaining < 0 )); then
@@ -1262,18 +1366,41 @@ codex_task_progress() {
 show_status() {
   local state expiry now row pr branch_name head_sha title count task_progress
   local unresolved=''
+  local -a active=()
+  local -A active_prs=()
 
   status_quota_available || return $?
   state=$(snapshot)
   load_stale_rows "$state"
   printf 'Repository: %s\n' "$repo"
+
+  while IFS=$'\t' read -r pr title; do
+    [[ -n ${pr:-} ]] || continue
+    active+=("$pr"$'\t'"$title")
+    active_prs[$pr]=1
+  done < <(active_review_rows "$state")
+  if (( ${#active[@]} > 0 )); then
+    printf 'Active reviews:\n'
+    for row in "${active[@]}"; do
+      IFS=$'\t' read -r pr title <<<"$row"
+      printf '  #%s %s\n' "$pr" "$title"
+    done
+  fi
+
   if (( ${#stale[@]} == 0 )); then
-    printf 'No eligible open PR has an outstanding CodeRabbit review request.\n'
+    if (( ${#active[@]} == 0 )); then
+      printf 'No eligible open PR has an outstanding CodeRabbit review request.\n'
+    fi
   else
     printf 'Queued PRs:\n'
     for row in "${stale[@]}"; do
       IFS=$'\t' read -r pr _updated_at _branch_name _head_sha title _limit_at <<<"$row"
-      printf '  #%s %s\n' "$pr" "$title"
+      # Still listed for ordering, but mark in-flight reviews clearly.
+      if [[ -n ${active_prs[$pr]:-} ]]; then
+        printf '  #%s %s (in progress)\n' "$pr" "$title"
+      else
+        printf '  #%s %s\n' "$pr" "$title"
+      fi
     done
 
     expiry=$(latest_expiry "$state")

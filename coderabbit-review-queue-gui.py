@@ -49,6 +49,7 @@ class QueueWindow(QMainWindow):
         self.resize(920, 620)
         self.next_review_at: QDateTime | None = None
         self.has_queued_reviews = False
+        self.active_reviews: list[tuple[str, str]] = []
         self.status_process = QProcess(self)
         self.status_process.finished.connect(self.status_finished)
         self.status_repo = ""
@@ -646,6 +647,20 @@ class QueueWindow(QMainWindow):
     def update_countdown_display(self) -> None:
         self.setWindowTitle(self.base_window_title)
         repo = self.selected_repo() or self.base_window_title
+        if self.active_reviews:
+            labels = ", ".join(f"#{number}" for number, _title in self.active_reviews)
+            detail = self.active_reviews[0][1]
+            if len(self.active_reviews) == 1:
+                summary = f"Review in progress on #{self.active_reviews[0][0]}"
+            else:
+                summary = f"Reviews in progress ({labels})"
+            self.timer_label.setText(f"Next review: {summary}")
+            self.set_tray_countdown(
+                "…",
+                f"{repo}\n{summary}\n{detail}",
+            )
+            return
+
         if not self.has_queued_reviews:
             self.timer_label.setText("Next review: —")
             self.set_tray_countdown(None, f"{repo}\nNo reviews waiting")
@@ -677,19 +692,27 @@ class QueueWindow(QMainWindow):
 
     def populate_queue(self, status: str) -> None:
         rows: list[tuple[str, str]] = []
+        active: list[tuple[str, str]] = []
         section = ""
         expiry: QDateTime | None = None
         for line in status.splitlines():
-            if line == "Queued PRs:":
+            if line == "Active reviews:":
+                section = "active"
+            elif line == "Queued PRs:":
                 section = "queue"
             elif line.startswith("Unresolved CodeRabbit feedback:"):
                 section = "feedback"
             elif line.startswith("Next outstanding rate limit expires at "):
                 expiry = self.parse_expiry(line)
-            elif section == "queue" and line.startswith("  #"):
+            elif section in {"active", "queue"} and line.startswith("  #"):
                 number, _, title = line.strip().partition(" ")
-                rows.append((number.removeprefix("#"), title))
+                number = number.removeprefix("#")
+                if section == "active":
+                    active.append((number, title))
+                else:
+                    rows.append((number, title))
 
+        self.active_reviews = active
         self.has_queued_reviews = bool(rows)
         self.next_review_at = expiry
         self.update_countdown_display()
