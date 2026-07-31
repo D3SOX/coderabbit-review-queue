@@ -321,10 +321,10 @@ class QueueWindow(QMainWindow):
             selected = SELECTED_REPO_FILE.read_text().strip()
         except OSError:
             selected = ""
-        if selected not in repos and repos:
+        # Keep a remembered or typed OWNER/NAME even when discovery missed it
+        # (e.g. brand-new CodeRabbit install with no PR comments yet).
+        if not selected and repos:
             selected = repos[0]
-        elif not repos:
-            selected = ""
 
         self.repo_combo.blockSignals(True)
         self.repo_combo.clear()

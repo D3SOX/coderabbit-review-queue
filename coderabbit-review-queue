@@ -1280,9 +1280,24 @@ show_status() {
 }
 
 list_repositories() {
-  local org selection candidate
+  local org selection candidate login
   local -A seen=()
   local -a orgs=()
+
+  # Personal repos are not covered by orgs/*/installations. Discover them the
+  # same way as org installs with repository_selection=selected: via PRs that
+  # CodeRabbit has already commented on.
+  login=$(gh api user --jq .login)
+  while IFS= read -r candidate; do
+    [[ -n $candidate && -z ${seen[$candidate]:-} ]] || continue
+    seen[$candidate]=1
+    printf '%s\n' "$candidate"
+  done < <(
+    gh api --paginate -X GET search/issues \
+      -f "q=user:$login is:pr commenter:coderabbitai[bot]" \
+      -f per_page=100 \
+      --jq '.items[].repository_url | split("/")[-2:] | join("/")'
+  )
 
   mapfile -t orgs < <(
     gh api --paginate user/orgs --jq '.[].login'
