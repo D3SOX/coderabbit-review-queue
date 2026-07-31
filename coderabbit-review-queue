@@ -158,6 +158,7 @@ query($owner: String!, $name: String!) {
             author {
               login
             }
+            body
             commit {
               oid
             }
@@ -229,6 +230,8 @@ stale_rows() {
               .reviews.nodes[]?;
               (.author.login // "") == "coderabbitai"
               and (.commit.oid // "") == $pr.headRefOid
+              # Empty-body reviews are resolve/reply events, not a head review.
+              and ((.body // "") | gsub("^\\s+|\\s+$"; "") | length) > 0
             )
             | not
           )
