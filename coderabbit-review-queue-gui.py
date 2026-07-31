@@ -144,16 +144,19 @@ class QueueWindow(QMainWindow):
         header_buttons.addWidget(self.monitor_button)
         header_buttons.addWidget(self.refresh_button)
 
-        queue_label = QLabel("PRs waiting for CodeRabbit review")
+        queue_label = QLabel("CodeRabbit review queue")
         self.queue = QTreeWidget()
-        self.queue.setHeaderLabels(["PR", "Title"])
+        self.queue.setHeaderLabels(["PR", "Title", "Status"])
         self.queue.setRootIsDecorated(False)
         self.queue.setAlternatingRowColors(True)
         self.queue.setSelectionMode(QTreeWidget.SingleSelection)
         self.queue.header().resizeSection(0, 90)
+        self.queue.header().resizeSection(1, 520)
+        self.queue.header().resizeSection(2, 120)
         self.queue.itemDoubleClicked.connect(
             lambda item, _column: self.open_pr_number(item.data(0, Qt.UserRole))
         )
+        self.queue.itemSelectionChanged.connect(self.update_queue_buttons)
 
         task_label = QLabel("PRs with unresolved feedback / Codex task progress")
         self.tasks = QTreeWidget()
@@ -694,7 +697,7 @@ class QueueWindow(QMainWindow):
         self.set_tray_countdown(compact, f"{repo}\nNext review: {detail}")
 
     def populate_queue(self, status: str) -> None:
-        rows: list[tuple[str, str]] = []
+        queued: list[tuple[str, str]] = []
         active: list[tuple[str, str]] = []
         section = ""
         expiry: QDateTime | None = None
@@ -710,25 +713,48 @@ class QueueWindow(QMainWindow):
             elif section in {"active", "queue"} and line.startswith("  #"):
                 number, _, title = line.strip().partition(" ")
                 number = number.removeprefix("#")
+                title = re.sub(r" \(in progress\)$", "", title)
                 if section == "active":
                     active.append((number, title))
                 else:
-                    rows.append((number, title))
+                    queued.append((number, title))
 
         self.active_reviews = active
-        self.has_queued_reviews = bool(rows)
+        self.has_queued_reviews = bool(queued)
         self.next_review_at = expiry
         self.update_countdown_display()
+
+        active_numbers = {number for number, _title in active}
+        display_rows: list[tuple[str, str, str]] = [
+            (number, title, "In progress") for number, title in active
+        ]
+        for number, title in queued:
+            if number in active_numbers:
+                continue
+            display_rows.append((number, title, "Queued"))
+
         self.queue.clear()
-        for number, title in rows:
-            item = QTreeWidgetItem([f"#{number}", title])
+        for number, title, review_status in display_rows:
+            item = QTreeWidgetItem([f"#{number}", title, review_status])
             item.setData(0, Qt.UserRole, number)
+            item.setData(0, Qt.UserRole + 1, review_status)
             self.queue.addTopLevelItem(item)
-        enabled = bool(rows)
-        for button in (self.up_button, self.down_button):
-            button.setEnabled(enabled)
-        if rows:
+        if display_rows:
             self.queue.setCurrentItem(self.queue.topLevelItem(0))
+        self.update_queue_buttons()
+
+    def update_queue_buttons(self) -> None:
+        item = self.queue.currentItem()
+        row = self.selected_row()
+        movable = (
+            item is not None
+            and item.data(0, Qt.UserRole + 1) != "In progress"
+            and self.queue.topLevelItemCount() > 1
+        )
+        self.up_button.setEnabled(movable and row > 0)
+        self.down_button.setEnabled(
+            movable and 0 <= row < self.queue.topLevelItemCount() - 1
+        )
 
     def populate_tasks(self, status: str) -> None:
         rows: list[tuple[str, str, str]] = []
@@ -784,15 +810,27 @@ class QueueWindow(QMainWindow):
         target = row + offset
         if row < 0 or target < 0 or target >= self.queue.topLevelItemCount():
             return
+        item = self.queue.topLevelItem(row)
+        other = self.queue.topLevelItem(target)
+        if (
+            item is None
+            or other is None
+            or item.data(0, Qt.UserRole + 1) == "In progress"
+            or other.data(0, Qt.UserRole + 1) == "In progress"
+        ):
+            return
         item = self.queue.takeTopLevelItem(row)
         self.queue.insertTopLevelItem(target, item)
         self.queue.setCurrentItem(item)
         self.save_order()
+        self.update_queue_buttons()
 
     def save_order(self) -> None:
         numbers = [
             self.queue.topLevelItem(index).data(0, Qt.UserRole)
             for index in range(self.queue.topLevelItemCount())
+            if self.queue.topLevelItem(index).data(0, Qt.UserRole + 1)
+            != "In progress"
         ]
         repo = self.selected_repo()
         if not repo:

@@ -381,8 +381,8 @@ eligible_rows() {
   '
 }
 
-# PRs CodeRabbit is currently reviewing, including ones we already triggered
-# that GitHub has not marked completed yet (still listed as queued otherwise).
+# PRs CodeRabbit is currently reviewing. Rate-limited PRs are never active,
+# even if we still have a local outstanding @coderabbitai review request.
 active_review_rows() {
   local state=$1
   local pr head_sha title now
@@ -394,33 +394,50 @@ active_review_rows() {
     printf '%s\t%s\n' "$pr" "$title"
   done < <(
     jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" '
+      def is_rate_limited:
+        any(
+          .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
+          (.context // "") == "CodeRabbit"
+          and (.creator.login // "") == "coderabbitai"
+          and (.description // "") == "Review rate limited"
+        )
+        or any(
+          .comments.nodes[]?;
+          (.author.login // "") == "coderabbitai"
+          and (.body | contains("rate limited by coderabbit.ai"))
+          and (
+            (.body | test("Next review available in|More reviews will be available in"; "i"))
+          )
+        );
+
+      def is_reviewing:
+        any(
+          .comments.nodes[]?;
+          (.author.login // "") == "coderabbitai"
+          and (
+            .body
+            | contains(
+                "Currently processing new changes in this PR. This may take a few minutes, please wait"
+              )
+          )
+        )
+        or any(
+          .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
+          (.context // "") == "CodeRabbit"
+          and (.creator.login // "") == "coderabbitai"
+          and (
+            (.state // "") == "PENDING"
+            or (
+              (.description // "")
+              | test("review (in progress|processing)"; "i")
+            )
+          )
+        );
+
       .data.repository.pullRequests.nodes[]
       | select((.title | startswith("[pull] ")) | not)
       | select($ignoreDrafts == false or (.isDraft | not))
-      | select(
-          any(
-            .comments.nodes[]?;
-            (.author.login // "") == "coderabbitai"
-            and (
-              .body
-              | contains(
-                  "Currently processing new changes in this PR. This may take a few minutes, please wait"
-                )
-            )
-          )
-          or any(
-            .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
-            (.context // "") == "CodeRabbit"
-            and (.creator.login // "") == "coderabbitai"
-            and (
-              (.state // "") == "PENDING"
-              or (
-                (.description // "")
-                | test("review (in progress|processing)"; "i")
-              )
-            )
-          )
-        )
+      | select(is_reviewing and (is_rate_limited | not))
       | [.number, .title]
       | @tsv
     ' <<<"$state"
@@ -433,8 +450,25 @@ active_review_rows() {
     [[ -z ${seen[$pr]:-} ]] || continue
     title=$(
       jq -r --argjson pr "$pr" --arg head "$head_sha" '
+        def is_rate_limited:
+          any(
+            .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
+            (.context // "") == "CodeRabbit"
+            and (.creator.login // "") == "coderabbitai"
+            and (.description // "") == "Review rate limited"
+          )
+          or any(
+            .comments.nodes[]?;
+            (.author.login // "") == "coderabbitai"
+            and (.body | contains("rate limited by coderabbit.ai"))
+            and (
+              (.body | test("Next review available in|More reviews will be available in"; "i"))
+            )
+          );
+
         .data.repository.pullRequests.nodes[]
         | select(.number == ($pr | tonumber) and .headRefOid == $head)
+        | select(is_rate_limited | not)
         | select(
             any(
               .reviews.nodes[]?;
@@ -1526,7 +1560,6 @@ delegate_pr_now() {
   return 1
 }
 
-
 ensure_fdflags() {
   if type -t fdflags >/dev/null 2>&1; then
     return 0
@@ -1604,7 +1637,7 @@ cleanup_monitor() {
   pkill -P $$ >/dev/null 2>&1 || true
 }
 
-monitor_snapshot()monitor_snapshot() {
+monitor_snapshot() {
   local data
   local warned=0
 
