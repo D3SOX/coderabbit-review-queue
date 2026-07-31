@@ -65,8 +65,18 @@ class QueueWindow(QMainWindow):
         self.delegate_pr = ""
         self.starting_monitors: set[str] = set()
 
+        title_icon = QLabel()
+        title_icon.setPixmap(
+            QIcon.fromTheme("system-software-update").pixmap(32, 32)
+        )
         title = QLabel("CodeRabbit Review Queue")
         title.setObjectName("title")
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        title_row.setContentsMargins(0, 0, 0, 6)
+        title_row.addWidget(title_icon, 0, Qt.AlignVCenter)
+        title_row.addWidget(title, 1, Qt.AlignVCenter)
+
         repo_label = QLabel("Repository")
         self.repo_combo = QComboBox()
         self.repo_combo.setEditable(True)
@@ -80,7 +90,10 @@ class QueueWindow(QMainWindow):
         self.repo_combo.lineEdit().editingFinished.connect(
             lambda: self.repo_changed(self.selected_repo())
         )
-        self.repo_refresh_button = QPushButton("Refresh repositories")
+        self.repo_refresh_button = QPushButton(
+            QIcon.fromTheme("folder-sync"),
+            "Refresh repositories",
+        )
         self.repo_refresh_button.clicked.connect(self.load_repos)
 
         repo_row = QHBoxLayout()
@@ -112,19 +125,22 @@ class QueueWindow(QMainWindow):
         self.monitor_label = QLabel()
         self.timer_label = QLabel("Next review: —")
 
-        self.start_button = QPushButton("Start monitor")
-        self.stop_button = QPushButton("Stop monitor")
-        self.refresh_button = QPushButton("Refresh")
-        self.start_button.clicked.connect(self.start_monitor)
-        self.stop_button.clicked.connect(self.stop_monitor)
+        self.monitor_button = QPushButton(
+            QIcon.fromTheme("media-playback-start"),
+            "Start monitor",
+        )
+        self.refresh_button = QPushButton(
+            QIcon.fromTheme("view-refresh"),
+            "Refresh",
+        )
+        self.monitor_button.clicked.connect(self.toggle_monitor)
         self.refresh_button.clicked.connect(lambda: self.refresh(manual=True))
 
         header_buttons = QHBoxLayout()
         header_buttons.addWidget(self.monitor_label)
         header_buttons.addWidget(self.timer_label)
         header_buttons.addStretch()
-        header_buttons.addWidget(self.start_button)
-        header_buttons.addWidget(self.stop_button)
+        header_buttons.addWidget(self.monitor_button)
         header_buttons.addWidget(self.refresh_button)
 
         queue_label = QLabel("PRs waiting for CodeRabbit review")
@@ -154,8 +170,8 @@ class QueueWindow(QMainWindow):
         )
         self.tasks.itemSelectionChanged.connect(self.update_delegate_button)
 
-        self.up_button = QPushButton("Move up")
-        self.down_button = QPushButton("Move down")
+        self.up_button = QPushButton(QIcon.fromTheme("go-up"), "Move up")
+        self.down_button = QPushButton(QIcon.fromTheme("go-down"), "Move down")
         self.up_button.clicked.connect(lambda: self.move_selected(-1))
         self.down_button.clicked.connect(lambda: self.move_selected(1))
 
@@ -164,7 +180,10 @@ class QueueWindow(QMainWindow):
         queue_buttons.addWidget(self.up_button)
         queue_buttons.addWidget(self.down_button)
 
-        self.delegate_button = QPushButton("Delegate selected to Codex")
+        self.delegate_button = QPushButton(
+            QIcon.fromTheme("system-run"),
+            "Delegate selected to Codex",
+        )
         self.delegate_button.setEnabled(False)
         self.delegate_button.clicked.connect(self.delegate_selected)
         task_buttons = QHBoxLayout()
@@ -172,7 +191,7 @@ class QueueWindow(QMainWindow):
         task_buttons.addWidget(self.delegate_button)
 
         layout = QVBoxLayout()
-        layout.addWidget(title)
+        layout.addLayout(title_row)
         layout.addLayout(repo_row)
         layout.addWidget(self.auto_delegate)
         layout.addWidget(self.stop_when_empty)
@@ -215,7 +234,7 @@ class QueueWindow(QMainWindow):
         self.spinner_timer.timeout.connect(self.advance_spinner)
         self.setStyleSheet(
             """
-            QLabel#title { font-size: 24px; font-weight: 600; margin-bottom: 6px; }
+            QLabel#title { font-size: 24px; font-weight: 600; }
             QTreeWidget { font-size: 14px; }
             QPushButton { min-height: 30px; padding: 0 12px; }
             """
@@ -493,8 +512,14 @@ class QueueWindow(QMainWindow):
         else:
             label = "Monitor: Stopped"
         self.monitor_label.setText(label)
-        self.start_button.setEnabled(not running and not starting)
-        self.stop_button.setEnabled(running)
+        if running:
+            self.monitor_button.setIcon(QIcon.fromTheme("media-playback-stop"))
+            self.monitor_button.setText("Stop monitor")
+            self.monitor_button.setEnabled(True)
+        else:
+            self.monitor_button.setIcon(QIcon.fromTheme("media-playback-start"))
+            self.monitor_button.setText("Start monitor")
+            self.monitor_button.setEnabled(not starting)
 
     def refresh(self, manual: bool = False, retry: bool = False) -> None:
         if self.status_process.state() != QProcess.NotRunning:
@@ -820,6 +845,12 @@ class QueueWindow(QMainWindow):
                 f"PR #{self.delegate_pr}: Codex delegation finished"
             )
         self.refresh()
+
+    def toggle_monitor(self) -> None:
+        if self.monitor_pid() is not None:
+            self.stop_monitor()
+        else:
+            self.start_monitor()
 
     def start_monitor(self) -> None:
         repo = self.selected_repo()
