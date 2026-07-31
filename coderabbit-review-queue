@@ -669,6 +669,17 @@ wait_until() {
   sleep "$delay"
 }
 
+human_time() {
+  local expiry=$1
+
+  # Prefer the locale's 12/24-hour style (%p is empty under 24-hour locales).
+  if [[ -n $(date +%p) ]]; then
+    date -d "@$expiry" +'%-I:%M %p'
+  else
+    date -d "@$expiry" +'%H:%M'
+  fi
+}
+
 human_expiry() {
   local expiry=$1
   local today tomorrow target time
@@ -676,14 +687,14 @@ human_expiry() {
   today=$(date +%F)
   tomorrow=$(date -d tomorrow +%F)
   target=$(date -d "@$expiry" +%F)
-  time=$(date -d "@$expiry" +%H:%M)
+  time=$(human_time "$expiry")
 
   if [[ $target == "$today" ]]; then
     printf 'today at %s' "$time"
   elif [[ $target == "$tomorrow" ]]; then
     printf 'tomorrow at %s' "$time"
   else
-    date -d "@$expiry" '+%a, %d %b at %H:%M'
+    printf '%s at %s' "$(date -d "@$expiry" '+%a, %d %b')" "$time"
   fi
 }
 
@@ -1245,6 +1256,7 @@ route_unresolved_review() {
     exec {routing_lock_fd}>&-
     return 0
   fi
+  set_cloexec "$routing_lock_fd" || true
   if codex_session_running "$session_id"; then
     printf 'Codex task %s for PR #%s is already running; deferring review routing.\n' \
       "$session_id" "$pr"
@@ -1514,15 +1526,70 @@ delegate_pr_now() {
   return 1
 }
 
+
+ensure_fdflags() {
+  if type -t fdflags >/dev/null 2>&1; then
+    return 0
+  fi
+  local candidate
+  for candidate in /usr/lib/bash/fdflags /usr/lib64/bash/fdflags; do
+    if enable -f "$candidate" fdflags 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Keep flock fds out of exec'd children (e.g. sleep). Otherwise a SIGTERM to the
+# monitor shell can leave an orphan child holding the lock with no pid file.
+set_cloexec() {
+  local fd=$1
+  ensure_fdflags && fdflags -s +cloexec "$fd"
+}
+
+monitor_pid_alive() {
+  local pid
+  [[ -f $monitor_pid_file ]] || return 1
+  pid=$(head -n 1 "$monitor_pid_file" 2>/dev/null || true)
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  [[ -e /proc/$pid ]]
+}
+
+clear_stale_monitor_lock() {
+  monitor_pid_alive && return 1
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k "$monitor_lock_file" >/dev/null 2>&1 || true
+  fi
+  rm -f "$monitor_pid_file"
+  return 0
+}
+
 claim_monitor() {
   exec {monitor_lock_fd}>"$monitor_lock_file"
+  if flock -n "$monitor_lock_fd"; then
+    set_cloexec "$monitor_lock_fd" || true
+    printf '%s\n' "$$" >"$monitor_pid_file"
+    return 0
+  fi
+  exec {monitor_lock_fd}>&-
+
+  if monitor_pid_alive; then
+    return 1
+  fi
+
+  printf 'Clearing a stale monitor lock for %s.\n' "$repo" >&2
+  clear_stale_monitor_lock || return 1
+
+  exec {monitor_lock_fd}>"$monitor_lock_file"
   flock -n "$monitor_lock_fd" || return 1
+  set_cloexec "$monitor_lock_fd" || true
   printf '%s\n' "$$" >"$monitor_pid_file"
 }
 
 claim_dispatch() {
   exec {dispatch_lock_fd}>"$dispatch_lock_file"
   flock "$dispatch_lock_fd"
+  set_cloexec "$dispatch_lock_fd" || true
 }
 
 release_dispatch() {
@@ -1531,7 +1598,13 @@ release_dispatch() {
   dispatch_lock_fd=''
 }
 
-monitor_snapshot() {
+cleanup_monitor() {
+  rm -f "$monitor_pid_file"
+  # Pre-cloexec leftovers: stop children that may still hold inherited lock fds.
+  pkill -P $$ >/dev/null 2>&1 || true
+}
+
+monitor_snapshot()monitor_snapshot() {
   local data
   local warned=0
 
@@ -1619,7 +1692,7 @@ main() {
     printf 'A CodeRabbit queue monitor is already running for %s.\n' "$repo" >&2
     return 1
   fi
-  trap 'rm -f "$monitor_pid_file"' EXIT
+  trap cleanup_monitor EXIT
 
 while true; do
   state=$(monitor_snapshot)

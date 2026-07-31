@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, QProcess, QTimer, Qt, QUrl
+from PySide6.QtCore import QDate, QDateTime, QLocale, QProcess, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -577,7 +577,7 @@ class QueueWindow(QMainWindow):
                 self.status_failures = 0
                 self.statusBar().showMessage(
                     f"GitHub {api} quota low ({remaining} remaining); "
-                    f"refreshing at {wake.toString('HH:mm')}"
+                    f"refreshing at {self.format_time(wake)}"
                 )
                 self.status_retry_timer.start(delay * 1000)
                 return
@@ -621,6 +621,9 @@ class QueueWindow(QMainWindow):
             return None
         return expiry.toLocalTime()
 
+    def format_time(self, local: QDateTime) -> str:
+        return QLocale.system().toString(local.time(), QLocale.ShortFormat)
+
     def format_expiry(self, local: QDateTime) -> str:
         today = QDate.currentDate()
         if local.date() == today:
@@ -642,7 +645,7 @@ class QueueWindow(QMainWindow):
             else:
                 hours, minutes = divmod(minutes, 60)
                 remaining = f"in {hours}h {minutes}m"
-        return f"{day} at {local.toString('HH:mm')} ({remaining})"
+        return f"{day} at {self.format_time(local)} ({remaining})"
 
     def update_countdown_display(self) -> None:
         self.setWindowTitle(self.base_window_title)
@@ -940,10 +943,15 @@ class QueueWindow(QMainWindow):
         )
         if answer == QMessageBox.Yes:
             try:
-                os.kill(pid, signal.SIGTERM)
-                self.show_transient_status("Monitor stopped")
-            except ProcessLookupError:
-                pass
+                # Monitors are started in a new session, so kill the whole group
+                # and any waiting sleep children that inherited the lock fd.
+                os.killpg(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            self.show_transient_status("Monitor stopped")
             QTimer.singleShot(500, self.update_monitor_state)
 
 
