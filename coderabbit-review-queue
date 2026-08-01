@@ -1797,12 +1797,12 @@ while true; do
       wait_until "$quota_expiry"
       continue
     fi
-    printf 'CodeRabbit reported no available reviews without a refill time; stopping safely.\n' >&2
+    printf 'CodeRabbit reported no available reviews without a refill time; retrying in two minutes.\n' >&2
     desktop_notify \
-      'CodeRabbit queue stopped' \
-      "PR #$quota_pr — $quota_title"$'\n''No reviews or refill time were reported.' \
-      'critical'
-    exit 1
+      'CodeRabbit queue waiting' \
+      "PR #$quota_pr — $quota_title"$'\n''No refill time was reported. Retrying automatically.'
+    sleep "$quota_retry_delay"
+    continue
   fi
 
   row=${stale[0]}
