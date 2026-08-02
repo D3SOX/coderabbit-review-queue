@@ -329,7 +329,7 @@ stale_rows() {
 
 load_stale_rows() {
   local state=$1
-  local row wanted pr index head_sha completed_key
+  local row wanted pr index head_sha completed_key temporary
   local -a loaded=()
   local -a ordered=()
 
@@ -361,6 +361,15 @@ load_stale_rows() {
     ordered+=("$row")
   done
   stale=("${ordered[@]}")
+
+  if [[ -f $queue_order_file ]]; then
+    temporary=$(mktemp "$queue_order_file.tmp.XXXXXX")
+    for row in "${stale[@]}"; do
+      IFS=$'\t' read -r pr _ <<<"$row"
+      printf '%s\n' "$pr"
+    done >"$temporary"
+    mv -f "$temporary" "$queue_order_file"
+  fi
 }
 
 mark_head_verified() {
@@ -1209,17 +1218,21 @@ wait_on_empty_queue() {
   return 0
 }
 
-codex_session_running() {
+codex_session_state() {
   local session_id=$1
-  local session_file
+  local session_file state
+  local -a session_files=()
 
-  session_file=$(
-    rg --files "$codex_sessions_root" |
-      rg "/rollout-.*-${session_id}\\.jsonl$" |
-      head -n 1
+  mapfile -t session_files < <(
+    rg --files "$codex_sessions_root" 2>/dev/null |
+      rg "/rollout-.*-${session_id}\\.jsonl$" || true
   )
-  [[ -n $session_file ]] || return 1
-  jq -s -e '
+  if (( ${#session_files[@]} != 1 )); then
+    printf 'unknown\n'
+    return 0
+  fi
+  session_file=${session_files[0]}
+  if ! state=$(jq -s -r '
     reduce (
       .[]
       | select(
@@ -1238,8 +1251,15 @@ codex_session_running() {
         del(.[$event.payload.turn_id])
       end
     )
-    | length > 0
-  ' "$session_file" >/dev/null
+    | if length > 0 then "running" else "idle" end
+  ' "$session_file" 2>/dev/null); then
+    printf 'unknown\n'
+    return 0
+  fi
+  case $state in
+    idle | running) printf '%s\n' "$state" ;;
+    *) printf 'unknown\n' ;;
+  esac
 }
 
 route_unresolved_review() {
@@ -1248,7 +1268,8 @@ route_unresolved_review() {
   local head_sha=$3
   local title=$4
   local row thread_id path line outdated
-  local match session_id session_cwd git_common_dir prompt
+  local match session_id session_cwd git_common_dir prompt session_state
+  local resume_status
   local routing_lock_path routing_lock_fd
   local -a new_threads=()
   local -a new_ids=()
@@ -1291,9 +1312,15 @@ route_unresolved_review() {
     return 0
   fi
   set_cloexec "$routing_lock_fd" || true
-  if codex_session_running "$session_id"; then
-    printf 'Codex task %s for PR #%s is already running; deferring review routing.\n' \
-      "$session_id" "$pr"
+  session_state=$(codex_session_state "$session_id")
+  if [[ $session_state != idle ]]; then
+    if [[ $session_state == running ]]; then
+      printf 'Codex task %s for PR #%s is already running; deferring review routing.\n' \
+        "$session_id" "$pr"
+    else
+      printf 'Could not verify that Codex task %s for PR #%s is idle; deferring review routing.\n' \
+        "$session_id" "$pr"
+    fi
     flock -u "$routing_lock_fd"
     exec {routing_lock_fd}>&-
     return 0
@@ -1309,23 +1336,33 @@ route_unresolved_review() {
   )
 
   sleep 1
-  if codex_session_running "$session_id"; then
-    printf 'Codex task %s for PR #%s started while routing; deferring review routing.\n' \
-      "$session_id" "$pr"
+  session_state=$(codex_session_state "$session_id")
+  if [[ $session_state != idle ]]; then
+    if [[ $session_state == running ]]; then
+      printf 'Codex task %s for PR #%s started while routing; deferring review routing.\n' \
+        "$session_id" "$pr"
+    else
+      printf 'Could not verify that Codex task %s for PR #%s remained idle; deferring review routing.\n' \
+        "$session_id" "$pr"
+    fi
     flock -u "$routing_lock_fd"
     exec {routing_lock_fd}>&-
     return 0
   fi
-  for thread_id in "${new_ids[@]}"; do
-    attempted_route_threads["$thread_id"]=1
-  done
-
   printf 'Routing unresolved CodeRabbit review on PR #%s to Codex task %s.\n' \
     "$pr" "$session_id"
   if (
     cd "$session_cwd"
-    codex exec --add-dir "$git_common_dir" resume --all "$session_id" "$prompt"
+    [[ $(codex_session_state "$session_id") == idle ]] || exit 75
+    codex exec \
+      --sandbox workspace-write \
+      -c sandbox_workspace_write.network_access=true \
+      --add-dir "$git_common_dir" \
+      resume --all "$session_id" "$prompt"
   ); then
+    for thread_id in "${new_ids[@]}"; do
+      attempted_route_threads["$thread_id"]=1
+    done
     for thread_id in "${new_ids[@]}"; do
       printf '%s\n' "$thread_id" >>"$routed_threads_file"
     done
@@ -1333,11 +1370,20 @@ route_unresolved_review() {
       'CodeRabbit review routed' \
       "PR #$pr — $title"$'\n'"Sent unresolved feedback to its Codex task."
   else
-    printf 'Codex task resume failed for PR #%s; leaving it eligible for retry.\n' "$pr" >&2
-    desktop_notify \
-      'CodeRabbit routing failed' \
-      "PR #$pr — $title"$'\n'"Could not resume the matching Codex task." \
-      'critical'
+    resume_status=$?
+    if (( resume_status == 75 )); then
+      printf 'Codex task %s for PR #%s was no longer verifiably idle; deferring review routing.\n' \
+        "$session_id" "$pr"
+    else
+      for thread_id in "${new_ids[@]}"; do
+        attempted_route_threads["$thread_id"]=1
+      done
+      printf 'Codex task resume failed for PR #%s; leaving it eligible for retry.\n' "$pr" >&2
+      desktop_notify \
+        'CodeRabbit routing failed' \
+        "PR #$pr — $title"$'\n'"Could not resume the matching Codex task." \
+        'critical'
+    fi
   fi
   flock -u "$routing_lock_fd"
   exec {routing_lock_fd}>&-
@@ -1381,11 +1427,11 @@ codex_task_progress() {
     return 0
   fi
 
-  if codex_session_running "$session_id"; then
-    state='Running'
-  else
-    state='Idle'
-  fi
+  case $(codex_session_state "$session_id") in
+    running) state='Running' ;;
+    idle) state='Idle' ;;
+    *) state='Unknown' ;;
+  esac
   message=$(
     jq -s -r '
       [
