@@ -445,9 +445,9 @@ active_review_rows() {
         or any(
           .comments.nodes[]?;
           (.author.login // "") == "coderabbitai"
-          and (.body | contains("rate limited by coderabbit.ai"))
           and (
-            (.body | test("Next review available in|More reviews will be available in"; "i"))
+            (.body | contains("rate limited by coderabbit.ai"))
+            or (.body | test("More reviews will be available in"; "i"))
           )
         );
 
@@ -501,9 +501,9 @@ active_review_rows() {
           or any(
             .comments.nodes[]?;
             (.author.login // "") == "coderabbitai"
-            and (.body | contains("rate limited by coderabbit.ai"))
             and (
-              (.body | test("Next review available in|More reviews will be available in"; "i"))
+              (.body | contains("rate limited by coderabbit.ai"))
+              or (.body | test("More reviews will be available in"; "i"))
             )
           );
 
@@ -711,7 +711,10 @@ recent_review_request_expiry() {
           $comments[];
           .user.login == "coderabbitai[bot]"
           and .updated_at >= $request.created_at
-          and (.body | contains("rate limited by coderabbit.ai"))
+          and (
+            (.body | contains("rate limited by coderabbit.ai"))
+            or (.body | test("More reviews will be available in"; "i"))
+          )
         ) then
           empty
         else
@@ -931,7 +934,10 @@ wait_for_acceptance() {
             .[];
             .user.login == "coderabbitai[bot]"
             and .updated_at >= $since
-            and (.body | contains("rate limited by coderabbit.ai"))
+            and (
+              (.body | contains("rate limited by coderabbit.ai"))
+              or (.body | test("More reviews will be available in"; "i"))
+            )
           )
           or any(
             $statuses.statuses[];
