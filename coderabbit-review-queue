@@ -37,7 +37,7 @@ review_window_safety_minutes=60
 github_quota_threshold=100
 github_poll_interval=5
 acceptance_response_attempts=36
-completion_response_attempts=120
+completion_delay_notice_attempts=120
 force_delegation=0
 empty_announced=0
 declare -A attempted_route_threads=()
@@ -1000,7 +1000,7 @@ wait_for_review_completion() {
   local title=$4
   local attempt statuses result reviews comments
 
-  for ((attempt = 1; attempt <= completion_response_attempts; attempt++)); do
+  for ((attempt = 1; ; attempt++)); do
     (( attempt % 12 != 1 )) || wait_for_github_quota
     statuses=$(gh api "repos/$repo/commits/$head_sha/status")
     result=$(
@@ -1056,15 +1056,12 @@ wait_for_review_completion() {
       printf 'CodeRabbit rate-limited PR #%s before completion.\n' "$pr"
       return 2
     fi
+    if (( attempt == completion_delay_notice_attempts )); then
+      printf 'CodeRabbit has not finished PR #%s after ten minutes; continuing to wait.\n' \
+        "$pr" >&2
+    fi
     sleep "$github_poll_interval"
   done
-
-  printf 'CodeRabbit did not finish PR #%s within ten minutes; stopping safely.\n' "$pr" >&2
-  desktop_notify \
-    'CodeRabbit queue stopped' \
-    "PR #$pr — $title"$'\n'"CodeRabbit did not finish within ten minutes." \
-    'critical'
-  return 1
 }
 
 unresolved_coderabbit_rows() {
