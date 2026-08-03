@@ -122,6 +122,14 @@ class QueueWindow(QMainWindow):
         )
         self.ignore_drafts.setChecked(True)
         self.ignore_drafts.toggled.connect(self.ignore_drafts_changed)
+        self.notify_sound = QCheckBox(
+            "Play a sound when a new review becomes available"
+        )
+        self.notify_sound.setToolTip(
+            "Per repository. Uses the desktop notification sound when CodeRabbit finishes a review."
+        )
+        self.notify_sound.setChecked(True)
+        self.notify_sound.toggled.connect(self.notify_sound_changed)
 
         self.monitor_label = QLabel()
         self.timer_label = QLabel("Next review: —")
@@ -200,6 +208,7 @@ class QueueWindow(QMainWindow):
         layout.addWidget(self.auto_delegate)
         layout.addWidget(self.stop_when_empty)
         layout.addWidget(self.ignore_drafts)
+        layout.addWidget(self.notify_sound)
         layout.addLayout(header_buttons)
         layout.addWidget(queue_label)
         layout.addWidget(self.queue, 1)
@@ -369,6 +378,7 @@ class QueueWindow(QMainWindow):
         self.load_auto_delegate(selected)
         self.load_stop_when_empty(selected)
         self.load_ignore_drafts(selected)
+        self.load_notify_sound(selected)
         self.update_monitor_state()
         if selected:
             self.refresh()
@@ -392,6 +402,7 @@ class QueueWindow(QMainWindow):
         self.load_auto_delegate(repo)
         self.load_stop_when_empty(repo)
         self.load_ignore_drafts(repo)
+        self.load_notify_sound(repo)
         self.update_monitor_state()
         self.refresh()
 
@@ -488,6 +499,37 @@ class QueueWindow(QMainWindow):
             else "Draft pull requests are included"
         )
         self.refresh(manual=True)
+
+    def notify_sound_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-notify-sound"
+
+    def load_notify_sound(self, repo: str) -> None:
+        self.notify_sound.blockSignals(True)
+        self.notify_sound.setEnabled(bool(repo))
+        if repo:
+            try:
+                enabled = self.notify_sound_file(repo).read_text().strip() != "0"
+            except OSError:
+                enabled = True
+            self.notify_sound.setChecked(enabled)
+        else:
+            self.notify_sound.setChecked(True)
+        self.notify_sound.blockSignals(False)
+
+    def notify_sound_changed(self, enabled: bool) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = self.notify_sound_file(repo)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text("1\n" if enabled else "0\n")
+        os.replace(temporary, target)
+        self.show_transient_status(
+            "Review-available sound enabled"
+            if enabled
+            else "Review-available sound disabled"
+        )
 
     def monitor_pid_file(self, repo: str | None = None) -> Path | None:
         repo = repo or self.selected_repo()
@@ -719,6 +761,20 @@ class QueueWindow(QMainWindow):
                 else:
                     queued.append((number, title))
 
+        repo = self.selected_repo()
+        if repo:
+            try:
+                saved_order = self.queue_order_file(repo).read_text().splitlines()
+            except OSError:
+                saved_order = []
+            queued_by_number = {number: title for number, title in queued}
+            saved_queued = [
+                (number, queued_by_number.pop(number))
+                for number in saved_order
+                if number in queued_by_number
+            ]
+            queued = list(queued_by_number.items()) + saved_queued
+
         self.active_reviews = active
         self.has_queued_reviews = bool(queued)
         self.next_review_at = expiry
@@ -836,11 +892,14 @@ class QueueWindow(QMainWindow):
         if not repo:
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
-        order_file = STATE_ROOT / f"{repo.replace('/', '__')}-order.txt"
+        order_file = self.queue_order_file(repo)
         temporary = order_file.with_suffix(".tmp")
         temporary.write_text("\n".join(numbers) + "\n")
         os.replace(temporary, order_file)
         self.show_transient_status("Queue order saved")
+
+    def queue_order_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-order.txt"
 
     def open_pr_number(self, number: str) -> None:
         repo = self.selected_repo()
