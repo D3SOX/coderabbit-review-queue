@@ -739,6 +739,10 @@ class QueueWindow(QMainWindow):
         self.set_tray_countdown(compact, f"{repo}\nNext review: {detail}")
 
     def populate_queue(self, status: str) -> None:
+        current_item = self.queue.currentItem()
+        selected_number = (
+            current_item.data(0, Qt.UserRole) if current_item is not None else None
+        )
         queued: list[tuple[str, str]] = []
         active: list[tuple[str, str]] = []
         section = ""
@@ -795,7 +799,9 @@ class QueueWindow(QMainWindow):
             item.setData(0, Qt.UserRole, number)
             item.setData(0, Qt.UserRole + 1, review_status)
             self.queue.addTopLevelItem(item)
-        if display_rows:
+            if number == selected_number:
+                self.queue.setCurrentItem(item)
+        if display_rows and self.queue.currentItem() is None:
             self.queue.setCurrentItem(self.queue.topLevelItem(0))
         self.update_queue_buttons()
 
@@ -813,6 +819,10 @@ class QueueWindow(QMainWindow):
         )
 
     def populate_tasks(self, status: str) -> None:
+        current_item = self.tasks.currentItem()
+        selected_number = (
+            current_item.data(0, Qt.UserRole) if current_item is not None else None
+        )
         rows: list[tuple[str, str, str]] = []
         current: tuple[str, str, str] | None = None
         in_feedback = False
@@ -855,6 +865,8 @@ class QueueWindow(QMainWindow):
             item.setData(0, Qt.UserRole + 1, state.startswith("Running"))
             item.setToolTip(4, detail)
             self.tasks.addTopLevelItem(item)
+            if number == selected_number:
+                self.tasks.setCurrentItem(item)
         self.update_delegate_button()
 
     def selected_row(self) -> int:

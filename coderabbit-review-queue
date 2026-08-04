@@ -741,9 +741,13 @@ wait_until() {
   delay=$((expiry - now))
   wake=$(human_expiry "$expiry")
   printf 'Waiting until CodeRabbit expiry %s (%s seconds).\n' "$wake" "$delay"
-  desktop_notify \
-    'CodeRabbit queue waiting' \
-    "Next review window opens $wake."
+  # A wait this short is only the floored-countdown safety margin, not a new
+  # review window worth announcing immediately before the quota recheck.
+  if (( delay > review_window_safety_minutes )); then
+    desktop_notify \
+      'CodeRabbit queue waiting' \
+      "Next review window opens $wake."
+  fi
   sleep "$delay"
 }
 
