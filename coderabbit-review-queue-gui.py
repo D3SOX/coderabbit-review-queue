@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -122,6 +123,19 @@ class QueueWindow(QMainWindow):
         )
         self.ignore_drafts.setChecked(True)
         self.ignore_drafts.toggled.connect(self.ignore_drafts_changed)
+        excluded_label = QLabel("Excluded branches:")
+        self.excluded_branches = QLineEdit()
+        self.excluded_branches.setPlaceholderText(
+            "Comma-separated head branch names, e.g. weblate-translations"
+        )
+        self.excluded_branches.setToolTip(
+            "Per repository. Open PRs whose head branch matches are left out of "
+            "the review queue and unresolved-feedback list."
+        )
+        self.excluded_branches.editingFinished.connect(self.excluded_branches_changed)
+        excluded_row = QHBoxLayout()
+        excluded_row.addWidget(excluded_label)
+        excluded_row.addWidget(self.excluded_branches, 1)
         self.notify_sound = QCheckBox(
             "Play a sound when a new review becomes available"
         )
@@ -208,6 +222,7 @@ class QueueWindow(QMainWindow):
         layout.addWidget(self.auto_delegate)
         layout.addWidget(self.stop_when_empty)
         layout.addWidget(self.ignore_drafts)
+        layout.addLayout(excluded_row)
         layout.addWidget(self.notify_sound)
         layout.addLayout(header_buttons)
         layout.addWidget(queue_label)
@@ -378,6 +393,7 @@ class QueueWindow(QMainWindow):
         self.load_auto_delegate(selected)
         self.load_stop_when_empty(selected)
         self.load_ignore_drafts(selected)
+        self.load_excluded_branches(selected)
         self.load_notify_sound(selected)
         self.update_monitor_state()
         if selected:
@@ -402,6 +418,7 @@ class QueueWindow(QMainWindow):
         self.load_auto_delegate(repo)
         self.load_stop_when_empty(repo)
         self.load_ignore_drafts(repo)
+        self.load_excluded_branches(repo)
         self.load_notify_sound(repo)
         self.update_monitor_state()
         self.refresh()
@@ -498,6 +515,51 @@ class QueueWindow(QMainWindow):
             if enabled
             else "Draft pull requests are included"
         )
+        self.refresh(manual=True)
+
+    def excluded_branches_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-excluded-branches"
+
+    def load_excluded_branches(self, repo: str) -> None:
+        self.excluded_branches.blockSignals(True)
+        self.excluded_branches.setEnabled(bool(repo))
+        text = ""
+        if repo:
+            try:
+                lines = []
+                for line in self.excluded_branches_file(repo).read_text().splitlines():
+                    branch = line.strip()
+                    if branch and not branch.startswith("#"):
+                        lines.append(branch)
+                text = ", ".join(lines)
+            except OSError:
+                text = ""
+        self.excluded_branches.setText(text)
+        self.excluded_branches.blockSignals(False)
+
+    def excluded_branches_changed(self) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        branches = []
+        for part in self.excluded_branches.text().replace("\n", ",").split(","):
+            branch = part.strip()
+            if branch and branch not in branches:
+                branches.append(branch)
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = self.excluded_branches_file(repo)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text("".join(f"{branch}\n" for branch in branches))
+        os.replace(temporary, target)
+        self.excluded_branches.blockSignals(True)
+        self.excluded_branches.setText(", ".join(branches))
+        self.excluded_branches.blockSignals(False)
+        if branches:
+            self.show_transient_status(
+                f"Excluded branches: {', '.join(branches)}"
+            )
+        else:
+            self.show_transient_status("No branches excluded")
         self.refresh(manual=True)
 
     def notify_sound_file(self, repo: str) -> Path:

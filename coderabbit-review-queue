@@ -24,6 +24,7 @@ review_requests_file=''
 auto_delegate_file=''
 stop_when_empty_file=''
 ignore_drafts_file=''
+excluded_branches_file=''
 notify_sound_file=''
 quota_remaining=-1
 quota_expiry=0
@@ -247,6 +248,7 @@ configure_repo() {
   auto_delegate_file="$state_root/$repo_key-auto-delegate"
   stop_when_empty_file="$state_root/$repo_key-stop-when-empty"
   ignore_drafts_file="$state_root/$repo_key-ignore-drafts"
+  excluded_branches_file="$state_root/$repo_key-excluded-branches"
   notify_sound_file="$state_root/$repo_key-notify-sound"
 }
 
@@ -267,8 +269,22 @@ ignore_drafts_json() {
   fi
 }
 
+# One branch name per line; blank lines and # comments are ignored.
+excluded_branches_json() {
+  if [[ -f $excluded_branches_file ]]; then
+    jq -R -s '
+      split("\n")
+      | map(gsub("^\\s+|\\s+$"; ""))
+      | map(select(length > 0 and (startswith("#") | not)))
+    ' <"$excluded_branches_file"
+  else
+    printf '[]\n'
+  fi
+}
+
 stale_rows() {
-  jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" '
+  jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" \
+    --argjson excludedBranches "$(excluded_branches_json)" '
     def latest_rate_limit:
       [
         .comments.nodes[]?
@@ -291,6 +307,7 @@ stale_rows() {
             | not
           )
         | select($ignoreDrafts == false or (.isDraft | not))
+        | select(.headRefName as $b | ($excludedBranches | index($b) | not))
         | select(
             any(
               .reviews.nodes[]?;
@@ -413,10 +430,12 @@ mark_head_verified() {
 }
 
 eligible_rows() {
-  jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" '
+  jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" \
+    --argjson excludedBranches "$(excluded_branches_json)" '
     .data.repository.pullRequests.nodes[]
     | select((.title | startswith("[pull] ")) | not)
     | select($ignoreDrafts == false or (.isDraft | not))
+    | select(.headRefName as $b | ($excludedBranches | index($b) | not))
     | [.number, .headRefName, .headRefOid, .title]
     | @tsv
   '
@@ -434,7 +453,8 @@ active_review_rows() {
     seen[$pr]=1
     printf '%s\t%s\n' "$pr" "$title"
   done < <(
-    jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" '
+    jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" \
+      --argjson excludedBranches "$(excluded_branches_json)" '
       def is_rate_limited:
         any(
           .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
@@ -478,6 +498,7 @@ active_review_rows() {
       .data.repository.pullRequests.nodes[]
       | select((.title | startswith("[pull] ")) | not)
       | select($ignoreDrafts == false or (.isDraft | not))
+      | select(.headRefName as $b | ($excludedBranches | index($b) | not))
       | select(is_reviewing and (is_rate_limited | not))
       | [.number, .title]
       | @tsv
