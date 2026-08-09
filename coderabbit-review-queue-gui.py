@@ -47,7 +47,7 @@ class QueueWindow(QMainWindow):
         super().__init__()
         self.base_window_title = "CodeRabbit Review Queue"
         self.setWindowTitle(self.base_window_title)
-        self.resize(920, 620)
+        self.resize(1100, 820)
         self.next_review_at: QDateTime | None = None
         self.has_queued_reviews = False
         self.active_reviews: list[tuple[str, str]] = []
@@ -144,6 +144,12 @@ class QueueWindow(QMainWindow):
         )
         self.notify_sound.setChecked(True)
         self.notify_sound.toggled.connect(self.notify_sound_changed)
+        self.new_items_at_top = QCheckBox("Add new queue items at the top")
+        self.new_items_at_top.setToolTip(
+            "Per repository. When disabled, newly discovered PRs are appended at the bottom."
+        )
+        self.new_items_at_top.setChecked(True)
+        self.new_items_at_top.toggled.connect(self.new_items_at_top_changed)
 
         self.monitor_label = QLabel()
         self.timer_label = QLabel("Next review: —")
@@ -224,6 +230,7 @@ class QueueWindow(QMainWindow):
         layout.addWidget(self.ignore_drafts)
         layout.addLayout(excluded_row)
         layout.addWidget(self.notify_sound)
+        layout.addWidget(self.new_items_at_top)
         layout.addLayout(header_buttons)
         layout.addWidget(queue_label)
         layout.addWidget(self.queue, 1)
@@ -395,6 +402,7 @@ class QueueWindow(QMainWindow):
         self.load_ignore_drafts(selected)
         self.load_excluded_branches(selected)
         self.load_notify_sound(selected)
+        self.load_new_items_at_top(selected)
         self.update_monitor_state()
         if selected:
             self.refresh()
@@ -420,6 +428,7 @@ class QueueWindow(QMainWindow):
         self.load_ignore_drafts(repo)
         self.load_excluded_branches(repo)
         self.load_notify_sound(repo)
+        self.load_new_items_at_top(repo)
         self.update_monitor_state()
         self.refresh()
 
@@ -592,6 +601,38 @@ class QueueWindow(QMainWindow):
             if enabled
             else "Review-available sound disabled"
         )
+
+    def new_items_at_top_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-new-items-at-top"
+
+    def load_new_items_at_top(self, repo: str) -> None:
+        self.new_items_at_top.blockSignals(True)
+        self.new_items_at_top.setEnabled(bool(repo))
+        if repo:
+            try:
+                enabled = self.new_items_at_top_file(repo).read_text().strip() != "0"
+            except OSError:
+                enabled = True
+            self.new_items_at_top.setChecked(enabled)
+        else:
+            self.new_items_at_top.setChecked(True)
+        self.new_items_at_top.blockSignals(False)
+
+    def new_items_at_top_changed(self, enabled: bool) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = self.new_items_at_top_file(repo)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text("1\n" if enabled else "0\n")
+        os.replace(temporary, target)
+        self.show_transient_status(
+            "New queue items are added at the top"
+            if enabled
+            else "New queue items are added at the bottom"
+        )
+        self.refresh(manual=True)
 
     def monitor_pid_file(self, repo: str | None = None) -> Path | None:
         repo = repo or self.selected_repo()
@@ -839,7 +880,11 @@ class QueueWindow(QMainWindow):
                 for number in saved_order
                 if number in queued_by_number
             ]
-            queued = list(queued_by_number.items()) + saved_queued
+            new_queued = list(queued_by_number.items())
+            if self.new_items_at_top.isChecked():
+                queued = new_queued + saved_queued
+            else:
+                queued = saved_queued + new_queued
 
         self.active_reviews = active
         self.has_queued_reviews = bool(queued)

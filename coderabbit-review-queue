@@ -26,6 +26,7 @@ stop_when_empty_file=''
 ignore_drafts_file=''
 excluded_branches_file=''
 notify_sound_file=''
+new_items_at_top_file=''
 quota_remaining=-1
 quota_expiry=0
 quota_response_attempts=60
@@ -250,12 +251,22 @@ configure_repo() {
   ignore_drafts_file="$state_root/$repo_key-ignore-drafts"
   excluded_branches_file="$state_root/$repo_key-excluded-branches"
   notify_sound_file="$state_root/$repo_key-notify-sound"
+  new_items_at_top_file="$state_root/$repo_key-new-items-at-top"
 }
 
 ignore_drafts_enabled() {
   # Default on: missing file or anything other than 0.
   if [[ -f $ignore_drafts_file ]]; then
     [[ $(head -n 1 "$ignore_drafts_file") != 0 ]]
+  else
+    return 0
+  fi
+}
+
+new_items_at_top_enabled() {
+  # Default on: missing file or anything other than 0.
+  if [[ -f $new_items_at_top_file ]]; then
+    [[ $(head -n 1 "$new_items_at_top_file") != 0 ]]
   else
     return 0
   fi
@@ -417,8 +428,12 @@ load_stale_rows() {
     done <"$queue_order_file"
   fi
 
-  # Rows absent from the saved order are new and should enter at the top.
-  stale=("${loaded[@]}" "${ordered[@]}")
+  # Rows absent from the saved order are new; insert at top (default) or bottom.
+  if new_items_at_top_enabled; then
+    stale=("${loaded[@]}" "${ordered[@]}")
+  else
+    stale=("${ordered[@]}" "${loaded[@]}")
+  fi
 }
 
 mark_head_verified() {

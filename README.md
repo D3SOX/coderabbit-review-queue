@@ -26,6 +26,7 @@ a safeguard for automated operation.
 - Retries transient GitHub failures and pauses near GitHub API quota limits.
 - Provides desktop notifications and a Plasma-compatible system-tray timer.
 - Optionally plays a sound (on by default) when a finished review becomes available.
+- Can place newly discovered PRs at the top (default) or bottom of the queue.
 
 ## Requirements
 
