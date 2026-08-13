@@ -770,7 +770,7 @@ recent_review_request_expiry() {
 
 wait_until() {
   local expiry=$1
-  local now delay wake
+  local now delay wake announced=0
 
   now=$(date -u +%s)
   (( expiry > now )) || return 0
@@ -780,11 +780,16 @@ wait_until() {
   # A wait this short is only the floored-countdown safety margin, not a new
   # review window worth announcing immediately before the quota recheck.
   if (( delay > review_window_safety_minutes )); then
+    announced=1
     desktop_notify \
       'CodeRabbit queue waiting' \
       "Next review window opens $wake."
   fi
   sleep "$delay"
+  # Ding when a real rate-limit wait ends (slot opens), not when a review finishes.
+  if (( announced == 1 )) && notify_sound_enabled; then
+    play_notification_sound || true
+  fi
 }
 
 human_time() {
@@ -1091,10 +1096,8 @@ wait_for_review_completion() {
         ' <<<"$reviews" >/dev/null; then
         printf 'CodeRabbit finished PR #%s.\n' "$pr"
         desktop_notify \
-          'CodeRabbit review available' \
-          "PR #$pr — $title"$'\n'"Review finished and is ready to inspect." \
-          'normal' \
-          1
+          'CodeRabbit review finished' \
+          "PR #$pr — $title"$'\n'"Review finished and is ready to inspect."
         return 0
       fi
     fi
@@ -1815,7 +1818,7 @@ main() {
         selected_repo=$2
         shift 2
         ;;
-      --status|--gui|--list-repos)
+      --status|--gui|--list-repos|--play-notify-sound)
         action=${1#--}
         shift
         ;;
@@ -1829,7 +1832,7 @@ main() {
         shift 2
         ;;
       *)
-        printf 'Usage: %s [--repo OWNER/NAME] [--status|--gui|--list-repos|--delegate PR]\n' "$0" >&2
+        printf 'Usage: %s [--repo OWNER/NAME] [--status|--gui|--list-repos|--play-notify-sound|--delegate PR]\n' "$0" >&2
         return 2
         ;;
     esac
@@ -1854,6 +1857,12 @@ main() {
   fi
   configure_repo "$selected_repo"
 
+  if [[ $action == play-notify-sound ]]; then
+    if notify_sound_enabled; then
+      play_notification_sound || true
+    fi
+    return 0
+  fi
   if [[ $action == status ]]; then
     show_status
     return $?

@@ -25,7 +25,8 @@ a safeguard for automated operation.
 - Can optionally delegate unresolved feedback to a matching idle Codex task.
 - Retries transient GitHub failures and pauses near GitHub API quota limits.
 - Provides desktop notifications and a Plasma-compatible system-tray timer.
-- Optionally plays a sound (on by default) when a finished review becomes available.
+- Optionally plays a sound (on by default) when a rate-limit window opens and a
+  new review can start.
 - Can place newly discovered PRs at the top (default) or bottom of the queue.
 
 ## Requirements

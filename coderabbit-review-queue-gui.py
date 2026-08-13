@@ -66,6 +66,9 @@ class QueueWindow(QMainWindow):
         self.delegate_repo = ""
         self.delegate_pr = ""
         self.starting_monitors: set[str] = set()
+        # True after we have shown a future rate-limit countdown; used so the
+        # availability ding fires on transition, not on startup already-open.
+        self.waiting_for_review_window = False
 
         title_icon = QLabel()
         title_icon.setPixmap(
@@ -140,7 +143,8 @@ class QueueWindow(QMainWindow):
             "Play a sound when a new review becomes available"
         )
         self.notify_sound.setToolTip(
-            "Per repository. Uses the desktop notification sound when CodeRabbit finishes a review."
+            "Per repository. Plays when the CodeRabbit rate-limit window opens "
+            "(a new review can start), not when a review finishes."
         )
         self.notify_sound.setChecked(True)
         self.notify_sound.toggled.connect(self.notify_sound_changed)
@@ -429,6 +433,7 @@ class QueueWindow(QMainWindow):
         self.load_excluded_branches(repo)
         self.load_notify_sound(repo)
         self.load_new_items_at_top(repo)
+        self.waiting_for_review_window = False
         self.update_monitor_state()
         self.refresh()
 
@@ -795,6 +800,23 @@ class QueueWindow(QMainWindow):
                 remaining = f"in {hours}h {minutes}m"
         return f"{day} at {self.format_time(local)} ({remaining})"
 
+    def play_availability_sound(self) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        QProcess.startDetached(SCRIPT, ["--repo", repo, "--play-notify-sound"])
+
+    def maybe_play_availability_sound(self) -> None:
+        if not self.waiting_for_review_window:
+            return
+        self.waiting_for_review_window = False
+        if not self.notify_sound.isChecked():
+            return
+        # Monitor plays the ding after its own wait_until; avoid a double sound.
+        if self.monitor_pid() is not None:
+            return
+        self.play_availability_sound()
+
     def update_countdown_display(self) -> None:
         self.setWindowTitle(self.base_window_title)
         repo = self.selected_repo() or self.base_window_title
@@ -810,24 +832,29 @@ class QueueWindow(QMainWindow):
                 "…",
                 f"{repo}\n{summary}\n{detail}",
             )
+            self.waiting_for_review_window = False
             return
 
         if not self.has_queued_reviews:
             self.timer_label.setText("Next review: —")
             self.set_tray_countdown(None, f"{repo}\nNo reviews waiting")
+            self.waiting_for_review_window = False
             return
 
         if self.next_review_at is None:
             self.timer_label.setText("Next review: Available now")
             self.set_tray_countdown("✓", f"{repo}\nReview available now")
+            self.maybe_play_availability_sound()
             return
 
         seconds = QDateTime.currentDateTime().secsTo(self.next_review_at)
         if seconds <= 0:
             self.timer_label.setText("Next review: Available now")
             self.set_tray_countdown("✓", f"{repo}\nReview available now")
+            self.maybe_play_availability_sound()
             return
 
+        self.waiting_for_review_window = True
         if seconds < 60:
             compact = f"{seconds}s"
         else:
