@@ -106,13 +106,20 @@ class QueueWindow(QMainWindow):
         repo_row.addWidget(self.repo_combo, 1)
         repo_row.addWidget(self.repo_refresh_button)
 
-        self.auto_delegate = QCheckBox(
-            "Automatically delegate unresolved CodeRabbit feedback to Codex"
-        )
+        self.auto_delegate_label = QLabel("Auto-delegate unresolved feedback:")
+        self.auto_delegate = QComboBox()
+        self.auto_delegate.addItem("Disabled", "disabled")
+        self.auto_delegate.addItem("Auto (Codex + Claude)", "auto")
+        self.auto_delegate.addItem("Codex only", "codex")
+        self.auto_delegate.addItem("Claude only", "claude")
         self.auto_delegate.setToolTip(
-            "Per repository. A running matching Codex task is never started again."
+            "Per repository. A running matching task is never started again. "
+            "Auto prefers an idle Codex match, then Claude."
         )
-        self.auto_delegate.toggled.connect(self.auto_delegate_changed)
+        self.auto_delegate.currentIndexChanged.connect(self.auto_delegate_changed)
+        auto_delegate_row = QHBoxLayout()
+        auto_delegate_row.addWidget(self.auto_delegate_label)
+        auto_delegate_row.addWidget(self.auto_delegate, 1)
         self.stop_when_empty = QCheckBox(
             "Stop monitor after the last queued review finishes"
         )
@@ -190,10 +197,10 @@ class QueueWindow(QMainWindow):
         )
         self.queue.itemSelectionChanged.connect(self.update_queue_buttons)
 
-        task_label = QLabel("PRs with unresolved feedback / Codex task progress")
+        task_label = QLabel("PRs with unresolved feedback / agent task progress")
         self.tasks = QTreeWidget()
         self.tasks.setHeaderLabels(
-            ["PR", "Title", "Feedback", "Codex status", "Latest progress"]
+            ["PR", "Title", "Feedback", "Agent status", "Latest progress"]
         )
         self.tasks.setRootIsDecorated(False)
         self.tasks.setAlternatingRowColors(True)
@@ -218,7 +225,7 @@ class QueueWindow(QMainWindow):
 
         self.delegate_button = QPushButton(
             QIcon.fromTheme("system-run"),
-            "Delegate selected to Codex",
+            "Delegate selected",
         )
         self.delegate_button.setEnabled(False)
         self.delegate_button.clicked.connect(self.delegate_selected)
@@ -229,7 +236,7 @@ class QueueWindow(QMainWindow):
         layout = QVBoxLayout()
         layout.addLayout(title_row)
         layout.addLayout(repo_row)
-        layout.addWidget(self.auto_delegate)
+        layout.addLayout(auto_delegate_row)
         layout.addWidget(self.stop_when_empty)
         layout.addWidget(self.ignore_drafts)
         layout.addLayout(excluded_row)
@@ -442,31 +449,48 @@ class QueueWindow(QMainWindow):
 
     def load_auto_delegate(self, repo: str) -> None:
         self.auto_delegate.blockSignals(True)
-        self.auto_delegate.setEnabled(bool(repo))
+        enabled = bool(repo)
+        self.auto_delegate_label.setEnabled(enabled)
+        self.auto_delegate.setEnabled(enabled)
+        mode = "disabled"
         if repo:
             try:
-                enabled = self.auto_delegate_file(repo).read_text().strip() != "0"
+                raw = self.auto_delegate_file(repo).read_text().strip()
             except OSError:
-                enabled = False
-            self.auto_delegate.setChecked(enabled)
-        else:
-            self.auto_delegate.setChecked(False)
+                raw = "disabled"
+            if raw in {"0", "disabled", ""}:
+                mode = "disabled"
+            elif raw in {"1", "codex"}:
+                mode = "codex"
+            elif raw in {"auto", "both"}:
+                mode = "auto"
+            elif raw == "claude":
+                mode = "claude"
+            else:
+                mode = "disabled"
+        index = self.auto_delegate.findData(mode)
+        self.auto_delegate.setCurrentIndex(index if index >= 0 else 0)
         self.auto_delegate.blockSignals(False)
 
-    def auto_delegate_changed(self, enabled: bool) -> None:
+    def auto_delegate_changed(self, _index: int = 0) -> None:
         repo = self.selected_repo()
         if not repo:
             return
+        mode = self.auto_delegate.currentData()
+        if not isinstance(mode, str):
+            mode = "disabled"
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.auto_delegate_file(repo)
         temporary = target.with_suffix(".tmp")
-        temporary.write_text("1\n" if enabled else "0\n")
+        temporary.write_text(f"{mode}\n")
         os.replace(temporary, target)
-        self.show_transient_status(
-            "Automatic Codex delegation enabled"
-            if enabled
-            else "Automatic Codex delegation disabled"
-        )
+        labels = {
+            "disabled": "Automatic delegation disabled",
+            "auto": "Automatic delegation set to Auto (Codex + Claude)",
+            "codex": "Automatic delegation set to Codex only",
+            "claude": "Automatic delegation set to Claude only",
+        }
+        self.show_transient_status(labels.get(mode, "Automatic delegation updated"))
 
     def stop_when_empty_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-stop-when-empty"
@@ -979,8 +1003,14 @@ class QueueWindow(QMainWindow):
                     feedback.group(3),
                 )
                 continue
-            if current and line.startswith("    Codex task: "):
-                rows.append((*current, line.removeprefix("    Codex task: ")))
+            if current and (
+                line.startswith("    Agent task: ")
+                or line.startswith("    Codex task: ")
+            ):
+                progress = line.removeprefix("    Agent task: ").removeprefix(
+                    "    Codex task: "
+                )
+                rows.append((*current, progress))
                 current = None
 
         self.tasks.clear()
@@ -996,7 +1026,7 @@ class QueueWindow(QMainWindow):
                 ]
             )
             item.setData(0, Qt.UserRole, number)
-            item.setData(0, Qt.UserRole + 1, state.startswith("Running"))
+            item.setData(0, Qt.UserRole + 1, "Running" in state.split())
             item.setToolTip(4, detail)
             self.tasks.addTopLevelItem(item)
             if number == selected_number:
@@ -1078,7 +1108,7 @@ class QueueWindow(QMainWindow):
         self.delegate_button.setEnabled(False)
         self.delegate_button.setText("Delegating…")
         self.statusBar().showMessage(
-            f"Delegating PR #{self.delegate_pr} feedback to Codex…"
+            f"Delegating PR #{self.delegate_pr} feedback…"
         )
         self.delegate_process.setProgram(SCRIPT)
         self.delegate_process.setArguments(
@@ -1095,23 +1125,23 @@ class QueueWindow(QMainWindow):
     def delegate_finished(self, exit_code: int) -> None:
         stdout = bytes(self.delegate_process.readAllStandardOutput()).decode()
         stderr = bytes(self.delegate_process.readAllStandardError()).decode().strip()
-        self.delegate_button.setText("Delegate selected to Codex")
+        self.delegate_button.setText("Delegate selected")
         self.update_delegate_button()
         if exit_code != 0:
-            self.show_transient_status("Codex delegation failed", 6000)
+            self.show_transient_status("Delegation failed", 6000)
             QMessageBox.warning(
                 self,
                 "Delegation failed",
                 stderr or stdout.strip() or "Unknown delegation error",
             )
-        elif "already running; deferring" in stdout:
+        elif "already running" in stdout or "deferring review routing" in stdout:
             self.show_transient_status(
-                f"PR #{self.delegate_pr}: matching Codex task is already running",
+                f"PR #{self.delegate_pr}: matching agent task is already running",
                 6000,
             )
         else:
             self.show_transient_status(
-                f"PR #{self.delegate_pr}: Codex delegation finished"
+                f"PR #{self.delegate_pr}: delegation finished"
             )
         self.refresh()
 

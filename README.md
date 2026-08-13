@@ -21,8 +21,9 @@ a safeguard for automated operation.
 - Prevents recent duplicate `@coderabbitai review` comments.
 - Handles review requests sequentially and waits for completion.
 - Supports separate monitors and settings for multiple repositories.
-- Shows unresolved CodeRabbit threads and optional Codex task progress.
-- Can optionally delegate unresolved feedback to a matching idle Codex task.
+- Shows unresolved CodeRabbit threads and optional Codex/Claude task progress.
+- Can optionally delegate unresolved feedback to a matching idle Codex or Claude
+  task (disabled, auto, Codex-only, or Claude-only).
 - Retries transient GitHub failures and pauses near GitHub API quota limits.
 - Provides desktop notifications and a Plasma-compatible system-tray timer.
 - Optionally plays a sound (on by default) when a rate-limit window opens and a
@@ -42,6 +43,7 @@ Recommended:
 
 - `notify-send` from libnotify for desktop notifications
 - Codex CLI and Codex Desktop only when using Codex task integration
+- Claude Code / Claude Desktop only when using Claude session detection
 
 The GitHub token remains managed by `gh`; the tool does not read or store it.
 
@@ -103,9 +105,10 @@ Repository discovery uses GitHub App installation information visible to the
 authenticated account. An `OWNER/REPOSITORY` value can also be entered
 manually.
 
-Automatic Codex delegation is disabled by default. When enabled for a
-repository, the tool only resumes a matching task when it appears idle and
-checks its state again immediately before dispatch.
+Automatic delegation is disabled by default. When enabled for a
+repository, choose Auto (Codex + Claude), Codex only, or Claude only. The tool
+only resumes a matching task when it appears idle and checks its state again
+immediately before dispatch. Auto prefers Codex when both are idle.
 
 ## Privacy
 
@@ -113,13 +116,14 @@ The source contains no account identifiers, credentials, analytics, or
 telemetry.
 
 Network access goes through the authenticated `gh` CLI to GitHub. CodeRabbit is
-controlled through comments and statuses on GitHub. If Codex delegation is
-enabled, the Codex CLI performs its normal network activity.
+controlled through comments and statuses on GitHub. If Codex or Claude
+delegation is enabled, those CLIs perform their normal network activity.
 
-For optional Codex integration, the tool scans local Codex session metadata to
+For optional Codex and Claude integration, the tool scans local session metadata to
 match a PR branch or head commit to a task. It displays the latest task progress
 locally. Session contents are not copied into this repository or into the
-tool's state directory.
+tool's state directory. Automatic delegation can resume Codex and/or Claude
+sessions depending on the selected mode.
 
 Runtime state can include:
 
