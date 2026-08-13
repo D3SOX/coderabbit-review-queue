@@ -90,6 +90,9 @@ desktop_notify() {
     --app-name='CodeRabbit Review Queue'
     --app-icon='system-software-update'
     --hint='string:desktop-entry:coderabbit-review-queue'
+    # Keep Plasma/libnotify from playing their own sound; we only ding
+    # intentionally via play_notification_sound when with_sound=1.
+    --hint='boolean:suppress-sound:true'
     --urgency="$urgency"
   )
 
