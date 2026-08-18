@@ -1099,8 +1099,13 @@ wait_for_review_completion() {
             $comments[][];
             .user.login == "coderabbitai[bot]"
             and (.updated_at // "") >= $since
-            and (.body | contains("No actionable comments were generated in the recent review"))
-            and (.body | contains($head))
+            and (
+              (
+                (.body | contains("No actionable comments were generated in the recent review"))
+                and (.body | contains($head))
+              )
+              or (.body | contains("No files to review."))
+            )
             and ((.body | contains("rate limited by coderabbit.ai")) | not)
           )
         ' <<<"$reviews" >/dev/null; then
