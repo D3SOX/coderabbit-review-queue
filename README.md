@@ -16,6 +16,8 @@ a safeguard for automated operation.
 ## Features
 
 - Finds open PR heads that do not have a current CodeRabbit review.
+- Skips heads CodeRabbit rejects for exceeding its file limit and continues the queue.
+- Excludes PR authors per repository, defaulting to `pull` and `dependabot`.
 - Uses CodeRabbit's own quota comment to determine the next review window.
 - Adds a safety margin and checks quota again before triggering a review.
 - Prevents recent duplicate `@coderabbitai review` comments.
@@ -100,6 +102,27 @@ Useful read-only commands:
 coderabbit-review-queue --repo OWNER/REPOSITORY --status
 coderabbit-review-queue --list-repos
 ```
+
+Set author exclusions in the GUI's **Excluded authors** field, or with the CLI:
+
+```bash
+coderabbit-review-queue --repo OWNER/REPOSITORY --set-excluded-authors 'pull,dependabot,another-user'
+# Include all authors:
+coderabbit-review-queue --repo OWNER/REPOSITORY --set-excluded-authors ''
+```
+
+The command saves the setting and exits. Running monitors pick it up on their
+next refresh. Usernames are case-insensitive; `dependabot[bot]` and
+`app/dependabot` also work. Exclusions apply to the review queue, active-review
+list, and unresolved-feedback delegation. They do not cancel an ongoing review.
+An empty saved list overrides the defaults. The old `[pull]` title filter is
+replaced by these author settings.
+
+If CodeRabbit reports that a PR exceeds its file limit, the monitor logs the
+reason and continues with the next PR. That head stays out of the queue while
+its CodeRabbit status reports the rejection. Pushing a new head allows another
+attempt. The tool uses CodeRabbit's reported limit rather than imposing a
+limit on every PR's total changed files.
 
 Repository discovery uses GitHub App installation information visible to the
 authenticated account. An `OWNER/REPOSITORY` value can also be entered

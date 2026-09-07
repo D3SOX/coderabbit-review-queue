@@ -28,6 +28,7 @@ auto_delegate_file=''
 stop_when_empty_file=''
 ignore_drafts_file=''
 excluded_branches_file=''
+excluded_authors_file=''
 notify_sound_file=''
 new_items_at_top_file=''
 quota_remaining=-1
@@ -171,6 +172,9 @@ query($owner: String!, $name: String!) {
         number
         title
         isDraft
+        author {
+          login
+        }
         updatedAt
         headRefOid
         headRefName
@@ -256,6 +260,7 @@ configure_repo() {
   stop_when_empty_file="$state_root/$repo_key-stop-when-empty"
   ignore_drafts_file="$state_root/$repo_key-ignore-drafts"
   excluded_branches_file="$state_root/$repo_key-excluded-branches"
+  excluded_authors_file="$state_root/$repo_key-excluded-authors"
   notify_sound_file="$state_root/$repo_key-notify-sound"
   new_items_at_top_file="$state_root/$repo_key-new-items-at-top"
 }
@@ -299,9 +304,52 @@ excluded_branches_json() {
   fi
 }
 
+# Accept GraphQL logins, REST bot logins, and gh's app/name notation.
+normalize_authors() {
+  jq -R -s '
+    split("\n") | map(gsub("^\\s+|\\s+$"; ""))
+    | map(select(length > 0 and (startswith("#") | not)))
+    | map(ascii_downcase | sub("^@"; "") | sub("^app/"; "") | sub("\\[bot\\]$"; ""))
+    | unique
+  '
+}
+
+excluded_authors_json() {
+  if [[ -f $excluded_authors_file ]]; then
+    normalize_authors <"$excluded_authors_file"
+  else
+    printf '["pull", "dependabot"]\n'
+  fi
+}
+
+eligible_state() {
+  jq --argjson ignoreDrafts "$(ignore_drafts_json)" \
+    --argjson excludedBranches "$(excluded_branches_json)" \
+    --argjson excludedAuthors "$(excluded_authors_json)" '
+    .data.repository.pullRequests.nodes |= map(
+      select($ignoreDrafts == false or (.isDraft | not))
+      | select(.headRefName as $b | ($excludedBranches | index($b) | not))
+      | select((.author.login // "" | ascii_downcase) as $a
+          | ($excludedAuthors | index($a) | not))
+    )
+  '
+}
+
+# This status belongs to the current head. A new head can be queued again.
+without_file_limit_skips() {
+  jq '
+    .data.repository.pullRequests.nodes |= map(select(
+      any(.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
+        (.context // "") == "CodeRabbit"
+        and (.creator.login // "") == "coderabbitai"
+        and ((.description // "") | test("^Review skipped: [0-9]+ files exceed the limit of [0-9]+"))
+      ) | not
+    ))
+  '
+}
+
 stale_rows() {
-  jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" \
-    --argjson excludedBranches "$(excluded_branches_json)" '
+  eligible_state | without_file_limit_skips | jq -r '
     def latest_rate_limit:
       [
         .comments.nodes[]?
@@ -319,12 +367,6 @@ stale_rows() {
     .data.repository.pullRequests.nodes
     | map(
         . as $pr
-        | select(
-            (.title | startswith("[pull] "))
-            | not
-          )
-        | select($ignoreDrafts == false or (.isDraft | not))
-        | select(.headRefName as $b | ($excludedBranches | index($b) | not))
         | select(
             any(
               .reviews.nodes[]?;
@@ -455,12 +497,8 @@ mark_head_verified() {
 }
 
 eligible_rows() {
-  jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" \
-    --argjson excludedBranches "$(excluded_branches_json)" '
+  eligible_state | jq -r '
     .data.repository.pullRequests.nodes[]
-    | select((.title | startswith("[pull] ")) | not)
-    | select($ignoreDrafts == false or (.isDraft | not))
-    | select(.headRefName as $b | ($excludedBranches | index($b) | not))
     | [.number, .headRefName, .headRefOid, .title]
     | @tsv
   '
@@ -469,7 +507,8 @@ eligible_rows() {
 # PRs CodeRabbit is currently reviewing. Rate-limited PRs are never active,
 # even if we still have a local outstanding @coderabbitai review request.
 active_review_rows() {
-  local state=$1
+  local state
+  state=$(eligible_state <<<"$1" | without_file_limit_skips)
   local pr head_sha title now
   local -A seen=()
 
@@ -478,8 +517,7 @@ active_review_rows() {
     seen[$pr]=1
     printf '%s\t%s\n' "$pr" "$title"
   done < <(
-    jq -r --argjson ignoreDrafts "$(ignore_drafts_json)" \
-      --argjson excludedBranches "$(excluded_branches_json)" '
+    jq -r '
       def is_rate_limited:
         any(
           .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
@@ -521,9 +559,6 @@ active_review_rows() {
         );
 
       .data.repository.pullRequests.nodes[]
-      | select((.title | startswith("[pull] ")) | not)
-      | select($ignoreDrafts == false or (.isDraft | not))
-      | select(.headRefName as $b | ($excludedBranches | index($b) | not))
       | select(is_reviewing and (is_rate_limited | not))
       | [.number, .title]
       | @tsv
@@ -1077,10 +1112,16 @@ wait_for_review_completion() {
         | last // null
         | if .description == "Review completed" then "completed"
           elif .description == "Review rate limited" then "limited"
+          elif ((.description // "") | test("^Review skipped: [0-9]+ files exceed the limit of [0-9]+")) then .description
           else "waiting"
           end
       ' <<<"$statuses"
     )
+    if [[ $result == "Review skipped:"* ]]; then
+      printf 'Skipping PR #%s: %s. Continuing with the queue.\n' "$pr" "$result"
+      desktop_notify 'CodeRabbit review skipped' "PR #$pr: $title"$'\n'"$result"
+      return 3
+    fi
     if [[ $result == completed ]]; then
       reviews=$(gh api --paginate --slurp "repos/$repo/pulls/$pr/reviews?per_page=100")
       comments=$(gh api --paginate --slurp "repos/$repo/issues/$pr/comments?per_page=100")
@@ -2253,6 +2294,7 @@ main() {
   local action='run'
   local selected_repo=''
   local delegate_pr=''
+  local excluded_authors=''
 
   while (( $# > 0 )); do
     case $1 in
@@ -2268,6 +2310,15 @@ main() {
         action=${1#--}
         shift
         ;;
+      --set-excluded-authors)
+        (( $# >= 2 )) || {
+          printf '%s\n' '--set-excluded-authors requires a comma-separated list, or an empty string.' >&2
+          return 2
+        }
+        action='set-excluded-authors'
+        excluded_authors=$2
+        shift 2
+        ;;
       --delegate)
         (( $# >= 2 )) && [[ $2 =~ ^[0-9]+$ ]] || {
           printf '%s\n' '--delegate requires a PR number.' >&2
@@ -2278,7 +2329,7 @@ main() {
         shift 2
         ;;
       *)
-        printf 'Usage: %s [--repo OWNER/NAME] [--status|--gui|--list-repos|--play-notify-sound|--delegate PR]\n' "$0" >&2
+        printf 'Usage: %s [--repo OWNER/NAME] [--status|--gui|--list-repos|--play-notify-sound|--delegate PR|--set-excluded-authors LIST]\n' "$0" >&2
         return 2
         ;;
     esac
@@ -2302,6 +2353,15 @@ main() {
     }
   fi
   configure_repo "$selected_repo"
+
+  if [[ $action == set-excluded-authors ]]; then
+    local temporary
+    temporary=$(mktemp "$excluded_authors_file.XXXXXX")
+    printf '%s\n' "${excluded_authors//,/$'\n'}" | normalize_authors | jq -r '.[]' >"$temporary"
+    mv -- "$temporary" "$excluded_authors_file"
+    printf 'Excluded authors saved for %s.\n' "$repo"
+    return 0
+  fi
 
   if [[ $action == play-notify-sound ]]; then
     if notify_sound_enabled; then
@@ -2467,6 +2527,11 @@ while true; do
     clear_review_request "$pr" "$head_sha"
   else
     completion_status=$?
+    if (( completion_status == 3 )); then
+      clear_review_request "$pr" "$head_sha"
+      release_dispatch
+      continue
+    fi
     if (( completion_status == 2 )); then
       clear_review_request "$pr" "$head_sha"
       state=$(monitor_snapshot)

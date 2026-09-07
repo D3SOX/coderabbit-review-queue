@@ -146,6 +146,20 @@ class QueueWindow(QMainWindow):
         excluded_row = QHBoxLayout()
         excluded_row.addWidget(excluded_label)
         excluded_row.addWidget(self.excluded_branches, 1)
+        authors_label = QLabel("Excluded &authors:")
+        self.excluded_authors = QLineEdit()
+        authors_label.setBuddy(self.excluded_authors)
+        self.excluded_authors.setAccessibleName("Excluded authors")
+        self.excluded_authors.setPlaceholderText("No authors excluded")
+        self.excluded_authors.setToolTip(
+            "Per repository. Comma-separated GitHub usernames. Defaults to pull "
+            "and dependabot. Clear to include all authors. Changes apply to the "
+            "review queue and unresolved-feedback list."
+        )
+        self.excluded_authors.editingFinished.connect(self.excluded_authors_changed)
+        authors_row = QHBoxLayout()
+        authors_row.addWidget(authors_label)
+        authors_row.addWidget(self.excluded_authors, 1)
         self.notify_sound = QCheckBox(
             "Play a sound when a new review becomes available"
         )
@@ -240,6 +254,7 @@ class QueueWindow(QMainWindow):
         layout.addWidget(self.stop_when_empty)
         layout.addWidget(self.ignore_drafts)
         layout.addLayout(excluded_row)
+        layout.addLayout(authors_row)
         layout.addWidget(self.notify_sound)
         layout.addWidget(self.new_items_at_top)
         layout.addLayout(header_buttons)
@@ -412,6 +427,7 @@ class QueueWindow(QMainWindow):
         self.load_stop_when_empty(selected)
         self.load_ignore_drafts(selected)
         self.load_excluded_branches(selected)
+        self.load_excluded_authors(selected)
         self.load_notify_sound(selected)
         self.load_new_items_at_top(selected)
         self.update_monitor_state()
@@ -438,6 +454,7 @@ class QueueWindow(QMainWindow):
         self.load_stop_when_empty(repo)
         self.load_ignore_drafts(repo)
         self.load_excluded_branches(repo)
+        self.load_excluded_authors(repo)
         self.load_notify_sound(repo)
         self.load_new_items_at_top(repo)
         self.waiting_for_review_window = False
@@ -598,6 +615,46 @@ class QueueWindow(QMainWindow):
             )
         else:
             self.show_transient_status("No branches excluded")
+        self.refresh(manual=True)
+
+    def excluded_authors_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-excluded-authors"
+
+    def load_excluded_authors(self, repo: str) -> None:
+        self.excluded_authors.setEnabled(bool(repo))
+        authors = []
+        if repo:
+            try:
+                authors = [
+                    line.strip()
+                    for line in self.excluded_authors_file(repo).read_text().splitlines()
+                    if line.strip() and not line.strip().startswith("#")
+                ]
+            except FileNotFoundError:
+                authors = ["pull", "dependabot"]
+        self.excluded_authors.setText(", ".join(authors))
+
+    def excluded_authors_changed(self) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        authors = []
+        for part in self.excluded_authors.text().replace("\n", ",").split(","):
+            author = part.strip().lower()
+            if not author or author.startswith("#"):
+                continue
+            author = author.removeprefix("@").removeprefix("app/").removesuffix("[bot]")
+            if author and author not in authors:
+                authors.append(author)
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = self.excluded_authors_file(repo)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text("".join(f"{author}\n" for author in authors))
+        os.replace(temporary, target)
+        self.excluded_authors.setText(", ".join(authors))
+        self.show_transient_status(
+            f"Excluded authors: {', '.join(authors)}" if authors else "No authors excluded"
+        )
         self.refresh(manual=True)
 
     def notify_sound_file(self, repo: str) -> Path:
