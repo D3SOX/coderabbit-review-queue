@@ -1844,6 +1844,7 @@ class QueueWindow(QMainWindow):
         item = self.tasks.currentItem()
         self.delegate_button.setEnabled(
             item is not None
+            and bool(self.selected_repo())
             and bool(item.data(0, Qt.UserRole + 2))
             and not bool(item.data(0, Qt.UserRole + 1))
             and self.delegate_process.state() == QProcess.NotRunning

@@ -1997,15 +1997,26 @@ codex_session_state() {
 }
 
 resume_codex_via_daemon() {
-  local session_id=$1 prompt=$2 socket_path log_path client_pid started=0 attempt command
+  local session_id=$1 prompt=$2 socket_path log_path pid_file client_pid
+  local started=0 attempt command watcher_pid_file
   socket_path="$codex_home/app-server-control/app-server-control.sock"
   [[ -S $socket_path ]] || return 1
   log_path="/tmp/coderabbit-review-queue-codex-$session_id.log"
   printf -v command '%q ' env TERM=xterm-256color codex \
     --remote "unix://$socket_path" --no-alt-screen resume "$session_id" "$prompt"
-  setsid bash -c 'tail -f /dev/null | script -qefc "$1" "$2"' _ \
-    "$command" "$log_path" >/dev/null 2>&1 &
-  client_pid=$!
+  pid_file="/tmp/coderabbit-review-queue-codex-$session_id.pid"
+  rm -f -- "$pid_file"
+  setsid -f bash -c '
+    printf "%s\n" "$$" >"$1"
+    tail -f /dev/null | script -qefc "$2" "$3"
+  ' _ "$pid_file" "$command" "$log_path" </dev/null >/dev/null 2>&1
+  for attempt in {1..20}; do
+    [[ -s $pid_file ]] && break
+    sleep 0.05
+  done
+  [[ -s $pid_file ]] || return 1
+  client_pid=$(<"$pid_file")
+  rm -f -- "$pid_file"
   for attempt in {1..20}; do
     if [[ $(codex_session_state "$session_id") == running ]]; then
       started=1
@@ -2018,16 +2029,20 @@ resume_codex_via_daemon() {
     kill -- -"$client_pid" 2>/dev/null || true
     return 1
   fi
-  (
-    while kill -0 "$client_pid" 2>/dev/null; do
+  watcher_pid_file="/tmp/coderabbit-review-queue-codex-$session_id-watcher.pid"
+  rm -f -- "$watcher_pid_file"
+  setsid -f bash -c '
+    printf "%s\n" "$$" >"$1"
+    while kill -0 "$2" 2>/dev/null; do
       sleep 10
-      if [[ $(codex_session_state "$session_id") == idle ]]; then
-        kill -- -"$client_pid" 2>/dev/null || true
+      if [[ $("$3" --repo "$4" --codex-session-state "$5") == idle ]]; then
+        kill -- -"$2" 2>/dev/null || true
         break
       fi
     done
-  ) >/dev/null 2>&1 &
-  disown
+    rm -f -- "$1"
+  ' _ "$watcher_pid_file" "$client_pid" "$script_path" "$repo" "$session_id" \
+    </dev/null >/dev/null 2>&1
   return 0
 }
 
@@ -2888,6 +2903,7 @@ main() {
   local excluded_authors=''
   local task_branch=''
   local task_head=''
+  local codex_state_session=''
   local merge_pr='' merge_head='' merge_method_arg='' merge_delete='0'
 
   while (( $# > 0 )); do
@@ -2935,6 +2951,15 @@ main() {
         task_branch=$2
         task_head=$3
         shift 3
+        ;;
+      --codex-session-state)
+        (( $# >= 2 )) || {
+          printf '%s\n' '--codex-session-state requires a session ID.' >&2
+          return 2
+        }
+        action='codex-session-state'
+        codex_state_session=$2
+        shift 2
         ;;
       --agent-mode)
         (( $# >= 2 )) && [[ $2 =~ ^(auto|codex|claude)$ ]] || {
@@ -3023,6 +3048,10 @@ main() {
 
   if [[ $action == task-progress ]]; then
     local_agent_task_progress "$task_branch" "$task_head"
+    return 0
+  fi
+  if [[ $action == codex-session-state ]]; then
+    codex_session_state "$codex_state_session"
     return 0
   fi
   if [[ $action == merge-now ]]; then
