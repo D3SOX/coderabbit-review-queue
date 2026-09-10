@@ -339,6 +339,7 @@ agent_host() {
 
 remote_agent_command() {
   local host command arguments
+  local -a timeout_args=()
   host=$(agent_host) || {
     printf 'Invalid SSH agent host configured for %s.\n' "$repo" >&2
     return 2
@@ -346,7 +347,9 @@ remote_agent_command() {
   [[ -n $host ]] || return 2
   printf -v arguments '%q ' --repo "$repo" "$@"
   command="exec ~/.local/bin/coderabbit-review-queue $arguments"
-  ssh \
+  [[ -z ${remote_command_timeout:-} ]] || timeout_args=(timeout "$remote_command_timeout")
+  "${timeout_args[@]}" ssh \
+    -n \
     -o BatchMode=yes \
     -o ConnectTimeout=5 \
     -- "$host" "$command"
@@ -1983,6 +1986,41 @@ codex_session_state() {
   esac
 }
 
+resume_codex_via_daemon() {
+  local session_id=$1 prompt=$2 socket_path log_path client_pid started=0 attempt command
+  socket_path="$codex_home/app-server-control/app-server-control.sock"
+  [[ -S $socket_path ]] || return 1
+  log_path="/tmp/coderabbit-review-queue-codex-$session_id.log"
+  printf -v command '%q ' env TERM=xterm-256color codex \
+    --remote "unix://$socket_path" --no-alt-screen resume "$session_id" "$prompt"
+  setsid bash -c 'tail -f /dev/null | script -qefc "$1" "$2"' _ \
+    "$command" "$log_path" >/dev/null 2>&1 &
+  client_pid=$!
+  for attempt in {1..20}; do
+    if [[ $(codex_session_state "$session_id") == running ]]; then
+      started=1
+      break
+    fi
+    kill -0 "$client_pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  if (( started == 0 )); then
+    kill -- -"$client_pid" 2>/dev/null || true
+    return 1
+  fi
+  (
+    while kill -0 "$client_pid" 2>/dev/null; do
+      sleep 10
+      if [[ $(codex_session_state "$session_id") == idle ]]; then
+        kill -- -"$client_pid" 2>/dev/null || true
+        break
+      fi
+    done
+  ) >/dev/null 2>&1 &
+  disown
+  return 0
+}
+
 route_unresolved_review() {
   local pr=$1
   local branch_name=$2
@@ -2180,7 +2218,7 @@ resume_codex_session() {
   if (
     cd "$session_cwd"
     [[ $(codex_session_state "$session_id") == idle ]] || exit 75
-    codex "${codex_args[@]}"
+    resume_codex_via_daemon "$session_id" "$prompt" || codex "${codex_args[@]}"
   ); then
     for thread_id in "${thread_ids[@]}"; do
       attempted_route_threads["$thread_id"]=1
@@ -2457,7 +2495,8 @@ agent_task_progress() {
     local_agent_task_progress "$branch_name" "$head_sha"
     return
   fi
-  if output=$(remote_agent_command --task-progress "$branch_name" "$head_sha" 2>/dev/null); then
+  if output=$(remote_command_timeout=10 remote_agent_command \
+    --task-progress "$branch_name" "$head_sha" 2>/dev/null); then
     printf '%s\n' "$output"
   else
     printf 'Remote agent host unavailable (%s)\n' "$host"

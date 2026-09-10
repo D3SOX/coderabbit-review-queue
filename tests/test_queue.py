@@ -312,6 +312,7 @@ cat "$monitor_state_file"
     def test_remote_agent_progress_uses_ssh(self):
         result = self.run_shell(r'''
 printf '%s\n' desktop >"$agent_host_file"
+timeout() { shift; "$@"; }
 ssh() { printf '%s\n' "$*"; printf 'Codex Idle (12345678)\n'; }
 agent_task_progress feature abc123
 ''')
@@ -394,6 +395,7 @@ git -C "$worktree" init -q
 session=12345678-1234-1234-1234-123456789abc
 codex_session_state() { printf 'idle\n'; }
 codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
+resume_codex_via_daemon() { return 1; }
 codex() { printf 'codex args:'; printf ' <%s>' "$@"; printf '\n'; }
 desktop_notify() { :; }
 threads=(thread-1)
@@ -404,6 +406,7 @@ resume_codex_session 42 title head "$session" "$worktree" prompt threads
         self.assertIn('<-c> <model_reasoning_effort=medium>', result.stdout)
         self.assertIn('<--dangerously-bypass-approvals-and-sandbox>', result.stdout)
         self.assertNotIn('<--sandbox> <workspace-write>', result.stdout)
+        self.assertIn('<exec>', result.stdout)
         self.assertIn('<resume> <--all>', result.stdout)
 
     def test_manual_delegation_retries_previously_routed_threads(self):
@@ -420,6 +423,24 @@ route_unresolved_review 42 branch head title
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('manual delegation resumed session-1', result.stdout)
+
+    def test_codex_daemon_resume_avoids_cli_fallback(self):
+        result = self.run_shell(r'''
+worktree="$state_root/worktree"
+mkdir -p "$worktree"
+git -C "$worktree" init -q
+session=12345678-1234-1234-1234-123456789abc
+codex_session_state() { printf 'idle\n'; }
+codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
+resume_codex_via_daemon() { printf 'daemon resume <%s> <%s>\n' "$1" "$2"; }
+codex() { printf 'unexpected codex exec\n'; return 1; }
+desktop_notify() { :; }
+threads=(thread-1)
+resume_codex_session 42 title head "$session" "$worktree" prompt threads
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('daemon resume <12345678-1234-1234-1234-123456789abc> <prompt>', result.stdout)
+        self.assertNotIn('unexpected codex exec', result.stdout)
 
     def test_completed_delegation_leaves_merge_to_agent(self):
         result = self.run_shell(r'''
