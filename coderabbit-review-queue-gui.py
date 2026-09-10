@@ -1565,6 +1565,7 @@ class QueueWindow(QMainWindow):
         self.set_tray_countdown(compact, f"{repo}\nNext review: {detail}")
 
     def populate_queue(self, status: str) -> None:
+        scroll_position = self.queue.verticalScrollBar().value()
         current_item = self.queue.currentItem()
         selected_number = (
             current_item.data(0, Qt.UserRole) if current_item is not None else None
@@ -1639,6 +1640,7 @@ class QueueWindow(QMainWindow):
         if display_rows and self.queue.currentItem() is None:
             self.queue.setCurrentItem(self.queue.topLevelItem(0))
         self.apply_monitor_activity_to_queue()
+        self.queue.verticalScrollBar().setValue(scroll_position)
         self.update_queue_buttons()
 
     def apply_monitor_activity_to_queue(self) -> None:

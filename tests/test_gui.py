@@ -331,6 +331,32 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual(window.queue.topLevelItem(0).text(0), "#42")
         self.assertEqual(window.queue.topLevelItem(0).text(2), "Checking availability")
 
+    def test_refresh_preserves_scroll_position_for_offscreen_selection(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.queue.setFixedHeight(100)
+        window.queue.show()
+        window.monitor_activity = None
+        window.selected_repo.return_value = ""
+        window.update_countdown_display = Mock()
+        window.update_queue_buttons = Mock()
+        window.apply_monitor_activity_to_queue = lambda: None
+        status = "Repository: example/repo\nQueued PRs:\n" + "".join(
+            f"  #{number} PR {number}\n" for number in range(30)
+        )
+        queue_gui.QueueWindow.populate_queue(window, status)
+        window.queue.setCurrentItem(window.queue.topLevelItem(25))
+        window.queue.verticalScrollBar().setValue(0)
+        app.processEvents()
+
+        queue_gui.QueueWindow.populate_queue(window, status)
+        app.processEvents()
+
+        self.assertEqual(window.queue.currentItem().text(0), "#25")
+        self.assertEqual(window.queue.verticalScrollBar().value(), 0)
+        window.queue.close()
+
     def test_finished_review_suppresses_stale_live_overlay(self):
         app = QApplication.instance() or QApplication([])
         window = Mock()
