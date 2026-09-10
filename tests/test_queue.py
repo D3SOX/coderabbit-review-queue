@@ -406,6 +406,21 @@ resume_codex_session 42 title head "$session" "$worktree" prompt threads
         self.assertNotIn('<--sandbox> <workspace-write>', result.stdout)
         self.assertIn('<resume> <--all>', result.stdout)
 
+    def test_manual_delegation_retries_previously_routed_threads(self):
+        result = self.run_shell(r'''
+printf 'thread-1\n' >"$routed_threads_file"
+force_delegation=1
+agent_mode_override=codex
+unresolved_coderabbit_rows() { printf 'thread-1\tsrc/file.js\t12\tfalse\n'; }
+matching_codex_session() { printf 'session-1\t%s\n' "$state_root/worktree"; }
+codex_session_state() { printf 'idle\n'; }
+render_delegation_prompt() { printf 'prompt\n'; }
+resume_codex_session() { printf 'manual delegation resumed %s\n' "$4"; }
+route_unresolved_review 42 branch head title
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('manual delegation resumed session-1', result.stdout)
+
     def test_completed_delegation_leaves_merge_to_agent(self):
         result = self.run_shell(r'''
 worktree="$state_root/worktree"

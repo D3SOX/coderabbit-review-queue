@@ -2016,12 +2016,14 @@ route_unresolved_review() {
 
   while IFS=$'\t' read -r thread_id path line outdated; do
     [[ -n ${thread_id:-} ]] || continue
-    if [[ -f $routed_threads_file ]] &&
-      rg -q --fixed-strings --line-regexp "$thread_id" "$routed_threads_file"; then
-      continue
-    fi
-    if [[ -n ${attempted_route_threads[$thread_id]+present} ]]; then
-      continue
+    if (( force_delegation == 0 )); then
+      if [[ -f $routed_threads_file ]] &&
+        rg -q --fixed-strings --line-regexp "$thread_id" "$routed_threads_file"; then
+        continue
+      fi
+      if [[ -n ${attempted_route_threads[$thread_id]+present} ]]; then
+        continue
+      fi
     fi
     new_threads+=("$thread_id ($path:$line, outdated=$outdated)")
     new_ids+=("$thread_id")
