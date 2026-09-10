@@ -311,6 +311,26 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertTrue(feedback.data(0, Qt.UserRole + 2))
         app.processEvents()
 
+    def test_successful_delegation_immediately_marks_task_running(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.tasks = queue_gui.QTreeWidget()
+        item = queue_gui.QTreeWidgetItem(
+            ["#1292", "fix menus", "1 unresolved", "Codex Idle", "task", ""]
+        )
+        item.setData(0, Qt.UserRole, "1292")
+        item.setData(0, Qt.UserRole + 1, False)
+        item.setData(0, Qt.UserRole + 2, True)
+        window.tasks.addTopLevelItem(item)
+        window.update_delegate_button = Mock()
+
+        queue_gui.QueueWindow.mark_delegation_running(window, "1292")
+
+        self.assertEqual(item.text(3), "Codex Running")
+        self.assertTrue(item.data(0, Qt.UserRole + 1))
+        window.update_delegate_button.assert_called_once_with()
+        app.processEvents()
+
     def test_live_review_state_keeps_pr_at_top_of_queue(self):
         app = QApplication.instance() or QApplication([])
         window = Mock()

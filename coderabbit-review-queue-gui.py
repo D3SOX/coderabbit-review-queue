@@ -1878,28 +1878,50 @@ class QueueWindow(QMainWindow):
             ]
         )
         self.delegate_process.start()
-        QTimer.singleShot(1500, self.refresh)
+
+    def mark_delegation_running(self, number: str) -> None:
+        for index in range(self.tasks.topLevelItemCount()):
+            item = self.tasks.topLevelItem(index)
+            if item.data(0, Qt.UserRole) != number:
+                continue
+            agent = item.text(3).partition(" ")[0] or "Codex"
+            item.setText(3, f"{agent} Running")
+            item.setData(0, Qt.UserRole + 1, True)
+            break
+        self.update_delegate_button()
 
     def delegate_finished(self, exit_code: int) -> None:
         stdout = bytes(self.delegate_process.readAllStandardOutput()).decode()
         stderr = bytes(self.delegate_process.readAllStandardError()).decode().strip()
         self.delegate_button.setText("Delegate selected")
-        self.update_delegate_button()
         if exit_code != 0:
+            self.update_delegate_button()
             self.show_transient_status("Delegation failed", 6000)
             QMessageBox.warning(
                 self,
                 "Delegation failed",
                 stderr or stdout.strip() or "Unknown delegation error",
             )
-        elif "already running" in stdout or "deferring review routing" in stdout:
-            self.show_transient_status(
-                f"PR #{self.delegate_pr}: matching agent task is already running",
-                6000,
-            )
+        elif (
+            "already running" in stdout
+            or "started while routing" in stdout
+            or "Routing unresolved CodeRabbit review" in stdout
+        ):
+            self.mark_delegation_running(self.delegate_pr)
+            if "Routing unresolved CodeRabbit review" in stdout:
+                self.show_transient_status(
+                    f"PR #{self.delegate_pr}: agent task started"
+                )
+            else:
+                self.show_transient_status(
+                    f"PR #{self.delegate_pr}: matching agent task is already running",
+                    6000,
+                )
         else:
+            self.update_delegate_button()
             self.show_transient_status(
-                f"PR #{self.delegate_pr}: delegation finished"
+                f"PR #{self.delegate_pr}: delegation was not started",
+                6000,
             )
         self.refresh()
 
