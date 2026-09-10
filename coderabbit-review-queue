@@ -1411,7 +1411,7 @@ matching_codex_session() {
   local head_sha=$2
   local file meta parsed timestamp session_id cwd metadata_branch metadata_head
   local event_cwd
-  local live_branch live_head remote key
+  local live_branch live_head remote key candidate_path candidate_session
   local -A branch_sessions=()
   local -A branch_timestamps=()
   local -A head_sessions=()
@@ -1420,6 +1420,7 @@ matching_codex_session() {
   local -A metadata_branch_timestamps=()
   local -A metadata_head_sessions=()
   local -A metadata_head_timestamps=()
+  local -A unique_sessions=()
 
   while IFS= read -r file; do
     [[ -n ${file:-} ]] || continue
@@ -1525,11 +1526,16 @@ matching_codex_session() {
 
   for key in branch_sessions head_sessions metadata_branch_sessions metadata_head_sessions; do
     local -n candidates=$key
-    if (( ${#candidates[@]} == 1 )); then
-      printf '%s\t%s\n' "${candidates[@]}" "${!candidates[@]}"
+    unique_sessions=()
+    for candidate_path in "${!candidates[@]}"; do
+      candidate_session=${candidates[$candidate_path]}
+      unique_sessions["$candidate_session"]=$candidate_path
+    done
+    if (( ${#unique_sessions[@]} == 1 )); then
+      printf '%s\t%s\n' "${!unique_sessions[@]}" "${unique_sessions[@]}"
       return 0
     fi
-    if (( ${#candidates[@]} > 1 )); then
+    if (( ${#unique_sessions[@]} > 1 )); then
       return 1
     fi
   done

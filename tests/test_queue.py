@@ -339,7 +339,8 @@ codex_session_state "$session"
 codex_sessions_root="$state_root/sessions"
 old="$state_root/old"
 current="$state_root/current"
-mkdir -p "$codex_sessions_root" "$old" "$current"
+nested="$current/android"
+mkdir -p "$codex_sessions_root" "$old" "$nested"
 git -C "$current" init -q
 git -C "$old" init -q
 git -C "$old" remote add origin git@github.com:example/repo.git
@@ -356,6 +357,7 @@ file="$codex_sessions_root/rollout-test-$session.jsonl"
 printf '%s\n' \
   "{\"timestamp\":\"2026-09-10T12:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"originator\":\"Codex Desktop\",\"thread_source\":\"user\",\"id\":\"$session\",\"cwd\":\"$old\",\"git\":{\"repository_url\":\"git@github.com:example/repo.git\"}}}" \
   "{\"type\":\"event_msg\",\"payload\":{\"item\":{\"cwd\":\"file://$current\"}}}" \
+  "{\"type\":\"event_msg\",\"payload\":{\"item\":{\"cwd\":\"file://$nested\"}}}" \
   >"$file"
 matching_codex_session target-branch "$head"
 ''')
