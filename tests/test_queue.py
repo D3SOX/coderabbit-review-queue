@@ -165,6 +165,55 @@ main --repo example/repo
         self.assertIn('released', result.stdout)
         self.assertIn('Reached second PR after clearing skipped request', result.stdout)
 
+    def test_approved_review_is_merged_immediately_after_completion(self):
+        result = self.run_shell(r'''
+claim_monitor() { :; }
+cleanup_monitor() { :; }
+claim_dispatch() { :; }
+release_dispatch() { :; }
+monitor_snapshot() {
+  if [[ -f $state_root/completed ]]; then
+    printf 'approved snapshot\n'
+  else
+    printf 'initial snapshot\n'
+  fi
+}
+route_all_unresolved() {
+  if [[ -f $state_root/completed && ! -f $state_root/merged ]]; then
+    echo 'Processed unresolved reviews before approved merge' >&2
+    exit 98
+  fi
+}
+load_stale_rows() {
+  if [[ -f $state_root/completed ]]; then
+    stale=()
+  else
+    stale=($'42\tnow\tbranch-42\thead-42\tapproved change\t-')
+  fi
+}
+merge_approved_reviews() {
+  if [[ $1 == 'approved snapshot' ]]; then
+    touch "$state_root/merged"
+    echo 'Merged approved review immediately'
+    exit 0
+  fi
+}
+latest_expiry() { echo 0; }
+shared_expiry() { echo 0; }
+remember_shared_expiry() { :; }
+wait_until() { :; }
+query_quota() { quota_remaining=1; }
+recent_review_request_expiry() { echo 0; }
+desktop_notify() { :; }
+gh() { :; }
+wait_for_acceptance() { :; }
+wait_for_review_completion() { touch "$state_root/completed"; }
+route_unresolved_review() { :; }
+main --repo example/repo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Merged approved review immediately', result.stdout)
+
     def test_snapshot_cache_is_shared(self):
         result = self.run_shell(r'''
 calls="$state_root/calls"

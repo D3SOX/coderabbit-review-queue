@@ -1570,6 +1570,7 @@ class QueueWindow(QMainWindow):
         )
         queued: list[tuple[str, str]] = []
         active: list[tuple[str, str]] = []
+        finished_numbers: set[str] = set()
         section = ""
         expiry: QDateTime | None = None
         for line in status.splitlines():
@@ -1581,6 +1582,9 @@ class QueueWindow(QMainWindow):
                 section = "finished"
             elif line.startswith("Next outstanding rate limit expires at "):
                 expiry = self.parse_expiry(line)
+            elif section == "finished" and line.startswith("  #"):
+                number, _, _title = line.strip().partition(" ")
+                finished_numbers.add(number.removeprefix("#"))
             elif section in {"active", "queue"} and line.startswith("  #"):
                 number, _, title = line.strip().partition(" ")
                 number = number.removeprefix("#")
@@ -1609,6 +1613,7 @@ class QueueWindow(QMainWindow):
                 queued = saved_queued + new_queued
 
         self.active_reviews = active
+        self.finished_review_numbers = finished_numbers
         self.has_queued_reviews = bool(queued)
         self.next_review_at = expiry
         self.update_countdown_display()
@@ -1645,7 +1650,11 @@ class QueueWindow(QMainWindow):
             "reviewing": "In progress",
         }
         status = labels.get(phase)
-        if status is None or not number:
+        if (
+            status is None
+            or not number
+            or number in getattr(self, "finished_review_numbers", set())
+        ):
             return
         selected = self.queue.currentItem()
         selected_number = selected.data(0, Qt.UserRole) if selected else None

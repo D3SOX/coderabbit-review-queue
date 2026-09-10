@@ -331,6 +331,30 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual(window.queue.topLevelItem(0).text(0), "#42")
         self.assertEqual(window.queue.topLevelItem(0).text(2), "Checking availability")
 
+    def test_finished_review_suppresses_stale_live_overlay(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.monitor_activity = ("reviewing", "42", "live review", 0)
+        window.selected_repo.return_value = ""
+        window.update_countdown_display = Mock()
+        window.update_queue_buttons = Mock()
+        window.apply_monitor_activity_to_queue = lambda: (
+            queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        )
+
+        queue_gui.QueueWindow.populate_queue(
+            window,
+            """Repository: example/repo
+Finished CodeRabbit reviews:
+  #42 live review
+    Result: Approved
+    Agent task: —
+""",
+        )
+
+        self.assertEqual(window.queue.topLevelItemCount(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

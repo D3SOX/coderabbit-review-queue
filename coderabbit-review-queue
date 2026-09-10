@@ -1288,6 +1288,7 @@ wait_for_review_completion() {
             and ((.body | contains("rate limited by coderabbit.ai")) | not)
           )
         ' <<<"$reviews" >/dev/null; then
+        write_monitor_state idle
         printf 'CodeRabbit finished PR #%s.\n' "$pr"
         desktop_notify \
           'CodeRabbit review finished' \
@@ -3019,6 +3020,7 @@ while true; do
   route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"
 
   state=$(monitor_snapshot)
+  merge_approved_reviews "$state"
   route_all_unresolved "$state"
   load_stale_rows "$state"
   if (( ${#stale[@]} == 0 )); then
