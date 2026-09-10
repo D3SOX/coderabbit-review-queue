@@ -2181,23 +2181,6 @@ resume_codex_session() {
     desktop_notify \
       'CodeRabbit review routed' \
       "PR #$pr — $title"$'\n'"Sent unresolved feedback to its Codex task."
-    if auto_merge_enabled && merge_after_delegation_enabled; then
-      if pr_has_unresolved_coderabbit "$pr"; then
-        desktop_notify \
-          'CodeRabbit merge blocked' \
-          "PR #$pr — $title"$'\n''Delegation finished, but unresolved CodeRabbit feedback remains.' \
-          'critical'
-      elif gh pr checks "$pr" --repo "$repo" --watch --fail-fast --interval 10 &&
-        merge_pr_now "$pr" "$head_sha" "$(merge_method)" \
-          "$(delete_branch_enabled && printf 1 || printf 0)" 1; then
-        desktop_notify 'CodeRabbit PR merged' "PR #$pr — $title"
-      else
-        desktop_notify \
-          'CodeRabbit merge blocked' \
-          "PR #$pr — $title"$'\n''Delegation finished, but CI failed or the PR was no longer safe to merge.' \
-          'critical'
-      fi
-    fi
   else
     resume_status=$?
     if (( resume_status == 75 )); then

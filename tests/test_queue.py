@@ -404,7 +404,7 @@ resume_codex_session 42 title head "$session" "$worktree" prompt threads
         self.assertNotIn('<--sandbox> <workspace-write>', result.stdout)
         self.assertIn('<resume> <--all>', result.stdout)
 
-    def test_completed_delegation_uses_guarded_admin_merge(self):
+    def test_completed_delegation_leaves_merge_to_agent(self):
         result = self.run_shell(r'''
 worktree="$state_root/worktree"
 mkdir -p "$worktree"
@@ -416,39 +416,6 @@ codex_session_state() { printf 'idle\n'; }
 codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
 codex() { :; }
 desktop_notify() { :; }
-pr_has_unresolved_coderabbit() { return 1; }
-gh() {
-  if [[ $1 == pr && $2 == checks ]]; then
-    return 0
-  fi
-  if [[ $1 == pr && $2 == view ]]; then
-    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","statusCheckRollup":[]}'
-    return 0
-  fi
-  printf 'merge args:'
-  printf ' <%s>' "$@"
-  printf '\n'
-}
-threads=(thread-1)
-resume_codex_session 42 title head "$session" "$worktree" prompt threads
-''')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('merge args:', result.stdout)
-        self.assertIn('<--admin>', result.stdout)
-
-    def test_completed_delegation_does_not_merge_with_unresolved_feedback(self):
-        result = self.run_shell(r'''
-worktree="$state_root/worktree"
-mkdir -p "$worktree"
-git -C "$worktree" init -q
-session=12345678-1234-1234-1234-123456789abc
-printf '1\n' >"$auto_merge_file"
-printf '1\n' >"$merge_after_delegation_file"
-codex_session_state() { printf 'idle\n'; }
-codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
-codex() { :; }
-desktop_notify() { :; }
-pr_has_unresolved_coderabbit() { return 0; }
 gh() { printf 'unexpected gh call: %s\n' "$*"; return 1; }
 threads=(thread-1)
 resume_codex_session 42 title head "$session" "$worktree" prompt threads
@@ -642,6 +609,17 @@ route_merge_pr 42 head
     def test_post_delegation_merge_defaults_on(self):
         result = self.run_shell('merge_after_delegation_enabled')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_post_delegation_merge_instructs_agent(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$auto_merge_file"
+printf '1\n' >"$merge_after_delegation_file"
+printf 'rebase\n' >"$merge_method_file"
+auto_merge_instruction
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('gh pr merge --rebase', result.stdout)
+        self.assertIn('wait for CI to pass', result.stdout)
 
 
 if __name__ == '__main__':
