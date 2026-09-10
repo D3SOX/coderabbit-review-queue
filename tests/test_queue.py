@@ -309,6 +309,69 @@ agent_task_progress feature abc123
         self.assertIn('--task-progress', result.stdout)
         self.assertTrue(result.stdout.rstrip().endswith('Codex Idle (12345678)'))
 
+    def test_codex_state_ignores_malformed_session_lines(self):
+        result = self.run_shell(r'''
+codex_sessions_root="$state_root/sessions"
+mkdir -p "$codex_sessions_root"
+session=12345678-1234-1234-1234-123456789abc
+file="$codex_sessions_root/rollout-test-$session.jsonl"
+printf '%s\n' \
+  '{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}' \
+  'truncated json' >"$file"
+codex_session_state "$session"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'running\n')
+
+    def test_codex_match_uses_worktree_recorded_after_session_start(self):
+        result = self.run_shell(r'''
+codex_sessions_root="$state_root/sessions"
+old="$state_root/old"
+current="$state_root/current"
+mkdir -p "$codex_sessions_root" "$old" "$current"
+git -C "$current" init -q
+git -C "$old" init -q
+git -C "$old" remote add origin git@github.com:example/repo.git
+git -C "$current" config user.email test@example.com
+git -C "$current" config user.name Test
+git -C "$current" remote add origin git@github.com:example/repo.git
+touch "$current/file"
+git -C "$current" add file
+git -C "$current" commit -qm initial
+git -C "$current" branch -M target-branch
+head=$(git -C "$current" rev-parse HEAD)
+session=12345678-1234-1234-1234-123456789abc
+file="$codex_sessions_root/rollout-test-$session.jsonl"
+printf '%s\n' \
+  "{\"timestamp\":\"2026-09-10T12:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"originator\":\"Codex Desktop\",\"thread_source\":\"user\",\"id\":\"$session\",\"cwd\":\"$old\",\"git\":{\"repository_url\":\"git@github.com:example/repo.git\"}}}" \
+  "{\"type\":\"event_msg\",\"payload\":{\"item\":{\"cwd\":\"file://$current\"}}}" \
+  >"$file"
+matching_codex_session target-branch "$head"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('12345678-1234-1234-1234-123456789abc', result.stdout)
+
+    def test_codex_progress_reads_current_agent_message_events(self):
+        result = self.run_shell(r'''
+codex_sessions_root="$state_root/sessions"
+mkdir -p "$codex_sessions_root"
+session=12345678-1234-1234-1234-123456789abc
+file="$codex_sessions_root/rollout-test-$session.jsonl"
+printf '%s\n' \
+  '{"type":"event_msg","payload":{"type":"agent_message","message":"older progress"}}' \
+  'truncated json' \
+  '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"latest progress"}]}}}' \
+  >"$file"
+matching_codex_session() { printf '%s\t%s\n' "$session" "$state_root/worktree"; }
+codex_session_state() { printf 'running\n'; }
+codex_task_progress branch head
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            'Running (12345678) — latest progress\n',
+        )
+
     def test_validate_repo_rejects_missing_repository(self):
         result = self.run_shell(r'''
 gh() { return 1; }

@@ -1409,6 +1409,7 @@ matching_codex_session() {
   local branch_name=$1
   local head_sha=$2
   local file meta parsed timestamp session_id cwd metadata_branch metadata_head
+  local event_cwd
   local live_branch live_head remote key
   local -A branch_sessions=()
   local -A branch_timestamps=()
@@ -1486,6 +1487,35 @@ matching_codex_session() {
         head_sessions["$cwd"]=$session_id
       fi
     fi
+
+    while IFS= read -r event_cwd; do
+      [[ -n $event_cwd && $event_cwd != "$cwd" ]] || continue
+      if ! git -C "$event_cwd" rev-parse --git-dir >/dev/null 2>&1; then
+        continue
+      fi
+      remote=$(git -C "$event_cwd" remote get-url origin 2>/dev/null || true)
+      if [[ $remote != *"github.com:$repo.git" &&
+        $remote != *"github.com/$repo.git" &&
+        $remote != *"github.com/$repo" ]]; then
+        continue
+      fi
+      live_branch=$(git -C "$event_cwd" branch --show-current 2>/dev/null || true)
+      live_head=$(git -C "$event_cwd" rev-parse HEAD 2>/dev/null || true)
+      if [[ $live_branch == "$branch_name" ]]; then
+        branch_timestamps["$event_cwd"]=$timestamp
+        branch_sessions["$event_cwd"]=$session_id
+      fi
+      if [[ $live_head == "$head_sha" ]]; then
+        head_timestamps["$event_cwd"]=$timestamp
+        head_sessions["$event_cwd"]=$session_id
+      fi
+    done < <(
+      jq -R -r '
+        fromjson?
+        | .payload.item.cwd? // empty
+        | sub("^file://"; "")
+      ' "$file" 2>/dev/null | sort -u
+    )
   done < <(
     rg -l --fixed-strings \
       "$repo" \
@@ -1858,9 +1888,10 @@ codex_session_state() {
     return 0
   fi
   session_file=${session_files[0]}
-  if ! state=$(jq -s -r '
+  if ! state=$(jq -R -s -r '
     reduce (
-      .[]
+      split("\n")[]
+      | fromjson?
       | select(
           .type == "event_msg"
           and (
@@ -2219,14 +2250,24 @@ codex_task_progress() {
     *) state='Unknown' ;;
   esac
   message=$(
-    jq -s -r '
+    jq -R -s -r '
       [
-        .[]
-        | select(
-            .type == "event_msg"
-            and .payload.type == "agent_message"
-          )
-        | .payload.message
+        split("\n")[]
+        | fromjson?
+        | if .type == "event_msg" and .payload.type == "agent_message" then
+            .payload.message
+          elif .type == "event_msg"
+            and .payload.type == "item_completed"
+            and .payload.item.type == "AgentMessage" then
+            [
+              .payload.item.content[]?
+              | select(.type == "Text")
+              | .text
+            ]
+            | join("\n")
+          else
+            empty
+          end
       ]
       | last // ""
       | gsub("[\\r\\n\\t]+"; " ")
