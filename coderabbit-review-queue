@@ -540,10 +540,6 @@ load_stale_rows() {
     if [[ -n ${completed_review_heads[$completed_key]+present} ]]; then
       continue
     fi
-    # Keep unresolved-feedback PRs out of the review queue until threads clear.
-    if pr_has_unresolved_coderabbit "$pr"; then
-      continue
-    fi
     loaded+=("$row")
   done < <(stale_rows <<<"$state")
 
@@ -580,6 +576,23 @@ mark_head_verified() {
 eligible_rows() {
   eligible_state | jq -r '
     .data.repository.pullRequests.nodes[]
+    | [.number, .headRefName, .headRefOid, .title]
+    | @tsv
+  '
+}
+
+reviewed_rows() {
+  eligible_state | jq -r '
+    .data.repository.pullRequests.nodes[]
+    | . as $pr
+    | select(
+        any(
+          .reviews.nodes[]?;
+          (.author.login // "") == "coderabbitai"
+          and (.commit.oid // "") == $pr.headRefOid
+          and ((.body // "") | gsub("^\\s+|\\s+$"; "") | length) > 0
+        )
+      )
     | [.number, .headRefName, .headRefOid, .title]
     | @tsv
   '
@@ -2079,7 +2092,7 @@ route_all_unresolved() {
         "PR #$pr — $title"$'\n'"Review monitoring remains active." \
         'critical'
     fi
-  done < <(eligible_rows <<<"$state")
+  done < <(reviewed_rows <<<"$state")
   return 0
 }
 
@@ -2223,6 +2236,7 @@ agent_task_progress() {
 }
 
 show_status() {
+  local snapshot_max_age=${1:-10}
   local state expiry now row pr branch_name head_sha title count task_progress
   local finished=''
   local -a active=()
@@ -2231,7 +2245,7 @@ show_status() {
   local -A unresolved_prs=()
 
   status_quota_available || return $?
-  state=$(snapshot)
+  state=$(snapshot "$snapshot_max_age")
   _claude_agents_json=''
   load_stale_rows "$state"
   printf 'Repository: %s\n' "$repo"
@@ -2267,7 +2281,7 @@ show_status() {
       task_progress=$(agent_task_progress "$branch_name" "$head_sha")
       finished+=$'\n'"    Agent task: $task_progress"
     fi
-  done < <(eligible_rows <<<"$state")
+  done < <(reviewed_rows <<<"$state")
 
   for row in "${approved[@]}"; do
     IFS=$'\t' read -r pr title <<<"$row"
@@ -2388,7 +2402,7 @@ delegate_pr_now() {
     force_delegation=1
     route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"
     return 0
-  done < <(eligible_rows <<<"$state")
+  done < <(reviewed_rows <<<"$state")
 
   printf 'PR #%s is not an eligible open pull request.\n' "$requested_pr" >&2
   return 1
@@ -2527,6 +2541,10 @@ main() {
         action=${1#--}
         shift
         ;;
+      --cached-status)
+        action='cached-status'
+        shift
+        ;;
       --set-excluded-authors)
         (( $# >= 2 )) || {
           printf '%s\n' '--set-excluded-authors requires a comma-separated list, or an empty string.' >&2
@@ -2636,6 +2654,10 @@ main() {
   fi
   if [[ $action == status ]]; then
     show_status
+    return $?
+  fi
+  if [[ $action == cached-status ]]; then
+    show_status 60
     return $?
   fi
   if [[ $action == delegate ]]; then

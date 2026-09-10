@@ -243,6 +243,38 @@ main --repo example/repo
         self.assertEqual(self.rows('state=$(cat); approved_review_rows "$state"',
                                    [approved, old_head]), [1])
 
+    def test_reviewed_rows_include_only_substantive_current_head_reviews(self):
+        current = self.pr(1)
+        current['reviews']['nodes'] = [{
+            'author': {'login': 'coderabbitai'}, 'body': 'Review findings',
+            'state': 'COMMENTED', 'commit': {'oid': 'head'},
+        }]
+        old = self.pr(2)
+        old['reviews']['nodes'] = [{
+            'author': {'login': 'coderabbitai'}, 'body': 'Old findings',
+            'state': 'COMMENTED', 'commit': {'oid': 'old'},
+        }]
+        empty = self.pr(3)
+        empty['reviews']['nodes'] = [{
+            'author': {'login': 'coderabbitai'}, 'body': '  ',
+            'state': 'COMMENTED', 'commit': {'oid': 'head'},
+        }]
+        self.assertEqual(self.rows('reviewed_rows', [current, old, empty]), [1])
+
+    def test_cached_status_reuses_one_minute_snapshot(self):
+        result = self.run_shell(r'''
+snapshot() { printf '%s\n' "$1" >"$state_root/snapshot-age"; printf '{}'; }
+status_quota_available() { :; }
+load_stale_rows() { stale=(); }
+active_review_rows() { :; }
+approved_review_rows() { :; }
+reviewed_rows() { :; }
+show_status 60
+cat "$state_root/snapshot-age"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], '60')
+
     def test_custom_delegation_prompt_replaces_project_placeholders(self):
         result = self.run_shell(r'''
 delegation_prompt_mode_override=custom

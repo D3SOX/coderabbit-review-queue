@@ -80,6 +80,30 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             window.populate_queue.assert_called_once_with(cache.read_text())
             window.populate_tasks.assert_called_once_with(cache.read_text())
 
+    def test_automatic_refresh_uses_shared_snapshot_cache(self):
+        window = Mock()
+        window.status_process.state.return_value = QProcess.NotRunning
+        window.status_retry_timer.isActive.return_value = False
+        window.selected_repo.return_value = "example/repo"
+
+        queue_gui.QueueWindow.refresh(window)
+
+        window.status_process.setArguments.assert_called_once_with(
+            ["--repo", "example/repo", "--cached-status"]
+        )
+
+    def test_manual_refresh_requests_recent_status(self):
+        window = Mock()
+        window.status_process.state.return_value = QProcess.NotRunning
+        window.status_retry_timer.isActive.return_value = False
+        window.selected_repo.return_value = "example/repo"
+
+        queue_gui.QueueWindow.refresh(window, manual=True)
+
+        window.status_process.setArguments.assert_called_once_with(
+            ["--repo", "example/repo", "--status"]
+        )
+
     def test_ssh_hosts_exclude_patterns_and_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config"

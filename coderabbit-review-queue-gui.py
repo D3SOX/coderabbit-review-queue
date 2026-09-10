@@ -1185,7 +1185,8 @@ class QueueWindow(QMainWindow):
         self.statusBar().showMessage("Refreshing GitHub status…")
         self.status_repo = repo
         self.status_process.setProgram(SCRIPT)
-        self.status_process.setArguments(["--repo", repo, "--status"])
+        status_action = "--status" if manual else "--cached-status"
+        self.status_process.setArguments(["--repo", repo, status_action])
         self.status_process.start()
 
     def retry_status(self) -> None:
