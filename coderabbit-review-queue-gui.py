@@ -1665,24 +1665,39 @@ class QueueWindow(QMainWindow):
             "reviewing": "In progress",
         }
         status = labels.get(phase)
+        transient_statuses = set(labels.values())
+        if status is None:
+            for index in range(self.queue.topLevelItemCount()):
+                item = self.queue.topLevelItem(index)
+                if item.text(2) not in transient_statuses:
+                    continue
+                base_status = item.data(0, Qt.UserRole + 2) or "Queued"
+                item.setText(2, base_status)
+                item.setData(0, Qt.UserRole + 1, base_status)
+            self.update_queue_buttons()
+            return
         if (
-            status is None
-            or not number
+            not number
             or number in getattr(self, "finished_review_numbers", set())
         ):
             return
         selected = self.queue.currentItem()
         selected_number = selected.data(0, Qt.UserRole) if selected else None
+        base_status = "Queued"
         for index in range(self.queue.topLevelItemCount()):
             item = self.queue.topLevelItem(index)
             if item.data(0, Qt.UserRole) == number:
                 self.queue.takeTopLevelItem(index)
                 if not title:
                     title = item.text(1)
+                base_status = item.data(0, Qt.UserRole + 2) or item.data(
+                    0, Qt.UserRole + 1
+                )
                 break
         live_item = QTreeWidgetItem([f"#{number}", title, status])
         live_item.setData(0, Qt.UserRole, number)
         live_item.setData(0, Qt.UserRole + 1, status)
+        live_item.setData(0, Qt.UserRole + 2, base_status)
         self.queue.insertTopLevelItem(0, live_item)
         if selected_number == number:
             self.queue.setCurrentItem(live_item)

@@ -371,6 +371,27 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual(window.queue.topLevelItem(0).text(0), "#42")
         self.assertEqual(window.queue.topLevelItem(0).text(2), "Checking availability")
 
+    def test_waiting_state_clears_previous_checking_status(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.monitor_activity = ("waiting", "", "", 123)
+        window.update_queue_buttons = Mock()
+        item = queue_gui.QTreeWidgetItem(
+            ["#42", "live review", "Checking availability"]
+        )
+        item.setData(0, Qt.UserRole, "42")
+        item.setData(0, Qt.UserRole + 1, "Checking availability")
+        item.setData(0, Qt.UserRole + 2, "Queued")
+        window.queue.addTopLevelItem(item)
+
+        queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+
+        self.assertEqual(item.text(2), "Queued")
+        self.assertEqual(item.data(0, Qt.UserRole + 1), "Queued")
+        window.update_queue_buttons.assert_called_once_with()
+        app.processEvents()
+
     def test_refresh_preserves_scroll_position_for_offscreen_selection(self):
         app = QApplication.instance() or QApplication([])
         window = Mock()
