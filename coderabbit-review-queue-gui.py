@@ -60,13 +60,19 @@ class QueueWindow(QMainWindow):
         self.next_review_at: QDateTime | None = None
         self.has_queued_reviews = False
         self.active_reviews: list[tuple[str, str]] = []
+        self.monitor_activity: tuple[str, str, str, int] | None = None
         self.status_process = QProcess(self)
         self.status_process.finished.connect(self.status_finished)
         self.status_repo = ""
         self.status_failures = 0
         self.status_manual = False
         self.review_requests_signature: (
-            tuple[str, tuple[int, int, int] | None] | None
+            tuple[
+                str,
+                tuple[int, int, int] | None,
+                tuple[int, int, int] | None,
+            ]
+            | None
         ) = None
         self.status_retry_timer = QTimer(self)
         self.status_retry_timer.setSingleShot(True)
@@ -788,12 +794,39 @@ class QueueWindow(QMainWindow):
     def review_requests_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-review-requests.tsv"
 
+    def monitor_state_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-monitor-state.tsv"
+
+    def read_monitor_activity(self, repo: str) -> None:
+        if self.monitor_pid(repo) is None:
+            self.monitor_activity = None
+            return
+        try:
+            phase, number, title, expiry = (
+                self.monitor_state_file(repo).read_text().strip().split("\t", 3)
+            )
+            parsed_expiry = int(expiry)
+        except (OSError, ValueError):
+            self.monitor_activity = None
+            return
+        self.monitor_activity = (phase, number, title, parsed_expiry)
+        if phase == "waiting" and parsed_expiry > 0:
+            self.next_review_at = QDateTime.fromSecsSinceEpoch(
+                parsed_expiry
+            ).toLocalTime()
+
     def refresh_if_review_requests_changed(self) -> None:
         repo = self.selected_repo()
         if not repo:
             self.review_requests_signature = None
             return
-        signature = (repo, file_signature(self.review_requests_file(repo)))
+        self.read_monitor_activity(repo)
+        self.update_countdown_display()
+        signature = (
+            repo,
+            file_signature(self.review_requests_file(repo)),
+            file_signature(self.monitor_state_file(repo)),
+        )
         if self.review_requests_signature is None:
             self.review_requests_signature = signature
             return
@@ -949,6 +982,32 @@ class QueueWindow(QMainWindow):
     def update_countdown_display(self) -> None:
         self.setWindowTitle(self.base_window_title)
         repo = self.selected_repo() or self.base_window_title
+        if self.monitor_activity is not None:
+            phase, number, title, activity_expiry = self.monitor_activity
+            if (
+                phase == "waiting"
+                and activity_expiry <= QDateTime.currentSecsSinceEpoch()
+            ):
+                summary = "Preparing availability check"
+                self.timer_label.setText(f"Next review: {summary}")
+                self.set_tray_countdown("…", f"{repo}\n{summary}")
+                self.waiting_for_review_window = False
+                return
+            if phase in {"checking", "triggering"}:
+                if phase == "checking":
+                    summary = f"Checking availability for #{number}"
+                else:
+                    summary = f"Triggering review on #{number}"
+                self.timer_label.setText(f"Next review: {summary}")
+                self.set_tray_countdown("…", f"{repo}\n{summary}\n{title}")
+                self.waiting_for_review_window = False
+                return
+            if phase == "reviewing":
+                summary = f"Review in progress on #{number}"
+                self.timer_label.setText(f"Next review: {summary}")
+                self.set_tray_countdown("…", f"{repo}\n{summary}\n{title}")
+                self.waiting_for_review_window = False
+                return
         if self.active_reviews:
             labels = ", ".join(f"#{number}" for number, _title in self.active_reviews)
             detail = self.active_reviews[0][1]

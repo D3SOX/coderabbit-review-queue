@@ -31,6 +31,9 @@ excluded_branches_file=''
 excluded_authors_file=''
 notify_sound_file=''
 new_items_at_top_file=''
+monitor_state_file=''
+snapshot_cache_file=''
+snapshot_cache_lock_file=''
 quota_remaining=-1
 quota_expiry=0
 quota_response_attempts=60
@@ -229,11 +232,38 @@ query($owner: String!, $name: String!) {
 }
 GRAPHQL
 
-snapshot() {
+snapshot_remote() {
   gh api graphql \
     -f query="$query" \
     -F owner="$owner" \
     -F name="$name"
+}
+
+snapshot() {
+  local max_age=${1:-10}
+  local now modified temporary snapshot_lock_fd
+
+  exec {snapshot_lock_fd}>"$snapshot_cache_lock_file"
+  flock "$snapshot_lock_fd"
+  if [[ -f $snapshot_cache_file ]]; then
+    now=$(date +%s)
+    modified=$(stat -c %Y "$snapshot_cache_file" 2>/dev/null || printf '0')
+    if (( max_age > 0 && now - modified <= max_age )); then
+      cat "$snapshot_cache_file"
+      exec {snapshot_lock_fd}>&-
+      return 0
+    fi
+  fi
+  temporary=$(mktemp "$snapshot_cache_file.XXXXXX")
+  if snapshot_remote >"$temporary"; then
+    mv "$temporary" "$snapshot_cache_file"
+    cat "$snapshot_cache_file"
+    exec {snapshot_lock_fd}>&-
+    return 0
+  fi
+  rm -f "$temporary"
+  exec {snapshot_lock_fd}>&-
+  return 1
 }
 
 configure_repo() {
@@ -263,6 +293,18 @@ configure_repo() {
   excluded_authors_file="$state_root/$repo_key-excluded-authors"
   notify_sound_file="$state_root/$repo_key-notify-sound"
   new_items_at_top_file="$state_root/$repo_key-new-items-at-top"
+  monitor_state_file="$state_root/$repo_key-monitor-state.tsv"
+  snapshot_cache_file="$state_root/$repo_key-snapshot.json"
+  snapshot_cache_lock_file="$state_root/$repo_key-snapshot.lock"
+}
+
+write_monitor_state() {
+  local phase=$1 pr=${2:-} title=${3:-} expiry=${4:-0} temporary
+  title=${title//$'\t'/ }
+  title=${title//$'\n'/ }
+  temporary=$(mktemp "$monitor_state_file.XXXXXX")
+  printf '%s\t%s\t%s\t%s\n' "$phase" "$pr" "$title" "$expiry" >"$temporary"
+  mv "$temporary" "$monitor_state_file"
 }
 
 ignore_drafts_enabled() {
@@ -2191,7 +2233,7 @@ delegate_pr_now() {
   local requested_pr=$1
   local state pr branch_name head_sha title
 
-  state=$(snapshot)
+  state=$(snapshot 0)
   while IFS=$'\t' read -r pr branch_name head_sha title; do
     [[ $pr == "$requested_pr" ]] || continue
     force_delegation=1
@@ -2275,6 +2317,7 @@ release_dispatch() {
 
 cleanup_monitor() {
   rm -f "$monitor_pid_file"
+  rm -f "$monitor_state_file"
   # Pre-cloexec leftovers: stop children that may still hold inherited lock fds.
   pkill -P $$ >/dev/null 2>&1 || true
 }
@@ -2285,7 +2328,7 @@ monitor_snapshot() {
 
   while true; do
     wait_for_github_quota
-    if data=$(snapshot); then
+    if data=$(snapshot 5); then
       break
     fi
     printf 'GitHub status refresh failed; retrying in 30 seconds.\n' >&2
@@ -2393,6 +2436,7 @@ main() {
     return 1
   fi
   trap cleanup_monitor EXIT
+  write_monitor_state idle
 
 while true; do
   state=$(monitor_snapshot)
@@ -2400,6 +2444,7 @@ while true; do
   load_stale_rows "$state"
 
   if (( ${#stale[@]} == 0 )); then
+    write_monitor_state idle
     if wait_on_empty_queue; then
       continue
     fi
@@ -2411,6 +2456,7 @@ while true; do
   remember_shared_expiry "$expiry"
   quota_expiry=$(shared_expiry)
   (( quota_expiry > expiry )) && expiry=$quota_expiry
+  write_monitor_state waiting '' '' "$expiry"
   wait_until "$expiry"
 
   state=$(monitor_snapshot)
@@ -2450,6 +2496,7 @@ while true; do
 
   IFS=$'\t' read -r quota_pr _updated_at _branch_name _head_sha quota_title _limit_at \
     <<<"${stale[0]}"
+  write_monitor_state checking "$quota_pr" "$quota_title"
   if ! query_quota "$quota_pr" "$quota_title"; then
     release_dispatch
     sleep "$quota_retry_delay"
@@ -2499,6 +2546,7 @@ while true; do
     continue
   fi
 
+  write_monitor_state triggering "$pr" "$title"
   printf 'Triggering PR #%s: %s\n' "$pr" "$title"
   desktop_notify \
     'Triggering CodeRabbit review' \
@@ -2518,7 +2566,7 @@ while true; do
   fi
 
   if wait_for_acceptance "$pr" "$triggered_at" "$head_sha" "$title"; then
-    :
+    write_monitor_state reviewing "$pr" "$title"
   else
     acceptance_status=$?
     if (( acceptance_status == 2 )); then

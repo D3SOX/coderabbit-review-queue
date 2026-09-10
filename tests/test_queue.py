@@ -165,6 +165,25 @@ main --repo example/repo
         self.assertIn('released', result.stdout)
         self.assertIn('Reached second PR after clearing skipped request', result.stdout)
 
+    def test_snapshot_cache_is_shared(self):
+        result = self.run_shell(r'''
+calls="$state_root/calls"
+snapshot_remote() { echo called >>"$calls"; printf '{"value":1}\n'; }
+snapshot 30
+snapshot 30
+wc -l <"$calls"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], '1')
+
+    def test_monitor_state_records_reviewing_pr(self):
+        result = self.run_shell(r'''
+write_monitor_state reviewing 42 'fix the queue' 0
+cat "$monitor_state_file"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'reviewing\t42\tfix the queue\t0\n')
+
 
 if __name__ == '__main__':
     unittest.main()
