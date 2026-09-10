@@ -736,6 +736,16 @@ record_review_request() {
 
   printf '%s\t%s\t%s\n' "$pr" "$head_sha" "$requested_at" \
     >>"$review_requests_file"
+
+  # Keep an active review pinned visually at the top, but place it last in the
+  # saved queue so it returns there if GitHub still reports it as stale after
+  # the active state clears.
+  if (( requested_at > 0 )); then
+    awk -v pr="$pr" '$0 != pr { print } END { print pr }' \
+      "$queue_order_file" 2>/dev/null >"$queue_order_file.tmp.$$" ||
+      printf '%s\n' "$pr" >"$queue_order_file.tmp.$$"
+    mv "$queue_order_file.tmp.$$" "$queue_order_file"
+  fi
 }
 
 clear_review_request() {

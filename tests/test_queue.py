@@ -116,6 +116,15 @@ wait_for_review_completion 1162 2026-09-06T21:05:08Z head title
 ''')
         self.assertEqual(result.returncode, 99, result.stdout + result.stderr)
 
+    def test_recording_review_request_moves_pr_to_bottom(self):
+        result = self.run_shell(r'''
+printf '%s\n' 4 2 9 >"$queue_order_file"
+record_review_request 2 head-2 123
+cat "$queue_order_file"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['4', '9', '2'])
+
     def test_monitor_continues_after_skipped_review(self):
         result = self.run_shell(r'''
 claim_monitor() { :; }

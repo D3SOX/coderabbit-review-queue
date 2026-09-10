@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSystemTrayIcon,
+    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -42,6 +43,14 @@ SELECTED_REPO_FILE = STATE_ROOT / "selected-repo"
 REPOSITORY_CACHE_FILE = STATE_ROOT / "repositories.txt"
 
 
+def file_signature(path: Path) -> tuple[int, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+
 class QueueWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -56,6 +65,9 @@ class QueueWindow(QMainWindow):
         self.status_repo = ""
         self.status_failures = 0
         self.status_manual = False
+        self.review_requests_signature: (
+            tuple[str, tuple[int, int, int] | None] | None
+        ) = None
         self.status_retry_timer = QTimer(self)
         self.status_retry_timer.setSingleShot(True)
         self.status_retry_timer.timeout.connect(self.retry_status)
@@ -247,6 +259,27 @@ class QueueWindow(QMainWindow):
         task_buttons.addStretch()
         task_buttons.addWidget(self.delegate_button)
 
+        queue_panel = QWidget()
+        queue_layout = QVBoxLayout(queue_panel)
+        queue_layout.setContentsMargins(0, 0, 0, 0)
+        queue_layout.addWidget(queue_label)
+        queue_layout.addWidget(self.queue)
+        queue_layout.addLayout(queue_buttons)
+
+        task_panel = QWidget()
+        task_layout = QVBoxLayout(task_panel)
+        task_layout.setContentsMargins(0, 0, 0, 0)
+        task_layout.addWidget(task_label)
+        task_layout.addWidget(self.tasks)
+        task_layout.addLayout(task_buttons)
+
+        self.table_splitter = QSplitter(Qt.Vertical)
+        self.table_splitter.addWidget(queue_panel)
+        self.table_splitter.addWidget(task_panel)
+        self.table_splitter.setStretchFactor(0, 1)
+        self.table_splitter.setStretchFactor(1, 1)
+        self.table_splitter.setChildrenCollapsible(False)
+
         layout = QVBoxLayout()
         layout.addLayout(title_row)
         layout.addLayout(repo_row)
@@ -258,12 +291,7 @@ class QueueWindow(QMainWindow):
         layout.addWidget(self.notify_sound)
         layout.addWidget(self.new_items_at_top)
         layout.addLayout(header_buttons)
-        layout.addWidget(queue_label)
-        layout.addWidget(self.queue, 1)
-        layout.addLayout(queue_buttons)
-        layout.addWidget(task_label)
-        layout.addWidget(self.tasks, 1)
-        layout.addLayout(task_buttons)
+        layout.addWidget(self.table_splitter, 1)
 
         container = QWidget()
         container.setLayout(layout)
@@ -755,6 +783,26 @@ class QueueWindow(QMainWindow):
             self.monitor_button.setIcon(QIcon.fromTheme("media-playback-start"))
             self.monitor_button.setText("Start monitor")
             self.monitor_button.setEnabled(not starting)
+        self.refresh_if_review_requests_changed()
+
+    def review_requests_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-review-requests.tsv"
+
+    def refresh_if_review_requests_changed(self) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            self.review_requests_signature = None
+            return
+        signature = (repo, file_signature(self.review_requests_file(repo)))
+        if self.review_requests_signature is None:
+            self.review_requests_signature = signature
+            return
+        if signature == self.review_requests_signature:
+            return
+        if self.status_process.state() != QProcess.NotRunning:
+            return
+        self.review_requests_signature = signature
+        self.refresh()
 
     def refresh(self, manual: bool = False, retry: bool = False) -> None:
         if self.status_process.state() != QProcess.NotRunning:
