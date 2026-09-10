@@ -190,6 +190,17 @@ main --repo example/repo
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Dispatched PR #2', result.stdout)
 
+    def test_agent_routing_does_not_block_monitor(self):
+        result = self.run_shell(r'''
+route_all_unresolved() { while true; do :; done; }
+route_all_unresolved_async snapshot
+echo 'Monitor continued'
+jobs -p | xargs -r kill
+wait 2>/dev/null || true
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Monitor continued', result.stdout)
+
     def test_monitor_continues_after_skipped_review(self):
         result = self.run_shell(r'''
 claim_monitor() { :; }
@@ -364,13 +375,86 @@ printf '%s\n' \
   >"$file"
 matching_codex_session() { printf '%s\t%s\n' "$session" "$state_root/worktree"; }
 codex_session_state() { printf 'running\n'; }
+codex_thread_metadata() { printf 'Review task\tgpt-6\thigh\n'; }
 codex_task_progress branch head
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout,
-            'Running (12345678) — latest progress\n',
+            'Running\tReview task\tlatest progress\n',
         )
+
+    def test_codex_resume_preserves_task_model_and_reasoning(self):
+        result = self.run_shell(r'''
+worktree="$state_root/worktree"
+mkdir -p "$worktree"
+git -C "$worktree" init -q
+session=12345678-1234-1234-1234-123456789abc
+codex_session_state() { printf 'idle\n'; }
+codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
+codex() { printf 'codex args:'; printf ' <%s>' "$@"; printf '\n'; }
+desktop_notify() { :; }
+threads=(thread-1)
+resume_codex_session 42 title head "$session" "$worktree" prompt threads
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('<-m> <gpt-6-astra>', result.stdout)
+        self.assertIn('<-c> <model_reasoning_effort=medium>', result.stdout)
+        self.assertIn('<--dangerously-bypass-approvals-and-sandbox>', result.stdout)
+        self.assertNotIn('<--sandbox> <workspace-write>', result.stdout)
+        self.assertIn('<resume> <--all>', result.stdout)
+
+    def test_completed_delegation_uses_guarded_admin_merge(self):
+        result = self.run_shell(r'''
+worktree="$state_root/worktree"
+mkdir -p "$worktree"
+git -C "$worktree" init -q
+session=12345678-1234-1234-1234-123456789abc
+printf '1\n' >"$auto_merge_file"
+printf '1\n' >"$merge_after_delegation_file"
+codex_session_state() { printf 'idle\n'; }
+codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
+codex() { :; }
+desktop_notify() { :; }
+pr_has_unresolved_coderabbit() { return 1; }
+gh() {
+  if [[ $1 == pr && $2 == checks ]]; then
+    return 0
+  fi
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","statusCheckRollup":[]}'
+    return 0
+  fi
+  printf 'merge args:'
+  printf ' <%s>' "$@"
+  printf '\n'
+}
+threads=(thread-1)
+resume_codex_session 42 title head "$session" "$worktree" prompt threads
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('merge args:', result.stdout)
+        self.assertIn('<--admin>', result.stdout)
+
+    def test_completed_delegation_does_not_merge_with_unresolved_feedback(self):
+        result = self.run_shell(r'''
+worktree="$state_root/worktree"
+mkdir -p "$worktree"
+git -C "$worktree" init -q
+session=12345678-1234-1234-1234-123456789abc
+printf '1\n' >"$auto_merge_file"
+printf '1\n' >"$merge_after_delegation_file"
+codex_session_state() { printf 'idle\n'; }
+codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
+codex() { :; }
+desktop_notify() { :; }
+pr_has_unresolved_coderabbit() { return 0; }
+gh() { printf 'unexpected gh call: %s\n' "$*"; return 1; }
+threads=(thread-1)
+resume_codex_session 42 title head "$session" "$worktree" prompt threads
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('unexpected gh call:', result.stdout)
 
     def test_validate_repo_rejects_missing_repository(self):
         result = self.run_shell(r'''

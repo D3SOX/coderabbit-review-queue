@@ -229,6 +229,23 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 ("example/repo", queue_gui.file_signature(request_file), None),
             )
 
+    def test_status_refresh_records_monitor_state_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor = Path(directory) / "monitor.tsv"
+            monitor.write_text("reviewing\t42\ttitle\t0\n")
+            window = Mock()
+            window.status_process.state.return_value = QProcess.NotRunning
+            window.status_retry_timer.isActive.return_value = False
+            window.selected_repo.return_value = "example/repo"
+            window.monitor_state_file.return_value = monitor
+
+            queue_gui.QueueWindow.refresh(window)
+
+            self.assertEqual(
+                window.status_monitor_signature,
+                queue_gui.file_signature(monitor),
+            )
+
     def test_tables_are_separated_by_vertical_splitter(self):
         app = QApplication.instance() or QApplication([])
         with unittest.mock.patch.object(
@@ -279,7 +296,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
     Agent task: —
   #11 needs fixes
     Result: 2 unresolved
-    Agent task: Codex Idle (12345678)
+    Agent task: Codex Idle\tResolve review feedback\tLatest task update
 """,
         )
         self.assertEqual(window.tasks.topLevelItemCount(), 2)
@@ -288,6 +305,9 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual(approved.text(2), "Approved")
         self.assertFalse(approved.data(0, Qt.UserRole + 2))
         self.assertEqual(feedback.text(2), "2 unresolved")
+        self.assertEqual(feedback.text(3), "Codex Idle")
+        self.assertEqual(feedback.text(4), "Resolve review feedback")
+        self.assertEqual(feedback.text(5), "Latest task update")
         self.assertTrue(feedback.data(0, Qt.UserRole + 2))
         app.processEvents()
 

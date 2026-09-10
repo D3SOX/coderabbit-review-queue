@@ -10,6 +10,7 @@ script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
 script_dir=${script_path%/*}
 codex_home=${CODEX_HOME:-"$HOME/.codex"}
 codex_sessions_root="$codex_home/sessions"
+codex_state_db="$codex_home/state_5.sqlite"
 claude_home=${CLAUDE_CONFIG_DIR:-${CLAUDE_HOME:-"$HOME/.claude"}}
 claude_projects_root="$claude_home/projects"
 _claude_agents_json=''
@@ -1293,7 +1294,7 @@ wait_for_review_completion() {
             and ((.body | contains("rate limited by coderabbit.ai")) | not)
           )
         ' <<<"$reviews" >/dev/null; then
-        write_monitor_state idle
+        write_monitor_state waiting '' '' 0
         printf 'CodeRabbit finished PR #%s.\n' "$pr"
         desktop_notify \
           'CodeRabbit review finished' \
@@ -1874,6 +1875,63 @@ wait_on_empty_queue() {
   return 0
 }
 
+codex_thread_metadata() {
+  local session_id=$1
+  [[ -f $codex_state_db ]] || return 1
+  python3 - "$codex_state_db" "$session_id" <<'PY'
+import json
+import sqlite3
+import sys
+
+database, session_id = sys.argv[1:]
+with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+    row = connection.execute(
+        """
+        SELECT COALESCE(NULLIF(name, ''), title), model, reasoning_effort,
+               sandbox_policy, approval_mode
+        FROM threads
+        WHERE id = ?
+        """,
+        (session_id,),
+    ).fetchone()
+if row is not None:
+    values = [
+        *row[:3],
+        json.dumps(json.loads(row[3]), separators=(",", ":")),
+        row[4],
+    ]
+    print("\t".join((value or "").replace("\t", " ").replace("\n", " ") for value in values))
+PY
+}
+
+codex_resume_permission_args() {
+  local sandbox_policy=$1 approval_mode=$2 policy_type
+  local -n args=$3
+  policy_type=$(jq -r '.type // empty' <<<"$sandbox_policy") || return 1
+  case $policy_type in
+    disabled)
+      args+=(--dangerously-bypass-approvals-and-sandbox)
+      ;;
+    danger-full-access)
+      args+=(--sandbox danger-full-access)
+      [[ -z $approval_mode ]] || args+=(-c "approval_policy=$approval_mode")
+      ;;
+    read-only)
+      args+=(--sandbox read-only)
+      [[ -z $approval_mode ]] || args+=(-c "approval_policy=$approval_mode")
+      ;;
+    workspace-write)
+      args+=(--sandbox workspace-write)
+      [[ -z $approval_mode ]] || args+=(-c "approval_policy=$approval_mode")
+      ;;
+    *)
+      printf 'Cannot safely reproduce Codex sandbox policy %q for delegation.\n' \
+        "$policy_type" >&2
+      return 1
+      ;;
+  esac
+}
+
 codex_session_state() {
   local session_id=$1
   local session_file state
@@ -2043,8 +2101,8 @@ route_unresolved_review() {
 
   case $agent in
     codex)
-      resume_codex_session "$pr" "$title" "$session_id" "$session_cwd" "$prompt" \
-        new_ids
+      resume_codex_session "$pr" "$title" "$head_sha" "$session_id" \
+        "$session_cwd" "$prompt" new_ids
       ;;
     claude)
       resume_claude_session "$pr" "$title" "$session_id" "$session_cwd" "$prompt" \
@@ -2057,17 +2115,18 @@ route_unresolved_review() {
 resume_codex_session() {
   local pr=$1
   local title=$2
-  local session_id=$3
-  local session_cwd=$4
-  local prompt=$5
-  local -n thread_ids=$6
-  local git_common_dir session_state resume_status
+  local head_sha=$3
+  local session_id=$4
+  local session_cwd=$5
+  local prompt=$6
+  local -n thread_ids=$7
+  local session_state resume_status metadata task_title task_model task_effort
+  local task_sandbox_policy task_approval_mode
   local routing_lock_path routing_lock_fd
   local thread_id
+  local -a codex_args
 
-  git_common_dir=$(
-    git -C "$session_cwd" rev-parse --path-format=absolute --git-common-dir
-  )
+  git -C "$session_cwd" rev-parse --git-common-dir >/dev/null
   routing_lock_path="/tmp/coderabbit-review-queue-$repo_key-codex-$session_id.lock"
   exec {routing_lock_fd}>"$routing_lock_path"
   if ! flock -n "$routing_lock_fd"; then
@@ -2094,14 +2153,26 @@ resume_codex_session() {
 
   printf 'Routing unresolved CodeRabbit review on PR #%s to Codex task %s.\n' \
     "$pr" "$session_id"
+  metadata=$(codex_thread_metadata "$session_id" 2>/dev/null || true)
+  IFS=$'\t' read -r task_title task_model task_effort task_sandbox_policy \
+    task_approval_mode <<<"$metadata"
+  codex_args=(exec)
+  [[ -z $task_model ]] || codex_args+=(-m "$task_model")
+  [[ -z $task_effort ]] || codex_args+=(-c "model_reasoning_effort=$task_effort")
+  if ! codex_resume_permission_args "$task_sandbox_policy" "$task_approval_mode" \
+    codex_args; then
+    desktop_notify \
+      'CodeRabbit delegation blocked' \
+      "PR #$pr — $title"$'\n''Could not safely reproduce the task permissions.' \
+      'critical'
+    exec {routing_lock_fd}>&-
+    return 1
+  fi
+  codex_args+=(resume --all "$session_id" "$prompt")
   if (
     cd "$session_cwd"
     [[ $(codex_session_state "$session_id") == idle ]] || exit 75
-    codex exec \
-      --sandbox workspace-write \
-      -c sandbox_workspace_write.network_access=true \
-      --add-dir "$git_common_dir" \
-      resume --all "$session_id" "$prompt"
+    codex "${codex_args[@]}"
   ); then
     for thread_id in "${thread_ids[@]}"; do
       attempted_route_threads["$thread_id"]=1
@@ -2110,6 +2181,23 @@ resume_codex_session() {
     desktop_notify \
       'CodeRabbit review routed' \
       "PR #$pr — $title"$'\n'"Sent unresolved feedback to its Codex task."
+    if auto_merge_enabled && merge_after_delegation_enabled; then
+      if pr_has_unresolved_coderabbit "$pr"; then
+        desktop_notify \
+          'CodeRabbit merge blocked' \
+          "PR #$pr — $title"$'\n''Delegation finished, but unresolved CodeRabbit feedback remains.' \
+          'critical'
+      elif gh pr checks "$pr" --repo "$repo" --watch --fail-fast --interval 10 &&
+        merge_pr_now "$pr" "$head_sha" "$(merge_method)" \
+          "$(delete_branch_enabled && printf 1 || printf 0)" 1; then
+        desktop_notify 'CodeRabbit PR merged' "PR #$pr — $title"
+      else
+        desktop_notify \
+          'CodeRabbit merge blocked' \
+          "PR #$pr — $title"$'\n''Delegation finished, but CI failed or the PR was no longer safe to merge.' \
+          'critical'
+      fi
+    fi
   else
     resume_status=$?
     if (( resume_status == 75 )); then
@@ -2224,10 +2312,24 @@ route_all_unresolved() {
   return 0
 }
 
+route_all_unresolved_async() {
+  local state=$1
+  (
+    trap - EXIT
+    if [[ -n ${monitor_lock_fd:-} ]]; then
+      exec {monitor_lock_fd}>&-
+    fi
+    exec {routing_scan_fd}>"/tmp/coderabbit-review-queue-$repo_key-routing.lock"
+    flock -n "$routing_scan_fd" || exit 0
+    route_all_unresolved "$state"
+  ) &
+}
+
 codex_task_progress() {
   local branch_name=$1
   local head_sha=$2
-  local match session_id session_cwd session_file state message
+  local match session_id session_cwd session_file state message metadata task_title
+  local task_model task_effort
 
   if ! match=$(matching_codex_session "$branch_name" "$head_sha"); then
     printf 'No matching task\n'
@@ -2274,12 +2376,10 @@ codex_task_progress() {
       | if length > 180 then .[0:177] + "..." else . end
     ' "$session_file"
   )
-
-  if [[ -n $message ]]; then
-    printf '%s (%s) — %s\n' "$state" "${session_id:0:8}" "$message"
-  else
-    printf '%s (%s)\n' "$state" "${session_id:0:8}"
-  fi
+  metadata=$(codex_thread_metadata "$session_id" 2>/dev/null || true)
+  IFS=$'\t' read -r task_title task_model task_effort <<<"$metadata"
+  [[ -n $task_title ]] || task_title='—'
+  printf '%s\t%s\t%s\n' "$state" "$task_title" "$message"
 }
 
 claude_task_progress() {
@@ -2374,7 +2474,7 @@ agent_task_progress() {
 }
 
 merge_pr_now() {
-  local pr=$1 expected_head=$2 method=$3 delete_branch=$4 data
+  local pr=$1 expected_head=$2 method=$3 delete_branch=$4 bypass_approval=${5:-0} data
   data=$(gh pr view "$pr" --repo "$repo" \
     --json state,headRefOid,mergeable,statusCheckRollup) || return 1
   if ! jq -e --arg head "$expected_head" '
@@ -2393,6 +2493,7 @@ merge_pr_now() {
   fi
   local -a args=(pr merge "$pr" --repo "$repo" "--$method")
   [[ $delete_branch == 1 ]] && args+=(--delete-branch)
+  [[ $bypass_approval == 1 ]] && args+=(--admin)
   gh "${args[@]}"
 }
 
@@ -2898,7 +2999,7 @@ main() {
 
 while true; do
   state=$(monitor_snapshot)
-  route_all_unresolved "$state"
+  route_all_unresolved_async "$state"
   merge_approved_reviews "$state"
   load_stale_rows "$state"
 
@@ -3071,11 +3172,9 @@ while true; do
   fi
   release_dispatch
 
-  route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"
-
   state=$(monitor_snapshot)
   merge_approved_reviews "$state"
-  route_all_unresolved "$state"
+  route_all_unresolved_async "$state"
   load_stale_rows "$state"
   if (( ${#stale[@]} == 0 )); then
     continue

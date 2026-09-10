@@ -117,6 +117,7 @@ class QueueWindow(QMainWindow):
         self.status_process = QProcess(self)
         self.status_process.finished.connect(self.status_finished)
         self.status_repo = ""
+        self.status_monitor_signature: tuple[int, int] | None = None
         self.status_failures = 0
         self.status_manual = False
         self.review_requests_signature: (
@@ -320,7 +321,7 @@ class QueueWindow(QMainWindow):
         task_label = QLabel("Finished CodeRabbit reviews")
         self.tasks = QTreeWidget()
         self.tasks.setHeaderLabels(
-            ["PR", "Title", "Result", "Agent status", "Latest progress"]
+            ["PR", "Title", "Result", "Agent status", "Task", "Latest progress"]
         )
         self.tasks.setRootIsDecorated(False)
         self.tasks.setAlternatingRowColors(True)
@@ -328,6 +329,7 @@ class QueueWindow(QMainWindow):
         self.tasks.header().resizeSection(1, 300)
         self.tasks.header().resizeSection(2, 120)
         self.tasks.header().resizeSection(3, 130)
+        self.tasks.header().resizeSection(4, 260)
         self.tasks.itemDoubleClicked.connect(
             lambda item, _column: self.open_pr_number(item.data(0, Qt.UserRole))
         )
@@ -1356,6 +1358,7 @@ class QueueWindow(QMainWindow):
         self.spinner_timer.start()
         self.statusBar().showMessage("Refreshing GitHub status…")
         self.status_repo = repo
+        self.status_monitor_signature = file_signature(self.monitor_state_file(repo))
         self.status_process.setProgram(SCRIPT)
         status_action = "--status" if manual else "--cached-status"
         self.status_process.setArguments(["--repo", repo, status_action])
@@ -1373,6 +1376,12 @@ class QueueWindow(QMainWindow):
         self.refresh_spinner.hide()
         self.update_monitor_state()
         if self.status_repo != self.selected_repo():
+            self.status_failures = 0
+            self.refresh()
+            return
+        if self.status_monitor_signature != file_signature(
+            self.monitor_state_file(self.status_repo)
+        ):
             self.status_failures = 0
             self.refresh()
             return
@@ -1748,7 +1757,13 @@ class QueueWindow(QMainWindow):
 
         self.tasks.clear()
         for number, title, result, progress in rows:
-            state, separator, detail = progress.partition(" — ")
+            fields = progress.split("\t", 2)
+            if len(fields) == 3:
+                state, task_name, detail = fields
+            else:
+                state, separator, detail = progress.partition(" — ")
+                state = re.sub(r" \([0-9a-f]{8}\)$", "", state)
+                task_name = "—"
             actionable = result.endswith(" unresolved")
             item = QTreeWidgetItem(
                 [
@@ -1756,13 +1771,14 @@ class QueueWindow(QMainWindow):
                     title,
                     result,
                     state,
-                    detail if separator else "",
+                    task_name,
+                    detail,
                 ]
             )
             item.setData(0, Qt.UserRole, number)
             item.setData(0, Qt.UserRole + 1, "Running" in state.split())
             item.setData(0, Qt.UserRole + 2, actionable)
-            item.setToolTip(4, detail)
+            item.setToolTip(5, detail)
             self.tasks.addTopLevelItem(item)
             if number == selected_number:
                 self.tasks.setCurrentItem(item)
