@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -41,6 +42,25 @@ STATE_ROOT = (
 )
 SELECTED_REPO_FILE = STATE_ROOT / "selected-repo"
 REPOSITORY_CACHE_FILE = STATE_ROOT / "repositories.txt"
+
+
+def ssh_config_hosts(path: Path | None = None) -> list[str]:
+    config = path or Path.home() / ".ssh" / "config"
+    try:
+        lines = config.read_text().splitlines()
+    except OSError:
+        return []
+    hosts: list[str] = []
+    for line in lines:
+        parts = line.strip().split()
+        if not parts or parts[0].lower() != "host":
+            continue
+        for host in parts[1:]:
+            if any(character in host for character in "*!?[]"):
+                continue
+            if host not in hosts:
+                hosts.append(host)
+    return hosts
 
 
 def file_signature(path: Path) -> tuple[int, int, int] | None:
@@ -135,9 +155,18 @@ class QueueWindow(QMainWindow):
             "Auto prefers an idle Codex match, then Claude."
         )
         self.auto_delegate.currentIndexChanged.connect(self.auto_delegate_changed)
+        self.agent_host_button = QPushButton(
+            QIcon.fromTheme("network-server"),
+            "Agent host: Local",
+        )
+        self.agent_host_button.setToolTip(
+            "Choose the computer where Codex or Claude tasks are running."
+        )
+        self.agent_host_button.clicked.connect(self.configure_agent_host)
         auto_delegate_row = QHBoxLayout()
         auto_delegate_row.addWidget(self.auto_delegate_label)
         auto_delegate_row.addWidget(self.auto_delegate, 1)
+        auto_delegate_row.addWidget(self.agent_host_button)
         self.stop_when_empty = QCheckBox(
             "Stop monitor after the last queued review finishes"
         )
@@ -247,6 +276,8 @@ class QueueWindow(QMainWindow):
 
         self.up_button = QPushButton(QIcon.fromTheme("go-up"), "Move up")
         self.down_button = QPushButton(QIcon.fromTheme("go-down"), "Move down")
+        self.up_button.setEnabled(False)
+        self.down_button.setEnabled(False)
         self.up_button.clicked.connect(lambda: self.move_selected(-1))
         self.down_button.clicked.connect(lambda: self.move_selected(1))
 
@@ -285,6 +316,8 @@ class QueueWindow(QMainWindow):
         self.table_splitter.setStretchFactor(0, 1)
         self.table_splitter.setStretchFactor(1, 1)
         self.table_splitter.setChildrenCollapsible(False)
+        self.restore_splitter_sizes()
+        self.table_splitter.splitterMoved.connect(self.save_splitter_sizes)
 
         layout = QVBoxLayout()
         layout.addLayout(title_row)
@@ -458,6 +491,7 @@ class QueueWindow(QMainWindow):
                 self.repo_combo.setEditText(selected)
         self.repo_combo.blockSignals(False)
         self.load_auto_delegate(selected)
+        self.load_agent_host(selected)
         self.load_stop_when_empty(selected)
         self.load_ignore_drafts(selected)
         self.load_excluded_branches(selected)
@@ -485,6 +519,7 @@ class QueueWindow(QMainWindow):
         temporary.write_text(repo + "\n")
         os.replace(temporary, SELECTED_REPO_FILE)
         self.load_auto_delegate(repo)
+        self.load_agent_host(repo)
         self.load_stop_when_empty(repo)
         self.load_ignore_drafts(repo)
         self.load_excluded_branches(repo)
@@ -497,6 +532,64 @@ class QueueWindow(QMainWindow):
 
     def auto_delegate_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-auto-delegate"
+
+    def agent_host_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-agent-host"
+
+    def load_agent_host(self, repo: str) -> None:
+        host = ""
+        if repo:
+            try:
+                host = self.agent_host_file(repo).read_text().strip()
+            except OSError:
+                pass
+        self.agent_host_button.setEnabled(bool(repo))
+        self.agent_host_button.setText(
+            f"Agent host: {host}" if host else "Agent host: Local"
+        )
+
+    def configure_agent_host(self) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        try:
+            current = self.agent_host_file(repo).read_text().strip()
+        except OSError:
+            current = ""
+        choices = ["Local"] + ssh_config_hosts()
+        initial = current or "Local"
+        if initial not in choices:
+            choices.append(initial)
+        selected, accepted = QInputDialog.getItem(
+            self,
+            "Configure agent host",
+            "SSH host running Codex or Claude tasks:",
+            choices,
+            choices.index(initial),
+            True,
+        )
+        if not accepted:
+            return
+        host = selected.strip()
+        if host.lower() == "local":
+            host = ""
+        if host and not re.fullmatch(r"[A-Za-z0-9_.@-]+", host):
+            QMessageBox.warning(
+                self,
+                "Invalid SSH host",
+                "Use an SSH config alias or a host name without spaces.",
+            )
+            return
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = self.agent_host_file(repo)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(host + "\n")
+        os.replace(temporary, target)
+        self.load_agent_host(repo)
+        self.show_transient_status(
+            f"Agent tasks will run on {host}" if host else "Agent tasks will run locally"
+        )
+        self.refresh()
 
     def load_auto_delegate(self, repo: str) -> None:
         self.auto_delegate.blockSignals(True)
@@ -1139,6 +1232,29 @@ class QueueWindow(QMainWindow):
         self.down_button.setEnabled(
             movable and 0 <= row < self.queue.topLevelItemCount() - 1
         )
+
+    def splitter_sizes_file(self) -> Path:
+        return STATE_ROOT / "table-splitter-sizes"
+
+    def save_splitter_sizes(self, *_args: object) -> None:
+        sizes = self.table_splitter.sizes()
+        if len(sizes) != 2 or any(size <= 0 for size in sizes):
+            return
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = self.splitter_sizes_file()
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(f"{sizes[0]} {sizes[1]}\n")
+        os.replace(temporary, target)
+
+    def restore_splitter_sizes(self) -> None:
+        try:
+            values = [
+                int(value) for value in self.splitter_sizes_file().read_text().split()
+            ]
+        except (OSError, ValueError):
+            return
+        if len(values) == 2 and all(value > 0 for value in values):
+            self.table_splitter.setSizes(values)
 
     def populate_tasks(self, status: str) -> None:
         current_item = self.tasks.currentItem()

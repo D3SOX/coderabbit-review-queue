@@ -20,6 +20,18 @@ SPEC.loader.exec_module(queue_gui)
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_ssh_hosts_exclude_patterns_and_duplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config"
+            config.write_text(
+                "Host desktop *.example !blocked\n"
+                "Host laptop desktop\n"
+            )
+            self.assertEqual(
+                queue_gui.ssh_config_hosts(config),
+                ["desktop", "laptop"],
+            )
+
     def test_monitor_state_overrides_expired_countdown(self):
         window = Mock()
         window.monitor_activity = ("checking", "42", "fix the queue", 0)
@@ -81,6 +93,32 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual(window.table_splitter.count(), 2)
         window.close()
         app.processEvents()
+
+    def test_move_buttons_start_disabled_without_selection(self):
+        app = QApplication.instance() or QApplication([])
+        with unittest.mock.patch.object(
+            queue_gui.QueueWindow, "load_cached_repos", return_value=True
+        ):
+            window = queue_gui.QueueWindow()
+        self.assertFalse(window.up_button.isEnabled())
+        self.assertFalse(window.down_button.isEnabled())
+        window.close()
+        app.processEvents()
+
+    def test_splitter_sizes_are_saved_and_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "splitter-sizes"
+            window = Mock()
+            window.splitter_sizes_file.return_value = state_file
+            window.table_splitter.sizes.return_value = [420, 180]
+
+            queue_gui.QueueWindow.save_splitter_sizes(window)
+            self.assertEqual(state_file.read_text(), "420 180\n")
+
+            restored = Mock()
+            restored.splitter_sizes_file.return_value = state_file
+            queue_gui.QueueWindow.restore_splitter_sizes(restored)
+            restored.table_splitter.setSizes.assert_called_once_with([420, 180])
 
 
 if __name__ == "__main__":

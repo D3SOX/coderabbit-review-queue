@@ -184,6 +184,17 @@ cat "$monitor_state_file"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, 'reviewing\t42\tfix the queue\t0\n')
 
+    def test_remote_agent_progress_uses_ssh(self):
+        result = self.run_shell(r'''
+printf '%s\n' desktop >"$agent_host_file"
+ssh() { printf '%s\n' "$*"; printf 'Codex Idle (12345678)\n'; }
+agent_task_progress feature abc123
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('-o BatchMode=yes', result.stdout)
+        self.assertIn('--task-progress', result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith('Codex Idle (12345678)'))
+
 
 if __name__ == '__main__':
     unittest.main()
