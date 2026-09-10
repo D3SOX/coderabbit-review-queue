@@ -195,6 +195,21 @@ agent_task_progress feature abc123
         self.assertIn('--task-progress', result.stdout)
         self.assertTrue(result.stdout.rstrip().endswith('Codex Idle (12345678)'))
 
+    def test_validate_repo_rejects_missing_repository(self):
+        result = self.run_shell(r'''
+gh() { return 1; }
+main --repo example/missing --validate-repo
+''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('could not be found', result.stderr)
+
+    def test_validate_repo_accepts_exact_repository(self):
+        result = self.run_shell(r'''
+gh() { printf 'example/repo\n'; }
+main --repo example/repo --validate-repo
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

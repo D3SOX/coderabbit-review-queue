@@ -2308,6 +2308,19 @@ delegate_pr_now() {
   return 1
 }
 
+validate_repo() {
+  local canonical
+  if ! canonical=$(gh repo view "$repo" --json nameWithOwner --jq .nameWithOwner 2>/dev/null); then
+    printf 'Repository %s could not be found or accessed.\n' "$repo" >&2
+    return 1
+  fi
+  if [[ $canonical != "$repo" ]]; then
+    printf 'Repository name is %s, not %s.\n' "$canonical" "$repo" >&2
+    return 1
+  fi
+  printf '%s\n' "$canonical"
+}
+
 ensure_fdflags() {
   if type -t fdflags >/dev/null 2>&1; then
     return 0
@@ -2424,7 +2437,7 @@ main() {
         selected_repo=$2
         shift 2
         ;;
-      --status|--gui|--list-repos|--play-notify-sound)
+      --status|--gui|--list-repos|--play-notify-sound|--validate-repo)
         action=${1#--}
         shift
         ;;
@@ -2493,6 +2506,11 @@ main() {
     }
   fi
   configure_repo "$selected_repo"
+
+  if [[ $action == validate-repo ]]; then
+    validate_repo
+    return $?
+  fi
 
   if [[ $action == task-progress ]]; then
     local_agent_task_progress "$task_branch" "$task_head"

@@ -32,6 +32,17 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 ["desktop", "laptop"],
             )
 
+    def test_unlisted_repository_is_validated_before_activation(self):
+        window = Mock()
+        window.repo_combo.count.return_value = 1
+        window.repo_combo.itemText.return_value = "example/repo"
+        window.repo_validation_process.state.return_value = QProcess.NotRunning
+
+        queue_gui.QueueWindow.repo_changed(window, "example/missing")
+
+        window.activate_repo.assert_not_called()
+        window.repo_validation_process.start.assert_called_once_with()
+
     def test_monitor_state_overrides_expired_countdown(self):
         window = Mock()
         window.monitor_activity = ("checking", "42", "fix the queue", 0)

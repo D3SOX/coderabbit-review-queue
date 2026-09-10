@@ -99,6 +99,11 @@ class QueueWindow(QMainWindow):
         self.status_retry_timer.timeout.connect(self.retry_status)
         self.repo_process = QProcess(self)
         self.repo_process.finished.connect(self.repos_finished)
+        self.repo_validation_process = QProcess(self)
+        self.repo_validation_process.finished.connect(
+            self.repository_validation_finished
+        )
+        self.pending_repository = ""
         self.delegate_process = QProcess(self)
         self.delegate_process.finished.connect(self.delegate_finished)
         self.delegate_repo = ""
@@ -490,17 +495,8 @@ class QueueWindow(QMainWindow):
             else:
                 self.repo_combo.setEditText(selected)
         self.repo_combo.blockSignals(False)
-        self.load_auto_delegate(selected)
-        self.load_agent_host(selected)
-        self.load_stop_when_empty(selected)
-        self.load_ignore_drafts(selected)
-        self.load_excluded_branches(selected)
-        self.load_excluded_authors(selected)
-        self.load_notify_sound(selected)
-        self.load_new_items_at_top(selected)
-        self.update_monitor_state()
         if selected:
-            self.refresh()
+            self.repo_changed(selected)
         else:
             self.queue.clear()
             self.tasks.clear()
@@ -512,6 +508,64 @@ class QueueWindow(QMainWindow):
     def repo_changed(self, repo: str) -> None:
         if not repo:
             return
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+            QMessageBox.warning(
+                self,
+                "Invalid repository",
+                "Enter a repository as OWNER/NAME.",
+            )
+            self.restore_selected_repo()
+            return
+        listed = any(
+            self.repo_combo.itemText(index) == repo
+            for index in range(self.repo_combo.count())
+        )
+        if listed:
+            self.activate_repo(repo)
+            return
+        if self.repo_validation_process.state() != QProcess.NotRunning:
+            return
+        self.pending_repository = repo
+        self.repo_combo.setEnabled(False)
+        self.statusBar().showMessage(f"Validating {repo}…")
+        self.repo_validation_process.setProgram(SCRIPT)
+        self.repo_validation_process.setArguments(
+            ["--repo", repo, "--validate-repo"]
+        )
+        self.repo_validation_process.start()
+
+    def repository_validation_finished(self, exit_code: int) -> None:
+        stderr = bytes(
+            self.repo_validation_process.readAllStandardError()
+        ).decode().strip()
+        repo = self.pending_repository
+        self.pending_repository = ""
+        self.repo_combo.setEnabled(True)
+        if exit_code != 0:
+            QMessageBox.warning(
+                self,
+                "Repository not found",
+                stderr or f"GitHub could not find {repo}.",
+            )
+            self.restore_selected_repo()
+            return
+        if self.repo_combo.findText(repo) < 0:
+            self.repo_combo.blockSignals(True)
+            self.repo_combo.addItem(repo)
+            self.repo_combo.setCurrentText(repo)
+            self.repo_combo.blockSignals(False)
+        self.activate_repo(repo)
+
+    def restore_selected_repo(self) -> None:
+        try:
+            selected = SELECTED_REPO_FILE.read_text().strip()
+        except OSError:
+            selected = ""
+        self.repo_combo.blockSignals(True)
+        self.repo_combo.setCurrentText(selected)
+        self.repo_combo.blockSignals(False)
+
+    def activate_repo(self, repo: str) -> None:
         self.status_retry_timer.stop()
         self.status_failures = 0
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
