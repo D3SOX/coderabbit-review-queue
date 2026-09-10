@@ -2628,17 +2628,20 @@ show_status() {
       count=$(unresolved_coderabbit_rows "$pr" |
         awk 'NF { count++ } END { print count + 0 }')
       task_progress=$(agent_task_progress "$branch_name" "$head_sha")
-      if (( count > 0 )) || [[ $task_progress == *Running* ]]; then
-        unresolved_prs[$pr]=1
-        finished_prs[$pr]=1
-        finished+=$'\n'"  #$pr $title"
-        if (( count > 0 )); then
-          finished+=$'\n'"    Result: $count unresolved"
-        else
-          finished+=$'\n'"    Result: Agent handling review"
-        fi
-        finished+=$'\n'"    Agent task: $task_progress"
+      # A delegated review remains completed for this PR even after the agent
+      # pushes a new head and becomes idle. Otherwise the new head looks like
+      # an unreviewed PR and is incorrectly put back into the review queue.
+      unresolved_prs[$pr]=1
+      finished_prs[$pr]=1
+      finished+=$'\n'"  #$pr $title"
+      if (( count > 0 )); then
+        finished+=$'\n'"    Result: $count unresolved"
+      elif [[ $task_progress == *Running* ]]; then
+        finished+=$'\n'"    Result: Agent handling review"
+      else
+        finished+=$'\n'"    Result: Agent completed review"
       fi
+      finished+=$'\n'"    Agent task: $task_progress"
     done <"$delegated_prs_file"
   fi
 

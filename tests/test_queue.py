@@ -571,6 +571,26 @@ show_status 60
         self.assertIn('Finished CodeRabbit reviews:\n  #42 fix review', result.stdout)
         self.assertNotIn('Queued PRs:\n  #42 ', result.stdout)
 
+    def test_completed_delegation_stays_finished_after_agent_push(self):
+        result = self.run_shell(r'''
+printf '42\n' >"$delegated_prs_file"
+snapshot() { printf '{"data":{"repository":{"pullRequests":{"nodes":[{"number":42,"headRefName":"feature","headRefOid":"new-head","title":"fix review"}]}}}}'; }
+status_quota_available() { :; }
+load_stale_rows() { stale=($'42\tupdated\tfeature\tnew-head\tfix review\t0'); }
+active_review_rows() { :; }
+approved_review_rows() { :; }
+reviewed_rows() { :; }
+unresolved_coderabbit_rows() { :; }
+agent_task_progress() { printf 'Codex Idle\tReview task\tdone\n'; }
+latest_expiry() { printf '0\n'; }
+shared_expiry() { printf '0\n'; }
+show_status 60
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Result: Agent completed review', result.stdout)
+        self.assertIn('Finished CodeRabbit reviews:\n  #42 fix review', result.stdout)
+        self.assertNotIn('Queued PRs:\n  #42 ', result.stdout)
+
     def test_custom_delegation_prompt_replaces_project_placeholders(self):
         result = self.run_shell(r'''
 delegation_prompt_mode_override=custom
