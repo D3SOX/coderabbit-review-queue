@@ -32,6 +32,8 @@ excluded_authors_file=''
 notify_sound_file=''
 new_items_at_top_file=''
 agent_host_file=''
+delegation_prompt_mode_file=''
+delegation_prompt_template_file=''
 monitor_state_file=''
 snapshot_cache_file=''
 snapshot_cache_lock_file=''
@@ -51,6 +53,8 @@ completion_delay_notice_attempts=120
 force_delegation=0
 force_local_agents=0
 agent_mode_override=''
+delegation_prompt_mode_override=''
+delegation_prompt_template_override=''
 empty_announced=0
 declare -A attempted_route_threads=()
 declare -A completed_review_heads=()
@@ -223,6 +227,7 @@ query($owner: String!, $name: String!) {
               login
             }
             body
+            state
             commit {
               oid
             }
@@ -297,6 +302,8 @@ configure_repo() {
   notify_sound_file="$state_root/$repo_key-notify-sound"
   new_items_at_top_file="$state_root/$repo_key-new-items-at-top"
   agent_host_file="$state_root/$repo_key-agent-host"
+  delegation_prompt_mode_file="$state_root/$repo_key-delegation-prompt-mode"
+  delegation_prompt_template_file="$state_root/$repo_key-delegation-prompt-template"
   monitor_state_file="$state_root/$repo_key-monitor-state.tsv"
   snapshot_cache_file="$state_root/$repo_key-snapshot.json"
   snapshot_cache_lock_file="$state_root/$repo_key-snapshot.lock"
@@ -574,6 +581,23 @@ eligible_rows() {
   eligible_state | jq -r '
     .data.repository.pullRequests.nodes[]
     | [.number, .headRefName, .headRefOid, .title]
+    | @tsv
+  '
+}
+
+approved_review_rows() {
+  eligible_state <<<"$1" | jq -r '
+    .data.repository.pullRequests.nodes[]
+    | . as $pr
+    | select(
+        any(
+          .reviews.nodes[]?;
+          (.author.login // "") == "coderabbitai"
+          and (.commit.oid // "") == $pr.headRefOid
+          and (.state // "") == "APPROVED"
+        )
+      )
+    | [.number, .title]
     | @tsv
   '
 }
@@ -1036,9 +1060,6 @@ query_quota() {
   local command command_at comments row amount unit attempt
 
   printf 'Checking CodeRabbit quota on PR #%s: %s\n' "$pr" "$title"
-  desktop_notify \
-    'Checking CodeRabbit quota' \
-    "PR #$pr — $title"
   command=$(
     gh api -X POST "repos/$repo/issues/$pr/comments" \
       -f body='@coderabbitai rate limit'
@@ -1061,19 +1082,10 @@ query_quota() {
 
       if (( quota_remaining < 0 )); then
         printf 'CodeRabbit reports reviews are available now.\n'
-        desktop_notify \
-          'CodeRabbit quota available' \
-          "PR #$pr — $title"$'\n''Reviews are available now.'
       elif (( quota_remaining == 0 )); then
         printf 'CodeRabbit reports no reviews currently available.\n'
-        desktop_notify \
-          'CodeRabbit quota exhausted' \
-          "PR #$pr — $title"$'\n''No reviews are currently available.'
       else
         printf 'CodeRabbit reports %s review(s) available.\n' "$quota_remaining"
-        desktop_notify \
-          'CodeRabbit quota available' \
-          "PR #$pr — $title"$'\n'"$quota_remaining review(s) available."
       fi
       return 0
     fi
@@ -1643,6 +1655,70 @@ auto_delegation_enabled() {
   [[ $(auto_delegation_mode) != disabled ]]
 }
 
+default_delegation_prompt() {
+  cat <<'PROMPT'
+Address unresolved CodeRabbit feedback on PR #{pr_number} ({pr_title}).
+PR: {pr_url}
+Threads that triggered this delegation: {threads}
+
+Follow repository instructions and existing task context.
+
+1. Use gh to fetch the live PR and unresolved CodeRabbit threads; the list above is a snapshot. Stop if the PR is closed or merged. Ignore non-CodeRabbit feedback.
+2. Confirm the PR branch and inspect the working tree. Preserve unrelated work. Verify every finding against current code, including outdated findings, and make the smallest necessary fixes.
+3. Validate changes and recheck feedback before pushing. Bundle related fixes, commit only this task's changes using repository signing conventions, and push to the PR branch. If signing times out, stop and ask the user to say continue.
+4. Reply with the fix and validation or a concrete dismissal reason, using repository attribution rules. Resolve fixes after pushing and dismissals after explaining. Leave uncertain or blocked findings open.
+5. Reply directly to existing threads without creating or submitting reviews. Verify no pending reviews remain; delete accidental pending reviews only if they contain no unrelated user comments.
+
+Never trigger CodeRabbit reviews through comments; the queue handles requests. Finish this pass without waiting for another review. Report changes, validation, the pushed commit, and blockers.
+PROMPT
+}
+
+delegation_prompt_mode() {
+  local mode=${delegation_prompt_mode_override:-default}
+  if [[ -z $delegation_prompt_mode_override && -f $delegation_prompt_mode_file ]]; then
+    mode=$(head -n 1 "$delegation_prompt_mode_file")
+  fi
+  case $mode in
+    default | short | custom) printf '%s\n' "$mode" ;;
+    *) printf 'default\n' ;;
+  esac
+}
+
+delegation_prompt_template() {
+  case $(delegation_prompt_mode) in
+    short) printf 'Resolve the CodeRabbit review and stop.\n' ;;
+    custom)
+      if [[ -n $delegation_prompt_template_override ]]; then
+        printf '%s\n' "$delegation_prompt_template_override"
+      elif [[ -s $delegation_prompt_template_file ]]; then
+        cat "$delegation_prompt_template_file"
+      else
+        default_delegation_prompt
+      fi
+      ;;
+    *) default_delegation_prompt ;;
+  esac
+}
+
+render_delegation_prompt() {
+  local pr=$1 title=$2 threads=$3 template
+  template=$(delegation_prompt_template)
+  python3 -c '
+import sys
+template = sys.stdin.read()
+values = {
+    "{pr_number}": sys.argv[1],
+    "{pr_title}": sys.argv[2],
+    "{repo}": sys.argv[3],
+    "{pr_url}": f"https://github.com/{sys.argv[3]}/pull/{sys.argv[1]}",
+    "{threads}": sys.argv[4],
+}
+for placeholder, value in values.items():
+    template = template.replace(placeholder, value)
+sys.stdout.write(template)
+' "$pr" "$title" "$repo" "$threads" <<<"$template"
+}
+
 stop_when_empty_enabled() {
   [[ -f $stop_when_empty_file ]] &&
     [[ $(head -n 1 "$stop_when_empty_file") == 1 ]]
@@ -1758,7 +1834,9 @@ route_unresolved_review() {
   host=$(agent_host 2>/dev/null || true)
   if [[ -n $host ]]; then
     if remote_output=$(remote_agent_command \
-      --delegate "$pr" --agent-mode "$mode" --local-agents); then
+      --delegate "$pr" --agent-mode "$mode" --local-agents \
+      --delegation-prompt-mode "$(delegation_prompt_mode)" \
+      --delegation-prompt-template "$(delegation_prompt_template)"); then
       printf '%s\n' "$remote_output"
       if [[ $remote_output == *"Routing unresolved CodeRabbit review"* ]]; then
         for thread_id in "${new_ids[@]}"; do
@@ -1819,26 +1897,8 @@ route_unresolved_review() {
     return 0
   fi
 
-  prompt=$(
-    printf \
-      'Address unresolved CodeRabbit feedback on PR #%s (%s).\nPR: https://github.com/%s/pull/%s\nThreads that triggered this delegation: %s\n\n' \
-      "$pr" \
-      "$title" \
-      "$repo" \
-      "$pr" \
-      "$(IFS=', '; printf '%s' "${new_threads[*]}")"
-    cat <<'PROMPT'
-Follow repository instructions and existing task context.
-
-1. Use gh to fetch the live PR and unresolved CodeRabbit threads; the list above is a snapshot. Stop if the PR is closed or merged. Ignore non-CodeRabbit feedback.
-2. Confirm the PR branch and inspect the working tree. Preserve unrelated work. Verify every finding against current code, including outdated findings, and make the smallest necessary fixes.
-3. Validate changes and recheck feedback before pushing. Bundle related fixes, commit only this task's changes using repository signing conventions, and push to the PR branch. If signing times out, stop and ask the user to say continue.
-4. Reply with the fix and validation or a concrete dismissal reason, using repository attribution rules. Resolve fixes after pushing and dismissals after explaining. Leave uncertain or blocked findings open.
-5. Reply directly to existing threads without creating or submitting reviews. Verify no pending reviews remain; delete accidental pending reviews only if they contain no unrelated user comments.
-
-Never trigger CodeRabbit reviews through comments; the queue handles requests. Finish this pass without waiting for another review. Report changes, validation, the pushed commit, and blockers.
-PROMPT
-  )
+  prompt=$(render_delegation_prompt \
+    "$pr" "$title" "$(IFS=', '; printf '%s' "${new_threads[*]}")")
 
   case $agent in
     codex)
@@ -2164,8 +2224,9 @@ agent_task_progress() {
 
 show_status() {
   local state expiry now row pr branch_name head_sha title count task_progress
-  local unresolved=''
+  local finished=''
   local -a active=()
+  local -a approved=()
   local -A active_prs=()
   local -A unresolved_prs=()
 
@@ -2188,6 +2249,11 @@ show_status() {
     done
   fi
 
+  while IFS=$'\t' read -r pr title; do
+    [[ -n ${pr:-} ]] || continue
+    approved+=("$pr"$'\t'"$title")
+  done < <(approved_review_rows "$state")
+
   while IFS=$'\t' read -r pr branch_name head_sha title; do
     [[ -n ${pr:-} ]] || continue
     count=$(
@@ -2196,16 +2262,25 @@ show_status() {
     )
     if (( count > 0 )); then
       unresolved_prs[$pr]=1
-      unresolved+=$'\n'"  #$pr $title ($count unresolved)"
+      finished+=$'\n'"  #$pr $title"
+      finished+=$'\n'"    Result: $count unresolved"
       task_progress=$(agent_task_progress "$branch_name" "$head_sha")
-      unresolved+=$'\n'"    Agent task: $task_progress"
+      finished+=$'\n'"    Agent task: $task_progress"
     fi
   done < <(eligible_rows <<<"$state")
+
+  for row in "${approved[@]}"; do
+    IFS=$'\t' read -r pr title <<<"$row"
+    [[ -z ${unresolved_prs[$pr]:-} ]] || continue
+    finished+=$'\n'"  #$pr $title"
+    finished+=$'\n'"    Result: Approved"
+    finished+=$'\n'"    Agent task: —"
+  done
 
   # Rebuild queue without unresolved PRs for display. load_stale_rows already
   # excludes them for the monitor; keep the same rule visible in --status.
   if (( ${#stale[@]} == 0 )); then
-    if (( ${#active[@]} == 0 )) && [[ -z $unresolved ]]; then
+    if (( ${#active[@]} == 0 )) && [[ -z $finished ]]; then
       printf 'No eligible open PR has an outstanding CodeRabbit review request.\n'
     fi
   else
@@ -2231,8 +2306,8 @@ show_status() {
     fi
   fi
 
-  if [[ -n $unresolved ]]; then
-    printf '\nUnresolved CodeRabbit feedback:%s\n' "$unresolved"
+  if [[ -n $finished ]]; then
+    printf '\nFinished CodeRabbit reviews:%s\n' "$finished"
   fi
 }
 
@@ -2492,6 +2567,22 @@ main() {
         force_local_agents=1
         shift
         ;;
+      --delegation-prompt-mode)
+        (( $# >= 2 )) && [[ $2 =~ ^(default|short|custom)$ ]] || {
+          printf '%s\n' '--delegation-prompt-mode requires default, short, or custom.' >&2
+          return 2
+        }
+        delegation_prompt_mode_override=$2
+        shift 2
+        ;;
+      --delegation-prompt-template)
+        (( $# >= 2 )) || {
+          printf '%s\n' '--delegation-prompt-template requires text.' >&2
+          return 2
+        }
+        delegation_prompt_template_override=$2
+        shift 2
+        ;;
       *)
         printf 'Usage: %s [--repo OWNER/NAME] [--status|--gui|--list-repos|--play-notify-sound|--delegate PR|--set-excluded-authors LIST]\n' "$0" >&2
         return 2
@@ -2559,6 +2650,13 @@ main() {
   trap cleanup_monitor EXIT
   write_monitor_state idle
 
+  quota_expiry=$(shared_expiry)
+  now=$(date -u +%s)
+  if (( quota_expiry > now )); then
+    write_monitor_state waiting '' '' "$quota_expiry"
+    wait_until "$quota_expiry"
+  fi
+
 while true; do
   state=$(monitor_snapshot)
   route_all_unresolved "$state"
@@ -2611,6 +2709,7 @@ while true; do
   now=$(date -u +%s)
   if (( current_expiry > now )); then
     release_dispatch
+    write_monitor_state waiting '' '' "$current_expiry"
     wait_until "$current_expiry"
     continue
   fi
@@ -2629,6 +2728,7 @@ while true; do
     release_dispatch
     if (( quota_expiry > now )); then
       remember_shared_expiry "$quota_expiry"
+      write_monitor_state waiting '' '' "$quota_expiry"
       wait_until "$quota_expiry"
       continue
     fi

@@ -131,6 +131,31 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             queue_gui.QueueWindow.restore_splitter_sizes(restored)
             restored.table_splitter.setSizes.assert_called_once_with([420, 180])
 
+    def test_finished_reviews_include_approved_and_feedback_rows(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.tasks = queue_gui.QTreeWidget()
+        window.update_delegate_button = Mock()
+        queue_gui.QueueWindow.populate_tasks(
+            window,
+            """Finished CodeRabbit reviews:
+  #10 approved change
+    Result: Approved
+    Agent task: —
+  #11 needs fixes
+    Result: 2 unresolved
+    Agent task: Codex Idle (12345678)
+""",
+        )
+        self.assertEqual(window.tasks.topLevelItemCount(), 2)
+        approved = window.tasks.topLevelItem(0)
+        feedback = window.tasks.topLevelItem(1)
+        self.assertEqual(approved.text(2), "Approved")
+        self.assertFalse(approved.data(0, Qt.UserRole + 2))
+        self.assertEqual(feedback.text(2), "2 unresolved")
+        self.assertTrue(feedback.data(0, Qt.UserRole + 2))
+        app.processEvents()
+
 
 if __name__ == "__main__":
     unittest.main()

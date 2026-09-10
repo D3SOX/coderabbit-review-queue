@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSystemTrayIcon,
+    QTextEdit,
     QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
@@ -42,6 +45,20 @@ STATE_ROOT = (
 )
 SELECTED_REPO_FILE = STATE_ROOT / "selected-repo"
 REPOSITORY_CACHE_FILE = STATE_ROOT / "repositories.txt"
+SHORT_DELEGATION_PROMPT = "Resolve the CodeRabbit review and stop."
+DEFAULT_DELEGATION_PROMPT = """Address unresolved CodeRabbit feedback on PR #{pr_number} ({pr_title}).
+PR: {pr_url}
+Threads that triggered this delegation: {threads}
+
+Follow repository instructions and existing task context.
+
+1. Use gh to fetch the live PR and unresolved CodeRabbit threads; the list above is a snapshot. Stop if the PR is closed or merged. Ignore non-CodeRabbit feedback.
+2. Confirm the PR branch and inspect the working tree. Preserve unrelated work. Verify every finding against current code, including outdated findings, and make the smallest necessary fixes.
+3. Validate changes and recheck feedback before pushing. Bundle related fixes, commit only this task's changes using repository signing conventions, and push to the PR branch. If signing times out, stop and ask the user to say continue.
+4. Reply with the fix and validation or a concrete dismissal reason, using repository attribution rules. Resolve fixes after pushing and dismissals after explaining. Leave uncertain or blocked findings open.
+5. Reply directly to existing threads without creating or submitting reviews. Verify no pending reviews remain; delete accidental pending reviews only if they contain no unrelated user comments.
+
+Never trigger CodeRabbit reviews through comments; the queue handles requests. Finish this pass without waiting for another review. Report changes, validation, the pushed commit, and blockers."""
 
 
 def ssh_config_hosts(path: Path | None = None) -> list[str]:
@@ -168,10 +185,22 @@ class QueueWindow(QMainWindow):
             "Choose the computer where Codex or Claude tasks are running."
         )
         self.agent_host_button.clicked.connect(self.configure_agent_host)
+        self.delegation_prompt_button = QPushButton(
+            QIcon.fromTheme("document-edit"),
+            "Delegation prompt…",
+        )
+        self.delegation_prompt_button.setToolTip(
+            "Choose the prompt sent to Codex for this repository."
+        )
+        self.delegation_prompt_button.setEnabled(False)
+        self.delegation_prompt_button.clicked.connect(
+            self.configure_delegation_prompt
+        )
         auto_delegate_row = QHBoxLayout()
         auto_delegate_row.addWidget(self.auto_delegate_label)
         auto_delegate_row.addWidget(self.auto_delegate, 1)
         auto_delegate_row.addWidget(self.agent_host_button)
+        auto_delegate_row.addWidget(self.delegation_prompt_button)
         self.stop_when_empty = QCheckBox(
             "Stop monitor after the last queued review finishes"
         )
@@ -263,10 +292,10 @@ class QueueWindow(QMainWindow):
         )
         self.queue.itemSelectionChanged.connect(self.update_queue_buttons)
 
-        task_label = QLabel("PRs with unresolved feedback / agent task progress")
+        task_label = QLabel("Finished CodeRabbit reviews")
         self.tasks = QTreeWidget()
         self.tasks.setHeaderLabels(
-            ["PR", "Title", "Feedback", "Agent status", "Latest progress"]
+            ["PR", "Title", "Result", "Agent status", "Latest progress"]
         )
         self.tasks.setRootIsDecorated(False)
         self.tasks.setAlternatingRowColors(True)
@@ -348,10 +377,13 @@ class QueueWindow(QMainWindow):
         refresh_action.triggered.connect(lambda: self.refresh(manual=True))
         quit_action = QAction("Quit queue window", self)
         quit_action.triggered.connect(QApplication.instance().quit)
+        stop_and_quit_action = QAction("Quit and stop all monitors", self)
+        stop_and_quit_action.triggered.connect(self.stop_all_monitors_and_quit)
         tray_menu.addAction(show_action)
         tray_menu.addAction(refresh_action)
         tray_menu.addSeparator()
         tray_menu.addAction(quit_action)
+        tray_menu.addAction(stop_and_quit_action)
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.tray_activated)
         self.tray_icon.setToolTip(self.base_window_title)
@@ -574,6 +606,7 @@ class QueueWindow(QMainWindow):
         os.replace(temporary, SELECTED_REPO_FILE)
         self.load_auto_delegate(repo)
         self.load_agent_host(repo)
+        self.delegation_prompt_button.setEnabled(bool(repo))
         self.load_stop_when_empty(repo)
         self.load_ignore_drafts(repo)
         self.load_excluded_branches(repo)
@@ -589,6 +622,106 @@ class QueueWindow(QMainWindow):
 
     def agent_host_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-agent-host"
+
+    def delegation_prompt_mode_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-delegation-prompt-mode"
+
+    def delegation_prompt_template_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-delegation-prompt-template"
+
+    def delegation_prompt_settings(self, repo: str) -> tuple[str, str]:
+        try:
+            mode = self.delegation_prompt_mode_file(repo).read_text().strip()
+        except OSError:
+            mode = "default"
+        if mode not in {"default", "short", "custom"}:
+            mode = "default"
+        try:
+            custom = self.delegation_prompt_template_file(repo).read_text()
+        except OSError:
+            custom = ""
+        return mode, custom
+
+    def configure_delegation_prompt(self) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        current_mode, custom_prompt = self.delegation_prompt_settings(repo)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Delegation prompt")
+        dialog.resize(760, 620)
+
+        mode_label = QLabel("Prompt for this repository")
+        mode_select = QComboBox()
+        mode_select.addItem("Default review workflow", "default")
+        mode_select.addItem("Resolve review and stop", "short")
+        mode_select.addItem("Custom prompt", "custom")
+        mode_select.setCurrentIndex(mode_select.findData(current_mode))
+
+        prompt_editor = QTextEdit()
+        prompt_editor.setAcceptRichText(False)
+        prompt_editor.setAccessibleName("Delegation prompt text")
+        placeholders = QLabel(
+            "Custom placeholders: {pr_number}, {pr_title}, {repo}, "
+            "{pr_url}, {threads}"
+        )
+        placeholders.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        placeholders.setWordWrap(True)
+
+        editor_state = {"mode": "", "custom": custom_prompt}
+
+        def update_editor() -> None:
+            if editor_state["mode"] == "custom":
+                editor_state["custom"] = prompt_editor.toPlainText()
+            mode = mode_select.currentData()
+            if mode == "default":
+                prompt_editor.setPlainText(DEFAULT_DELEGATION_PROMPT)
+            elif mode == "short":
+                prompt_editor.setPlainText(SHORT_DELEGATION_PROMPT)
+            else:
+                prompt_editor.setPlainText(editor_state["custom"])
+            prompt_editor.setEnabled(mode == "custom")
+            editor_state["mode"] = mode
+
+        mode_select.currentIndexChanged.connect(lambda _index: update_editor())
+        update_editor()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(mode_label)
+        layout.addWidget(mode_select)
+        layout.addWidget(prompt_editor, 1)
+        layout.addWidget(placeholders)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+        mode = mode_select.currentData()
+        if not isinstance(mode, str):
+            return
+        custom = prompt_editor.toPlainText() if mode == "custom" else custom_prompt
+        if mode == "custom" and not custom.strip():
+            QMessageBox.warning(
+                self,
+                "Empty custom prompt",
+                "Enter a custom prompt or choose a preset.",
+            )
+            return
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        mode_target = self.delegation_prompt_mode_file(repo)
+        mode_temporary = mode_target.with_suffix(".tmp")
+        mode_temporary.write_text(mode + "\n")
+        os.replace(mode_temporary, mode_target)
+        if mode == "custom":
+            template_target = self.delegation_prompt_template_file(repo)
+            template_temporary = template_target.with_suffix(".tmp")
+            template_temporary.write_text(custom.rstrip() + "\n")
+            os.replace(template_temporary, template_target)
+        self.show_transient_status("Delegation prompt saved")
 
     def load_agent_host(self, repo: str) -> None:
         host = ""
@@ -1217,8 +1350,8 @@ class QueueWindow(QMainWindow):
                 section = "active"
             elif line == "Queued PRs:":
                 section = "queue"
-            elif line.startswith("Unresolved CodeRabbit feedback:"):
-                section = "feedback"
+            elif line.startswith("Finished CodeRabbit reviews:"):
+                section = "finished"
             elif line.startswith("Next outstanding rate limit expires at "):
                 expiry = self.parse_expiry(line)
             elif section in {"active", "queue"} and line.startswith("  #"):
@@ -1315,27 +1448,25 @@ class QueueWindow(QMainWindow):
         selected_number = (
             current_item.data(0, Qt.UserRole) if current_item is not None else None
         )
-        rows: list[tuple[str, str, str]] = []
-        current: tuple[str, str, str] | None = None
-        in_feedback = False
+        rows: list[tuple[str, str, str, str]] = []
+        current: tuple[str, str] | None = None
+        result = ""
+        in_finished = False
 
         for line in status.splitlines():
-            if line.startswith("Unresolved CodeRabbit feedback:"):
-                in_feedback = True
+            if line.startswith("Finished CodeRabbit reviews:"):
+                in_finished = True
                 continue
-            if not in_feedback:
+            if not in_finished:
                 continue
 
-            feedback = re.fullmatch(
-                r"  #(\d+) (.+) \((\d+) unresolved\)",
-                line,
-            )
-            if feedback:
-                current = (
-                    feedback.group(1),
-                    feedback.group(2),
-                    feedback.group(3),
-                )
+            review = re.fullmatch(r"  #(\d+) (.+)", line)
+            if review:
+                current = (review.group(1), review.group(2))
+                result = ""
+                continue
+            if current and line.startswith("    Result: "):
+                result = line.removeprefix("    Result: ")
                 continue
             if current and (
                 line.startswith("    Agent task: ")
@@ -1344,23 +1475,25 @@ class QueueWindow(QMainWindow):
                 progress = line.removeprefix("    Agent task: ").removeprefix(
                     "    Codex task: "
                 )
-                rows.append((*current, progress))
+                rows.append((*current, result, progress))
                 current = None
 
         self.tasks.clear()
-        for number, title, unresolved, progress in rows:
+        for number, title, result, progress in rows:
             state, separator, detail = progress.partition(" — ")
+            actionable = result.endswith(" unresolved")
             item = QTreeWidgetItem(
                 [
                     f"#{number}",
                     title,
-                    f"{unresolved} unresolved",
+                    result,
                     state,
                     detail if separator else "",
                 ]
             )
             item.setData(0, Qt.UserRole, number)
             item.setData(0, Qt.UserRole + 1, "Running" in state.split())
+            item.setData(0, Qt.UserRole + 2, actionable)
             item.setToolTip(4, detail)
             self.tasks.addTopLevelItem(item)
             if number == selected_number:
@@ -1423,6 +1556,7 @@ class QueueWindow(QMainWindow):
         item = self.tasks.currentItem()
         self.delegate_button.setEnabled(
             item is not None
+            and bool(item.data(0, Qt.UserRole + 2))
             and not bool(item.data(0, Qt.UserRole + 1))
             and self.delegate_process.state() == QProcess.NotRunning
         )
@@ -1433,6 +1567,7 @@ class QueueWindow(QMainWindow):
         if (
             item is None
             or not repo
+            or not bool(item.data(0, Qt.UserRole + 2))
             or bool(item.data(0, Qt.UserRole + 1))
             or self.delegate_process.state() != QProcess.NotRunning
         ):
@@ -1560,6 +1695,26 @@ class QueueWindow(QMainWindow):
                     pass
             self.show_transient_status("Monitor stopped")
             QTimer.singleShot(500, self.update_monitor_state)
+
+    def stop_all_monitors_and_quit(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Quit and stop all monitors",
+            "Stop every CodeRabbit queue monitor on this computer and quit?",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        for pid_file in Path("/tmp").glob("coderabbit-review-queue-*.pid"):
+            try:
+                if pid_file.stat().st_uid != os.getuid():
+                    continue
+                pid = int(pid_file.read_text().strip())
+                if not Path(f"/proc/{pid}").exists():
+                    continue
+                os.killpg(pid, signal.SIGTERM)
+            except (OSError, ValueError, ProcessLookupError, PermissionError):
+                continue
+        QApplication.instance().quit()
 
 
 def main() -> int:

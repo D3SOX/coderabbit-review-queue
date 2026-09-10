@@ -210,6 +210,94 @@ main --repo example/repo --validate-repo
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_monitor_restart_waits_for_saved_quota_before_refreshing(self):
+        result = self.run_shell(r'''
+claim_monitor() { :; }
+cleanup_monitor() { :; }
+monitor_snapshot() { echo 'Refreshed before saved expiry' >&2; exit 99; }
+wait_until() { echo "Waited for saved expiry $1"; exit 0; }
+printf '%s\n' "$(( $(date +%s) + 600 ))" >"$quota_expiry_file"
+main --repo example/repo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Waited for saved expiry', result.stdout)
+        self.assertNotIn('Refreshed before saved expiry', result.stderr)
+
+    def test_approved_review_rows_include_current_head(self):
+        approved = self.pr(1)
+        approved['reviews']['nodes'] = [{
+            'author': {'login': 'coderabbitai'},
+            'body': 'No issues found',
+            'state': 'APPROVED',
+            'commit': {'oid': 'head'},
+            'submittedAt': '2026-09-10T10:00:00Z',
+        }]
+        old_head = self.pr(2)
+        old_head['reviews']['nodes'] = [{
+            'author': {'login': 'coderabbitai'},
+            'body': 'No issues found',
+            'state': 'APPROVED',
+            'commit': {'oid': 'old'},
+            'submittedAt': '2026-09-10T10:00:00Z',
+        }]
+        self.assertEqual(self.rows('state=$(cat); approved_review_rows "$state"',
+                                   [approved, old_head]), [1])
+
+    def test_custom_delegation_prompt_replaces_project_placeholders(self):
+        result = self.run_shell(r'''
+delegation_prompt_mode_override=custom
+delegation_prompt_template_override='Fix {repo} PR #{pr_number}: {pr_title}\n{pr_url}\n{threads}'
+render_delegation_prompt 42 'title & details' 'thread-1 (src/app.py:7)'
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Fix example/repo PR #42: title & details', result.stdout)
+        self.assertIn('https://github.com/example/repo/pull/42', result.stdout)
+        self.assertIn('thread-1 (src/app.py:7)', result.stdout)
+
+    def test_quota_wait_replaces_checking_monitor_state(self):
+        result = self.run_shell(r'''
+claim_monitor() { :; }
+cleanup_monitor() { :; }
+monitor_snapshot() { printf '{}'; }
+route_all_unresolved() { :; }
+load_stale_rows() { stale=($'42\tnow\tbranch\thead\ttitle\t-'); }
+latest_expiry() { echo 0; }
+shared_expiry() { echo 0; }
+remember_shared_expiry() { :; }
+claim_dispatch() { :; }
+release_dispatch() { :; }
+query_quota() {
+  quota_remaining=0
+  quota_expiry=$(( $(date +%s) + 600 ))
+}
+wait_until() {
+  cat "$monitor_state_file"
+  exit 0
+}
+main --repo example/repo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r'waiting\t\t\t\d+')
+        self.assertNotIn('checking\t42', result.stdout)
+
+    def test_normal_quota_checks_do_not_send_desktop_notifications(self):
+        for row in ('-1\tnow\t0\tminutes', '0\tnow\t10\tminutes'):
+            with self.subTest(row=row):
+                result = self.run_shell(rf'''
+desktop_notify() {{ echo "unexpected notification: $1" >&2; return 99; }}
+gh() {{
+  if [[ $* == *"-X POST"* ]]; then
+    printf '%s\n' '{{"created_at":"now"}}'
+  else
+    printf '[]\n'
+  fi
+}}
+quota_row_from_comments() {{ printf '%b\n' '{row}'; }}
+query_quota 42 title
+''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn('unexpected notification', result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
