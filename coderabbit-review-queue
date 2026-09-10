@@ -1821,12 +1821,23 @@ route_unresolved_review() {
 
   prompt=$(
     printf \
-      'PR #%s (%s) has unresolved CodeRabbit review threads: %s. Inspect the live unresolved CodeRabbit threads on https://github.com/%s/pull/%s, verify each finding against the current code, address every valid actionable issue, run appropriate validation, and resolve the addressed GitHub review threads. Do not act on non-CodeRabbit feedback.' \
+      'Address unresolved CodeRabbit feedback on PR #%s (%s).\nPR: https://github.com/%s/pull/%s\nThreads that triggered this delegation: %s\n\n' \
       "$pr" \
       "$title" \
-      "$(IFS=', '; printf '%s' "${new_threads[*]}")" \
       "$repo" \
-      "$pr"
+      "$pr" \
+      "$(IFS=', '; printf '%s' "${new_threads[*]}")"
+    cat <<'PROMPT'
+Follow repository instructions and existing task context.
+
+1. Use gh to fetch the live PR and unresolved CodeRabbit threads; the list above is a snapshot. Stop if the PR is closed or merged. Ignore non-CodeRabbit feedback.
+2. Confirm the PR branch and inspect the working tree. Preserve unrelated work. Verify every finding against current code, including outdated findings, and make the smallest necessary fixes.
+3. Validate changes and recheck feedback before pushing. Bundle related fixes, commit only this task's changes using repository signing conventions, and push to the PR branch. If signing times out, stop and ask the user to say continue.
+4. Reply with the fix and validation or a concrete dismissal reason, using repository attribution rules. Resolve fixes after pushing and dismissals after explaining. Leave uncertain or blocked findings open.
+5. Reply directly to existing threads without creating or submitting reviews. Verify no pending reviews remain; delete accidental pending reviews only if they contain no unrelated user comments.
+
+Never trigger CodeRabbit reviews through comments; the queue handles requests. Finish this pass without waiting for another review. Report changes, validation, the pushed commit, and blockers.
+PROMPT
   )
 
   case $agent in
