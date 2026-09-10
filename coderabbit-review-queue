@@ -2922,6 +2922,14 @@ while true; do
     continue
   fi
 
+  # The quota query can take long enough for the GUI order to change. Reapply
+  # the persisted order before choosing which PR receives the available slot.
+  load_stale_rows "$state"
+  if (( ${#stale[@]} == 0 )); then
+    release_dispatch
+    continue
+  fi
+
   if (( quota_remaining == 0 )); then
     now=$(date -u +%s)
     release_dispatch

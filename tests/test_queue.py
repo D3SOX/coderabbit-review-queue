@@ -151,6 +151,45 @@ cat "$queue_order_file"
             self.assertEqual(process.returncode, 0, stdout + stderr)
             self.assertEqual(order.read_text().splitlines(), ['3', '1', '2'])
 
+    def test_monitor_rereads_queue_order_after_quota_check(self):
+        result = self.run_shell(r'''
+claim_monitor() { :; }
+cleanup_monitor() { :; }
+claim_dispatch() { :; }
+release_dispatch() { :; }
+monitor_snapshot() { printf 'snapshot\n'; }
+route_all_unresolved() { :; }
+merge_approved_reviews() { :; }
+load_stale_rows() {
+  stale=()
+  while IFS= read -r pr; do
+    case $pr in
+      1) stale+=($'1\tnow\tbranch-1\thead-1\tfirst\t-') ;;
+      2) stale+=($'2\tnow\tbranch-2\thead-2\tsecond\t-') ;;
+    esac
+  done <"$queue_order_file"
+}
+latest_expiry() { echo 0; }
+shared_expiry() { echo 0; }
+remember_shared_expiry() { :; }
+wait_until() { :; }
+printf '1\n2\n' >"$queue_order_file"
+query_quota() {
+  quota_remaining=1
+  printf '2\n1\n' >"$queue_order_file"
+}
+recent_review_request_expiry() { echo 0; }
+desktop_notify() { :; }
+gh() { :; }
+wait_for_acceptance() {
+  echo "Dispatched PR #$1"
+  exit 0
+}
+main --repo example/repo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Dispatched PR #2', result.stdout)
+
     def test_monitor_continues_after_skipped_review(self):
         result = self.run_shell(r'''
 claim_monitor() { :; }
