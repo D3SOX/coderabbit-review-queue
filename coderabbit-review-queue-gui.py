@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 import os
+import fcntl
 import re
 import signal
 import subprocess
@@ -1801,9 +1802,12 @@ class QueueWindow(QMainWindow):
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         order_file = self.queue_order_file(repo)
-        temporary = order_file.with_suffix(".tmp")
-        temporary.write_text("\n".join(numbers) + "\n")
-        os.replace(temporary, order_file)
+        lock_file = order_file.with_suffix(order_file.suffix + ".lock")
+        with lock_file.open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            temporary = order_file.with_suffix(".tmp")
+            temporary.write_text("\n".join(numbers) + "\n")
+            os.replace(temporary, order_file)
         self.show_transient_status("Queue order saved")
 
     def queue_order_file(self, repo: str) -> Path:

@@ -1,4 +1,5 @@
 import json
+import fcntl
 import os
 from pathlib import Path
 import subprocess
@@ -124,6 +125,31 @@ cat "$queue_order_file"
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines(), ['4', '9', '2'])
+
+    def test_monitor_order_update_does_not_overwrite_concurrent_gui_order(self):
+        with tempfile.TemporaryDirectory() as state:
+            state_root = Path(state) / 'coderabbit-review-queue'
+            state_root.mkdir()
+            order = state_root / 'example__repo-order.txt'
+            lock_path = order.with_suffix(order.suffix + '.lock')
+            order.write_text('1\n2\n3\n')
+            with lock_path.open('w') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                process = subprocess.Popen(
+                    ['bash', '-c', (
+                        'source "$1"\nconfigure_repo example/repo\n'
+                        'record_review_request 2 head-2 123'
+                    ), 'test', str(SCRIPT)],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env={**os.environ, 'XDG_STATE_HOME': state},
+                )
+                order.write_text('3\n2\n1\n')
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+            self.assertEqual(order.read_text().splitlines(), ['3', '1', '2'])
 
     def test_monitor_continues_after_skipped_review(self):
         result = self.run_shell(r'''
