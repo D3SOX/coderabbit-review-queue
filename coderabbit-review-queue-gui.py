@@ -90,6 +90,19 @@ def file_signature(path: Path) -> tuple[int, int, int] | None:
     return stat.st_ino, stat.st_mtime_ns, stat.st_size
 
 
+def proc_stat_is_running(stat: str) -> bool:
+    remainder = stat.rpartition(")")[2].strip().split()
+    return bool(remainder) and remainder[0] != "Z"
+
+
+def process_is_running(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return proc_stat_is_running(stat)
+
+
 class QueueWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -388,13 +401,18 @@ class QueueWindow(QMainWindow):
         refresh_action.triggered.connect(lambda: self.refresh(manual=True))
         quit_action = QAction("Quit queue window", self)
         quit_action.triggered.connect(QApplication.instance().quit)
-        stop_and_quit_action = QAction("Quit and stop all monitors", self)
-        stop_and_quit_action.triggered.connect(self.stop_all_monitors_and_quit)
+        self.stop_all_monitors_action = QAction(
+            "Quit and stop all monitors", self
+        )
+        self.stop_all_monitors_action.triggered.connect(
+            self.stop_all_monitors_and_quit
+        )
+        self.stop_all_monitors_action.setVisible(False)
         tray_menu.addAction(self.window_action)
         tray_menu.addAction(refresh_action)
         tray_menu.addSeparator()
         tray_menu.addAction(quit_action)
-        tray_menu.addAction(stop_and_quit_action)
+        tray_menu.addAction(self.stop_all_monitors_action)
         tray_menu.aboutToShow.connect(self.update_tray_window_action)
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.tray_activated)
@@ -456,6 +474,19 @@ class QueueWindow(QMainWindow):
             if self.window_is_shown()
             else "Show CodeRabbit queue"
         )
+        self.stop_all_monitors_action.setVisible(self.any_monitor_running())
+
+    def any_monitor_running(self) -> bool:
+        for pid_file in Path("/tmp").glob("coderabbit-review-queue-*.pid"):
+            try:
+                if pid_file.stat().st_uid != os.getuid():
+                    continue
+                pid = int(pid_file.read_text().strip())
+            except (OSError, ValueError):
+                continue
+            if process_is_running(pid):
+                return True
+        return False
 
     def tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (
@@ -1233,7 +1264,7 @@ class QueueWindow(QMainWindow):
             pid = int(pid_file.read_text().strip())
         except (OSError, ValueError):
             return None
-        return pid if Path(f"/proc/{pid}").exists() else None
+        return pid if process_is_running(pid) else None
 
     def update_monitor_state(self) -> None:
         repo = self.selected_repo()
@@ -1944,9 +1975,13 @@ class QueueWindow(QMainWindow):
                 else:
                     os.kill(pid, signal.SIGTERM)
                 deadline = time.monotonic() + 2
-                while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
+                while (
+                    pid_file.exists()
+                    and process_is_running(pid)
+                    and time.monotonic() < deadline
+                ):
                     time.sleep(0.05)
-                if Path(f"/proc/{pid}").exists():
+                if pid_file.exists() and process_is_running(pid):
                     failed.append(pid)
             except ProcessLookupError:
                 continue

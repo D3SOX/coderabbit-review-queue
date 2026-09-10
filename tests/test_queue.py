@@ -223,6 +223,17 @@ main --repo example/repo
         self.assertIn('Waited for saved expiry', result.stdout)
         self.assertNotIn('Refreshed before saved expiry', result.stderr)
 
+    def test_monitor_restart_restores_saved_wait_without_notification(self):
+        result = self.run_shell(r'''
+claim_monitor() { :; }
+cleanup_monitor() { :; }
+wait_until() { printf 'mode=%s\n' "${2:-notify}"; exit 0; }
+printf '%s\n' "$(( $(date +%s) + 600 ))" >"$quota_expiry_file"
+main --repo example/repo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('mode=quiet', result.stdout)
+
     def test_approved_review_rows_include_current_head(self):
         approved = self.pr(1)
         approved['reviews']['nodes'] = [{

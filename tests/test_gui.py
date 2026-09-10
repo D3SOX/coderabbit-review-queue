@@ -21,6 +21,10 @@ SPEC.loader.exec_module(queue_gui)
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_zombie_monitor_is_not_considered_running(self):
+        self.assertFalse(queue_gui.proc_stat_is_running("1040817 (bash) Z 1 2 3"))
+        self.assertTrue(queue_gui.proc_stat_is_running("1040817 (bash) S 1 2 3"))
+
     def test_tray_click_hides_visible_window(self):
         window = Mock()
         window.window_is_shown.return_value = True
@@ -43,10 +47,22 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window = Mock()
         window.isVisible.return_value = True
         window.isMinimized.return_value = False
+        window.any_monitor_running.return_value = False
 
         queue_gui.QueueWindow.update_tray_window_action(window)
 
         window.window_action.setText.assert_called_once_with("Hide CodeRabbit queue")
+        window.stop_all_monitors_action.setVisible.assert_called_once_with(False)
+
+    def test_tray_stop_all_action_is_visible_with_running_monitor(self):
+        window = Mock()
+        window.isVisible.return_value = False
+        window.isMinimized.return_value = False
+        window.any_monitor_running.return_value = True
+
+        queue_gui.QueueWindow.update_tray_window_action(window)
+
+        window.stop_all_monitors_action.setVisible.assert_called_once_with(True)
 
     def test_recent_complete_status_cache_skips_startup_refresh(self):
         with tempfile.TemporaryDirectory() as directory:

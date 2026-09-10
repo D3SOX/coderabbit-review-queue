@@ -963,6 +963,7 @@ recent_review_request_expiry() {
 
 wait_until() {
   local expiry=$1
+  local notification_mode=${2:-notify}
   local now delay wake announced=0
 
   now=$(date -u +%s)
@@ -972,7 +973,8 @@ wait_until() {
   printf 'Waiting until CodeRabbit expiry %s (%s seconds).\n' "$wake" "$delay"
   # A wait this short is only the floored-countdown safety margin, not a new
   # review window worth announcing immediately before the quota recheck.
-  if (( delay > review_window_safety_minutes )); then
+  if [[ $notification_mode != quiet ]] &&
+    (( delay > review_window_safety_minutes )); then
     announced=1
     desktop_notify \
       'CodeRabbit queue waiting' \
@@ -2844,7 +2846,7 @@ main() {
   now=$(date -u +%s)
   if (( quota_expiry > now )); then
     write_monitor_state waiting '' '' "$quota_expiry"
-    wait_until "$quota_expiry"
+    wait_until "$quota_expiry" quiet
   fi
 
 while true; do
