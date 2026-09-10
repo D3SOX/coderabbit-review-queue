@@ -80,6 +80,26 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             window.populate_queue.assert_called_once_with(cache.read_text())
             window.populate_tasks.assert_called_once_with(cache.read_text())
 
+    def test_review_request_change_invalidates_complete_status_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "status.txt"
+            request = Path(directory) / "requests.tsv"
+            cache.write_text("Repository: example/repo\n")
+            request.write_text("42\thead\t123\n")
+            newer = time.time() + 1
+            os.utime(request, (newer, newer))
+            window = Mock()
+            window.status_cache_file.return_value = cache
+            window.review_requests_file.return_value = request
+            window.monitor_state_file.return_value = Path(directory) / "missing"
+
+            fresh = queue_gui.QueueWindow.load_cached_status(
+                window, "example/repo"
+            )
+
+            self.assertFalse(fresh)
+            window.populate_queue.assert_called_once_with(cache.read_text())
+
     def test_automatic_refresh_uses_shared_snapshot_cache(self):
         window = Mock()
         window.status_process.state.return_value = QProcess.NotRunning
@@ -151,6 +171,21 @@ class ReviewRequestRefreshTests(unittest.TestCase):
 
         window.timer_label.setText.assert_called_once_with(
             "Next review: Preparing availability check"
+        )
+
+    def test_stopped_monitor_does_not_claim_review_is_available(self):
+        window = Mock()
+        window.monitor_activity = None
+        window.active_reviews = []
+        window.has_queued_reviews = True
+        window.next_review_at = None
+        window.selected_repo.return_value = "example/repo"
+        window.monitor_pid.return_value = None
+
+        queue_gui.QueueWindow.update_countdown_display(window)
+
+        window.timer_label.setText.assert_called_once_with(
+            "Next review: Availability unknown"
         )
 
     def test_request_file_change_triggers_refresh(self):
@@ -239,6 +274,46 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual(feedback.text(2), "2 unresolved")
         self.assertTrue(feedback.data(0, Qt.UserRole + 2))
         app.processEvents()
+
+    def test_live_review_state_keeps_pr_at_top_of_queue(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.monitor_activity = ("reviewing", "42", "live review", 0)
+        window.selected_repo.return_value = ""
+        window.update_countdown_display = Mock()
+        window.update_queue_buttons = Mock()
+        window.apply_monitor_activity_to_queue = lambda: (
+            queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        )
+
+        queue_gui.QueueWindow.populate_queue(window, "Repository: example/repo\n")
+
+        self.assertEqual(window.queue.topLevelItemCount(), 1)
+        item = window.queue.topLevelItem(0)
+        self.assertEqual(item.text(0), "#42")
+        self.assertEqual(item.text(2), "In progress")
+
+    def test_checking_state_replaces_queued_row_without_duplicate(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.monitor_activity = ("checking", "42", "live review", 0)
+        window.selected_repo.return_value = ""
+        window.update_countdown_display = Mock()
+        window.update_queue_buttons = Mock()
+        window.apply_monitor_activity_to_queue = lambda: (
+            queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        )
+
+        queue_gui.QueueWindow.populate_queue(
+            window,
+            "Repository: example/repo\nQueued PRs:\n  #7 other\n  #42 live review\n",
+        )
+
+        self.assertEqual(window.queue.topLevelItemCount(), 2)
+        self.assertEqual(window.queue.topLevelItem(0).text(0), "#42")
+        self.assertEqual(window.queue.topLevelItem(0).text(2), "Checking availability")
 
 
 if __name__ == "__main__":

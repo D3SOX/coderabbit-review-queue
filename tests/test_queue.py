@@ -330,6 +330,47 @@ query_quota 42 title
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn('unexpected notification', result.stderr)
 
+    def test_merge_uses_selected_method_without_github_auto_merge(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}'
+  else
+    printf '%s\n' "$*"
+  fi
+}
+merge_pr_now 42 head squash 1
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('pr merge 42 --repo example/repo --squash --delete-branch', result.stdout)
+        self.assertNotIn('--auto', result.stdout)
+
+    def test_merge_refuses_pending_ci(self):
+        result = self.run_shell(r'''
+gh() {
+  printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""}]}'
+}
+merge_pr_now 42 head rebase 0
+''')
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_merge_runs_on_configured_agent_host(self):
+        result = self.run_shell(r'''
+printf '%s\n' desktop >"$agent_host_file"
+printf '%s\n' rebase >"$merge_method_file"
+printf '%s\n' 0 >"$delete_branch_file"
+ssh() { printf '%s\n' "$*"; }
+route_merge_pr 42 head
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('desktop', result.stdout)
+        self.assertIn('--merge-now', result.stdout)
+        self.assertIn('rebase', result.stdout)
+
+    def test_post_delegation_merge_defaults_on(self):
+        result = self.run_shell('merge_after_delegation_enabled')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

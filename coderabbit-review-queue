@@ -34,6 +34,11 @@ new_items_at_top_file=''
 agent_host_file=''
 delegation_prompt_mode_file=''
 delegation_prompt_template_file=''
+auto_merge_file=''
+merge_method_file=''
+delete_branch_file=''
+merge_after_delegation_file=''
+merge_after_approval_file=''
 monitor_state_file=''
 snapshot_cache_file=''
 snapshot_cache_lock_file=''
@@ -55,6 +60,10 @@ force_local_agents=0
 agent_mode_override=''
 delegation_prompt_mode_override=''
 delegation_prompt_template_override=''
+auto_merge_override=''
+merge_method_override=''
+delete_branch_override=''
+merge_after_delegation_override=''
 empty_announced=0
 declare -A attempted_route_threads=()
 declare -A completed_review_heads=()
@@ -304,6 +313,11 @@ configure_repo() {
   agent_host_file="$state_root/$repo_key-agent-host"
   delegation_prompt_mode_file="$state_root/$repo_key-delegation-prompt-mode"
   delegation_prompt_template_file="$state_root/$repo_key-delegation-prompt-template"
+  auto_merge_file="$state_root/$repo_key-auto-merge"
+  merge_method_file="$state_root/$repo_key-merge-method"
+  delete_branch_file="$state_root/$repo_key-delete-branch"
+  merge_after_delegation_file="$state_root/$repo_key-merge-after-delegation"
+  merge_after_approval_file="$state_root/$repo_key-merge-after-approval"
   monitor_state_file="$state_root/$repo_key-monitor-state.tsv"
   snapshot_cache_file="$state_root/$repo_key-snapshot.json"
   snapshot_cache_lock_file="$state_root/$repo_key-snapshot.lock"
@@ -611,6 +625,19 @@ approved_review_rows() {
         )
       )
     | [.number, .title]
+    | @tsv
+  '
+}
+
+approved_merge_rows() {
+  eligible_state <<<"$1" | jq -r '
+    .data.repository.pullRequests.nodes[]
+    | . as $pr
+    | select(any(.reviews.nodes[]?;
+        (.author.login // "") == "coderabbitai"
+        and (.commit.oid // "") == $pr.headRefOid
+        and (.state // "") == "APPROVED"))
+    | [.number, .headRefOid, .title]
     | @tsv
   '
 }
@@ -1668,6 +1695,61 @@ auto_delegation_enabled() {
   [[ $(auto_delegation_mode) != disabled ]]
 }
 
+auto_merge_enabled() {
+  if [[ -n $auto_merge_override ]]; then
+    [[ $auto_merge_override == 1 ]]
+    return
+  fi
+  [[ -f $auto_merge_file ]] && [[ $(head -n 1 "$auto_merge_file") == 1 ]]
+}
+
+merge_method() {
+  local method='squash'
+  if [[ -n $merge_method_override ]]; then
+    method=$merge_method_override
+  elif [[ -f $merge_method_file ]]; then
+    method=$(head -n 1 "$merge_method_file")
+  fi
+  case $method in merge | squash | rebase) printf '%s\n' "$method" ;;
+    *) printf 'squash\n' ;;
+  esac
+}
+
+delete_branch_enabled() {
+  if [[ -n $delete_branch_override ]]; then
+    [[ $delete_branch_override == 1 ]]
+    return
+  fi
+  [[ ! -f $delete_branch_file ]] || [[ $(head -n 1 "$delete_branch_file") != 0 ]]
+}
+
+merge_after_delegation_enabled() {
+  if [[ -n $merge_after_delegation_override ]]; then
+    [[ $merge_after_delegation_override == 1 ]]
+    return
+  fi
+  [[ ! -f $merge_after_delegation_file ]] ||
+    [[ $(head -n 1 "$merge_after_delegation_file") != 0 ]]
+}
+
+merge_after_approval_enabled() {
+  [[ ! -f $merge_after_approval_file ]] ||
+    [[ $(head -n 1 "$merge_after_approval_file") != 0 ]]
+}
+
+auto_merge_instruction() {
+  auto_merge_enabled || return 0
+  local method delete_text=' Keep the branch after merging.'
+  merge_after_delegation_enabled || {
+    printf '\n\nDo not merge this PR after this pass. Let the queue request another CodeRabbit review; auto-merge requires CodeRabbit approval of the updated head.\n'
+    return 0
+  }
+  method=$(merge_method)
+  delete_branch_enabled && delete_text=' Delete the branch after merging.'
+  printf '\n\nAfter all CodeRabbit threads are resolved and the task work is complete, wait for CI to pass, then merge this PR with `gh pr merge --%s` without enabling GitHub auto-merge.%s Stop if CI fails, the head changes, or the PR cannot merge cleanly.\n' \
+    "$method" "$delete_text"
+}
+
 default_delegation_prompt() {
   cat <<'PROMPT'
 Address unresolved CodeRabbit feedback on PR #{pr_number} ({pr_title}).
@@ -1846,10 +1928,16 @@ route_unresolved_review() {
 
   host=$(agent_host 2>/dev/null || true)
   if [[ -n $host ]]; then
+    local merge_enabled=0 merge_delete=0 merge_after_delegation=0
+    auto_merge_enabled && merge_enabled=1
+    delete_branch_enabled && merge_delete=1
+    merge_after_delegation_enabled && merge_after_delegation=1
     if remote_output=$(remote_agent_command \
       --delegate "$pr" --agent-mode "$mode" --local-agents \
       --delegation-prompt-mode "$(delegation_prompt_mode)" \
-      --delegation-prompt-template "$(delegation_prompt_template)"); then
+      --delegation-prompt-template "$(delegation_prompt_template)" \
+      --auto-merge-setting "$merge_enabled" "$(merge_method)" "$merge_delete" \
+      "$merge_after_delegation"); then
       printf '%s\n' "$remote_output"
       if [[ $remote_output == *"Routing unresolved CodeRabbit review"* ]]; then
         for thread_id in "${new_ids[@]}"; do
@@ -1912,6 +2000,7 @@ route_unresolved_review() {
 
   prompt=$(render_delegation_prompt \
     "$pr" "$title" "$(IFS=', '; printf '%s' "${new_threads[*]}")")
+  prompt+=$(auto_merge_instruction)
 
   case $agent in
     codex)
@@ -2235,6 +2324,54 @@ agent_task_progress() {
   fi
 }
 
+merge_pr_now() {
+  local pr=$1 expected_head=$2 method=$3 delete_branch=$4 data
+  data=$(gh pr view "$pr" --repo "$repo" \
+    --json state,headRefOid,mergeable,statusCheckRollup) || return 1
+  if ! jq -e --arg head "$expected_head" '
+    .state == "OPEN"
+    and .headRefOid == $head
+    and .mergeable == "MERGEABLE"
+    and all(.statusCheckRollup[]?;
+      if has("status") then
+        .status == "COMPLETED"
+        and ((.conclusion // "") | IN("SUCCESS", "NEUTRAL", "SKIPPED"))
+      else
+        (.state // "") == "SUCCESS"
+      end)
+  ' <<<"$data" >/dev/null; then
+    return 1
+  fi
+  local -a args=(pr merge "$pr" --repo "$repo" "--$method")
+  [[ $delete_branch == 1 ]] && args+=(--delete-branch)
+  gh "${args[@]}"
+}
+
+route_merge_pr() {
+  local pr=$1 head_sha=$2 method delete_branch=0 host
+  method=$(merge_method)
+  delete_branch_enabled && delete_branch=1
+  host=$(agent_host 2>/dev/null || true)
+  if [[ -n $host ]]; then
+    remote_agent_command --merge-now "$pr" "$head_sha" "$method" "$delete_branch" \
+      --local-agents
+  else
+    merge_pr_now "$pr" "$head_sha" "$method" "$delete_branch"
+  fi
+}
+
+merge_approved_reviews() {
+  local state=$1 pr head_sha title
+  auto_merge_enabled || return 0
+  merge_after_approval_enabled || return 0
+  while IFS=$'\t' read -r pr head_sha title; do
+    [[ -n ${pr:-} ]] || continue
+    if route_merge_pr "$pr" "$head_sha"; then
+      desktop_notify 'CodeRabbit PR merged' "PR #$pr — $title"
+    fi
+  done < <(approved_merge_rows "$state")
+}
+
 show_status() {
   local snapshot_max_age=${1:-10}
   local state expiry now row pr branch_name head_sha title count task_progress
@@ -2526,6 +2663,7 @@ main() {
   local excluded_authors=''
   local task_branch=''
   local task_head=''
+  local merge_pr='' merge_head='' merge_method_arg='' merge_delete='0'
 
   while (( $# > 0 )); do
     case $1 in
@@ -2585,6 +2723,19 @@ main() {
         force_local_agents=1
         shift
         ;;
+      --merge-now)
+        (( $# >= 5 )) && [[ $2 =~ ^[0-9]+$ ]] \
+          && [[ $4 =~ ^(merge|squash|rebase)$ ]] && [[ $5 =~ ^[01]$ ]] || {
+          printf '%s\n' '--merge-now requires PR, head SHA, method, and delete flag.' >&2
+          return 2
+        }
+        action='merge-now'
+        merge_pr=$2
+        merge_head=$3
+        merge_method_arg=$4
+        merge_delete=$5
+        shift 5
+        ;;
       --delegation-prompt-mode)
         (( $# >= 2 )) && [[ $2 =~ ^(default|short|custom)$ ]] || {
           printf '%s\n' '--delegation-prompt-mode requires default, short, or custom.' >&2
@@ -2600,6 +2751,19 @@ main() {
         }
         delegation_prompt_template_override=$2
         shift 2
+        ;;
+      --auto-merge-setting)
+        (( $# >= 5 )) && [[ $2 =~ ^[01]$ ]] \
+          && [[ $3 =~ ^(merge|squash|rebase)$ ]] \
+          && [[ $4 =~ ^[01]$ ]] && [[ $5 =~ ^[01]$ ]] || {
+          printf '%s\n' '--auto-merge-setting requires enabled, method, delete, and post-delegation values.' >&2
+          return 2
+        }
+        auto_merge_override=$2
+        merge_method_override=$3
+        delete_branch_override=$4
+        merge_after_delegation_override=$5
+        shift 5
         ;;
       *)
         printf 'Usage: %s [--repo OWNER/NAME] [--status|--gui|--list-repos|--play-notify-sound|--delegate PR|--set-excluded-authors LIST]\n' "$0" >&2
@@ -2635,6 +2799,10 @@ main() {
   if [[ $action == task-progress ]]; then
     local_agent_task_progress "$task_branch" "$task_head"
     return 0
+  fi
+  if [[ $action == merge-now ]]; then
+    merge_pr_now "$merge_pr" "$merge_head" "$merge_method_arg" "$merge_delete"
+    return $?
   fi
 
   if [[ $action == set-excluded-authors ]]; then
@@ -2682,6 +2850,7 @@ main() {
 while true; do
   state=$(monitor_snapshot)
   route_all_unresolved "$state"
+  merge_approved_reviews "$state"
   load_stale_rows "$state"
 
   if (( ${#stale[@]} == 0 )); then

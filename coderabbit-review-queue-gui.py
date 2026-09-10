@@ -198,11 +198,20 @@ class QueueWindow(QMainWindow):
         self.delegation_prompt_button.clicked.connect(
             self.configure_delegation_prompt
         )
+        self.auto_merge_button = QPushButton(
+            QIcon.fromTheme("configure"), "Configure auto-merge…"
+        )
+        self.auto_merge_button.setToolTip(
+            "Configure merging after CodeRabbit approval or completed delegation."
+        )
+        self.auto_merge_button.setEnabled(False)
+        self.auto_merge_button.clicked.connect(self.configure_auto_merge)
         auto_delegate_row = QHBoxLayout()
         auto_delegate_row.addWidget(self.auto_delegate_label)
         auto_delegate_row.addWidget(self.auto_delegate, 1)
         auto_delegate_row.addWidget(self.agent_host_button)
         auto_delegate_row.addWidget(self.delegation_prompt_button)
+        auto_delegate_row.addWidget(self.auto_merge_button)
         self.stop_when_empty = QCheckBox(
             "Stop monitor after the last queued review finishes"
         )
@@ -626,6 +635,7 @@ class QueueWindow(QMainWindow):
         self.load_auto_delegate(repo)
         self.load_agent_host(repo)
         self.delegation_prompt_button.setEnabled(bool(repo))
+        self.auto_merge_button.setEnabled(bool(repo))
         self.load_stop_when_empty(repo)
         self.load_ignore_drafts(repo)
         self.load_excluded_branches(repo)
@@ -648,14 +658,26 @@ class QueueWindow(QMainWindow):
         cache = self.status_cache_file(repo)
         try:
             status = cache.read_text()
-            age = time.time() - cache.stat().st_mtime
+            cache_mtime = cache.stat().st_mtime
+            age = time.time() - cache_mtime
         except OSError:
             return False
         if not status.strip():
             return False
         self.populate_queue(status)
         self.populate_tasks(status)
-        return age <= STATUS_CACHE_MAX_AGE
+        newer_state_exists = False
+        for path in (
+            self.review_requests_file(repo),
+            self.monitor_state_file(repo),
+        ):
+            try:
+                if path.stat().st_mtime > cache_mtime:
+                    newer_state_exists = True
+                    break
+            except (OSError, TypeError):
+                continue
+        return age <= STATUS_CACHE_MAX_AGE and not newer_state_exists
 
     def save_status_cache(self, repo: str, status: str) -> None:
         if not status.strip():
@@ -674,6 +696,123 @@ class QueueWindow(QMainWindow):
 
     def delegation_prompt_template_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-delegation-prompt-template"
+
+    def auto_merge_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-auto-merge"
+
+    def merge_method_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-merge-method"
+
+    def delete_branch_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-delete-branch"
+
+    def merge_after_delegation_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-merge-after-delegation"
+
+    def merge_after_approval_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-merge-after-approval"
+
+    def configure_auto_merge(self) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        try:
+            enabled = self.auto_merge_file(repo).read_text().strip() == "1"
+        except OSError:
+            enabled = False
+        try:
+            method = self.merge_method_file(repo).read_text().strip()
+        except OSError:
+            method = "squash"
+        if method not in {"merge", "squash", "rebase"}:
+            method = "squash"
+        try:
+            delete_branch = self.delete_branch_file(repo).read_text().strip() != "0"
+        except OSError:
+            delete_branch = True
+        try:
+            merge_after_delegation = (
+                self.merge_after_delegation_file(repo).read_text().strip() != "0"
+            )
+        except OSError:
+            merge_after_delegation = True
+        try:
+            merge_after_approval = (
+                self.merge_after_approval_file(repo).read_text().strip() != "0"
+            )
+        except OSError:
+            merge_after_approval = True
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Configure auto-merge")
+        enabled_box = QCheckBox("Automatically merge pull requests")
+        enabled_box.setChecked(enabled)
+        method_label = QLabel("Merge method")
+        method_select = QComboBox()
+        method_select.addItem("Merge commit", "merge")
+        method_select.addItem("Squash and merge", "squash")
+        method_select.addItem("Rebase and merge", "rebase")
+        method_select.setCurrentIndex(method_select.findData(method))
+        delete_box = QCheckBox("Delete the branch after merging")
+        delete_box.setChecked(delete_branch)
+        delegated_box = QCheckBox(
+            "Merge after a completed delegated fix without another CodeRabbit review"
+        )
+        delegated_box.setChecked(merge_after_delegation)
+        approval_box = QCheckBox("Merge after CodeRabbit approval")
+        approval_box.setChecked(merge_after_approval)
+        explanation = QLabel(
+            "The app waits for green CI and never enables GitHub auto-merge. "
+            "The merge command runs on the selected agent host."
+        )
+        explanation.setWordWrap(True)
+
+        def update_controls() -> None:
+            active = enabled_box.isChecked()
+            method_label.setEnabled(active)
+            method_select.setEnabled(active)
+            delete_box.setEnabled(active)
+            delegated_box.setEnabled(active)
+            approval_box.setEnabled(active)
+
+        enabled_box.toggled.connect(lambda _checked: update_controls())
+        update_controls()
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(enabled_box)
+        layout.addWidget(approval_box)
+        layout.addWidget(delegated_box)
+        layout.addWidget(method_label)
+        layout.addWidget(method_select)
+        layout.addWidget(delete_box)
+        layout.addWidget(explanation)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        values = (
+            (self.auto_merge_file(repo), "1\n" if enabled_box.isChecked() else "0\n"),
+            (self.merge_method_file(repo), f"{method_select.currentData()}\n"),
+            (self.delete_branch_file(repo), "1\n" if delete_box.isChecked() else "0\n"),
+            (
+                self.merge_after_delegation_file(repo),
+                "1\n" if delegated_box.isChecked() else "0\n",
+            ),
+            (
+                self.merge_after_approval_file(repo),
+                "1\n" if approval_box.isChecked() else "0\n",
+            ),
+        )
+        for target, value in values:
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(value)
+            os.replace(temporary, target)
+        self.show_transient_status("Auto-merge settings saved")
 
     def delegation_prompt_settings(self, repo: str) -> tuple[str, str]:
         try:
@@ -1147,6 +1286,7 @@ class QueueWindow(QMainWindow):
             self.review_requests_signature = None
             return
         self.read_monitor_activity(repo)
+        self.apply_monitor_activity_to_queue()
         self.update_countdown_display()
         signature = (
             repo,
@@ -1358,16 +1498,24 @@ class QueueWindow(QMainWindow):
             return
 
         if self.next_review_at is None:
-            self.timer_label.setText("Next review: Available now")
-            self.set_tray_countdown("✓", f"{repo}\nReview available now")
-            self.maybe_play_availability_sound()
+            if self.monitor_pid() is None:
+                self.timer_label.setText("Next review: Availability unknown")
+                self.set_tray_countdown("?", f"{repo}\nReview availability unknown")
+            else:
+                self.timer_label.setText("Next review: Available now")
+                self.set_tray_countdown("✓", f"{repo}\nReview available now")
+                self.maybe_play_availability_sound()
             return
 
         seconds = QDateTime.currentDateTime().secsTo(self.next_review_at)
         if seconds <= 0:
-            self.timer_label.setText("Next review: Available now")
-            self.set_tray_countdown("✓", f"{repo}\nReview available now")
-            self.maybe_play_availability_sound()
+            if self.monitor_pid() is None:
+                self.timer_label.setText("Next review: Availability unknown")
+                self.set_tray_countdown("?", f"{repo}\nReview availability unknown")
+            else:
+                self.timer_label.setText("Next review: Available now")
+                self.set_tray_countdown("✓", f"{repo}\nReview available now")
+                self.maybe_play_availability_sound()
             return
 
         self.waiting_for_review_window = True
@@ -1453,14 +1601,43 @@ class QueueWindow(QMainWindow):
                 self.queue.setCurrentItem(item)
         if display_rows and self.queue.currentItem() is None:
             self.queue.setCurrentItem(self.queue.topLevelItem(0))
+        self.apply_monitor_activity_to_queue()
         self.update_queue_buttons()
+
+    def apply_monitor_activity_to_queue(self) -> None:
+        if self.monitor_activity is None:
+            return
+        phase, number, title, _expiry = self.monitor_activity
+        labels = {
+            "checking": "Checking availability",
+            "triggering": "Triggering review",
+            "reviewing": "In progress",
+        }
+        status = labels.get(phase)
+        if status is None or not number:
+            return
+        selected = self.queue.currentItem()
+        selected_number = selected.data(0, Qt.UserRole) if selected else None
+        for index in range(self.queue.topLevelItemCount()):
+            item = self.queue.topLevelItem(index)
+            if item.data(0, Qt.UserRole) == number:
+                self.queue.takeTopLevelItem(index)
+                if not title:
+                    title = item.text(1)
+                break
+        live_item = QTreeWidgetItem([f"#{number}", title, status])
+        live_item.setData(0, Qt.UserRole, number)
+        live_item.setData(0, Qt.UserRole + 1, status)
+        self.queue.insertTopLevelItem(0, live_item)
+        if selected_number == number:
+            self.queue.setCurrentItem(live_item)
 
     def update_queue_buttons(self) -> None:
         item = self.queue.currentItem()
         row = self.selected_row()
         movable = (
             item is not None
-            and item.data(0, Qt.UserRole + 1) != "In progress"
+            and item.data(0, Qt.UserRole + 1) == "Queued"
             and self.queue.topLevelItemCount() > 1
         )
         self.up_button.setEnabled(movable and row > 0)
@@ -1562,8 +1739,8 @@ class QueueWindow(QMainWindow):
         if (
             item is None
             or other is None
-            or item.data(0, Qt.UserRole + 1) == "In progress"
-            or other.data(0, Qt.UserRole + 1) == "In progress"
+            or item.data(0, Qt.UserRole + 1) != "Queued"
+            or other.data(0, Qt.UserRole + 1) != "Queued"
         ):
             return
         item = self.queue.takeTopLevelItem(row)
@@ -1752,16 +1929,38 @@ class QueueWindow(QMainWindow):
         )
         if answer != QMessageBox.Yes:
             return
+        failed: list[int] = []
         for pid_file in Path("/tmp").glob("coderabbit-review-queue-*.pid"):
+            pid = 0
             try:
                 if pid_file.stat().st_uid != os.getuid():
                     continue
                 pid = int(pid_file.read_text().strip())
                 if not Path(f"/proc/{pid}").exists():
                     continue
-                os.killpg(pid, signal.SIGTERM)
-            except (OSError, ValueError, ProcessLookupError, PermissionError):
+                process_group = os.getpgid(pid)
+                if process_group == pid:
+                    os.killpg(process_group, signal.SIGTERM)
+                else:
+                    os.kill(pid, signal.SIGTERM)
+                deadline = time.monotonic() + 2
+                while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if Path(f"/proc/{pid}").exists():
+                    failed.append(pid)
+            except ProcessLookupError:
                 continue
+            except (OSError, ValueError, PermissionError):
+                if pid:
+                    failed.append(pid)
+        if failed:
+            QMessageBox.warning(
+                self,
+                "Could not stop every monitor",
+                "The queue window is still open because these monitor processes "
+                f"did not stop: {', '.join(str(pid) for pid in failed)}",
+            )
+            return
         QApplication.instance().quit()
 
 
