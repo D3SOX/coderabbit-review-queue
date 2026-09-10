@@ -33,6 +33,7 @@ excluded_authors_file=''
 notify_sound_file=''
 new_items_at_top_file=''
 agent_host_file=''
+delegated_prs_file=''
 delegation_prompt_mode_file=''
 delegation_prompt_template_file=''
 auto_merge_file=''
@@ -312,6 +313,7 @@ configure_repo() {
   notify_sound_file="$state_root/$repo_key-notify-sound"
   new_items_at_top_file="$state_root/$repo_key-new-items-at-top"
   agent_host_file="$state_root/$repo_key-agent-host"
+  delegated_prs_file="$state_root/$repo_key-delegated-prs.txt"
   delegation_prompt_mode_file="$state_root/$repo_key-delegation-prompt-mode"
   delegation_prompt_template_file="$state_root/$repo_key-delegation-prompt-template"
   auto_merge_file="$state_root/$repo_key-auto-merge"
@@ -353,6 +355,14 @@ remote_agent_command() {
     -o BatchMode=yes \
     -o ConnectTimeout=5 \
     -- "$host" "$command"
+}
+
+mark_pr_delegated() {
+  local pr=$1
+  if [[ ! -f $delegated_prs_file ]] || \
+    ! rg -q --fixed-strings --line-regexp "$pr" "$delegated_prs_file"; then
+    printf '%s\n' "$pr" >>"$delegated_prs_file"
+  fi
 }
 
 write_monitor_state() {
@@ -2083,6 +2093,7 @@ route_unresolved_review() {
       "$merge_after_delegation"); then
       printf '%s\n' "$remote_output"
       if [[ $remote_output == *"Routing unresolved CodeRabbit review"* ]]; then
+        mark_pr_delegated "$pr"
         for thread_id in "${new_ids[@]}"; do
           attempted_route_threads["$thread_id"]=1
           printf '%s\n' "$thread_id" >>"$routed_threads_file"
@@ -2220,6 +2231,7 @@ resume_codex_session() {
     [[ $(codex_session_state "$session_id") == idle ]] || exit 75
     resume_codex_via_daemon "$session_id" "$prompt" || codex "${codex_args[@]}"
   ); then
+    mark_pr_delegated "$pr"
     for thread_id in "${thread_ids[@]}"; do
       attempted_route_threads["$thread_id"]=1
       printf '%s\n' "$thread_id" >>"$routed_threads_file"
@@ -2495,7 +2507,7 @@ agent_task_progress() {
     local_agent_task_progress "$branch_name" "$head_sha"
     return
   fi
-  if output=$(remote_command_timeout=10 remote_agent_command \
+  if output=$(remote_command_timeout=20 remote_agent_command \
     --task-progress "$branch_name" "$head_sha" 2>/dev/null); then
     printf '%s\n' "$output"
   else
@@ -2560,6 +2572,7 @@ show_status() {
   local -a approved=()
   local -A active_prs=()
   local -A unresolved_prs=()
+  local -A finished_prs=()
 
   status_quota_available || return $?
   state=$(snapshot "$snapshot_max_age")
@@ -2593,12 +2606,41 @@ show_status() {
     )
     if (( count > 0 )); then
       unresolved_prs[$pr]=1
+      finished_prs[$pr]=1
       finished+=$'\n'"  #$pr $title"
       finished+=$'\n'"    Result: $count unresolved"
       task_progress=$(agent_task_progress "$branch_name" "$head_sha")
       finished+=$'\n'"    Agent task: $task_progress"
     fi
   done < <(reviewed_rows <<<"$state")
+
+  if [[ -f $delegated_prs_file ]]; then
+    while IFS= read -r pr; do
+      [[ $pr =~ ^[0-9]+$ && -z ${finished_prs[$pr]:-} ]] || continue
+      row=$(jq -r --argjson pr "$pr" '
+        .data.repository.pullRequests.nodes[]
+        | select(.number == $pr)
+        | [.headRefName, .headRefOid, .title]
+        | @tsv
+      ' <<<"$state")
+      [[ -n $row ]] || continue
+      IFS=$'\t' read -r branch_name head_sha title <<<"$row"
+      count=$(unresolved_coderabbit_rows "$pr" |
+        awk 'NF { count++ } END { print count + 0 }')
+      task_progress=$(agent_task_progress "$branch_name" "$head_sha")
+      if (( count > 0 )) || [[ $task_progress == *Running* ]]; then
+        unresolved_prs[$pr]=1
+        finished_prs[$pr]=1
+        finished+=$'\n'"  #$pr $title"
+        if (( count > 0 )); then
+          finished+=$'\n'"    Result: $count unresolved"
+        else
+          finished+=$'\n'"    Result: Agent handling review"
+        fi
+        finished+=$'\n'"    Agent task: $task_progress"
+      fi
+    done <"$delegated_prs_file"
+  fi
 
   for row in "${approved[@]}"; do
     IFS=$'\t' read -r pr title <<<"$row"
