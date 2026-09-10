@@ -1804,8 +1804,8 @@ auto_merge_instruction() {
   }
   method=$(merge_method)
   delete_branch_enabled && delete_text=' Delete the branch after merging.'
-  printf '\n\nAfter all CodeRabbit threads are resolved and the task work is complete, wait for CI to pass, then merge this PR with `gh pr merge --%s` without enabling GitHub auto-merge.%s Stop if CI fails, the head changes, or the PR cannot merge cleanly.\n' \
-    "$method" "$delete_text"
+  printf '\n\nAfter all CodeRabbit threads are resolved and the task work is complete, wait for CI to pass, then merge this PR with `gh pr merge --%s` without enabling GitHub auto-merge.%s If the merge is blocked only by branch protection and your GitHub account can bypass it, retry with `gh pr merge --%s --admin`. Stop if CI fails, the head changes, or the PR otherwise cannot merge cleanly.\n' \
+    "$method" "$delete_text" "$method"
 }
 
 default_delegation_prompt() {
@@ -1923,6 +1923,35 @@ if row is not None:
 PY
 }
 
+codex_session_file() {
+  local session_id=$1 path=''
+  if [[ -f $codex_state_db ]]; then
+    path=$(python3 - "$codex_state_db" "$session_id" <<'PY'
+import sqlite3
+import sys
+
+database, session_id = sys.argv[1:]
+with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+    row = connection.execute(
+        "SELECT rollout_path FROM threads WHERE id = ?", (session_id,)
+    ).fetchone()
+if row is not None and row[0]:
+    print(row[0])
+PY
+)
+    if [[ -n $path && -f $path ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  fi
+  rg --files "$codex_sessions_root" 2>/dev/null |
+    rg "/rollout-.*-${session_id}[^/]*\\.jsonl$" |
+    xargs -r stat -c $'%Y\t%n' 2>/dev/null |
+    sort -nr |
+    head -n 1 |
+    cut -f2-
+}
+
 codex_resume_permission_args() {
   local sandbox_policy=$1 approval_mode=$2 policy_type
   local -n args=$3
@@ -1954,17 +1983,12 @@ codex_resume_permission_args() {
 codex_session_state() {
   local session_id=$1
   local session_file state
-  local -a session_files=()
 
-  mapfile -t session_files < <(
-    rg --files "$codex_sessions_root" 2>/dev/null |
-      rg "/rollout-.*-${session_id}\\.jsonl$" || true
-  )
-  if (( ${#session_files[@]} != 1 )); then
+  if ! session_file=$(codex_session_file "$session_id") || \
+    [[ -z $session_file ]]; then
     printf 'unknown\n'
     return 0
   fi
-  session_file=${session_files[0]}
   if ! state=$(jq -R -s -r '
     reduce (
       split("\n")[]
@@ -2392,11 +2416,7 @@ codex_task_progress() {
     return 0
   fi
   IFS=$'\t' read -r session_id session_cwd <<<"$match"
-  session_file=$(
-    rg --files "$codex_sessions_root" |
-      rg "/rollout-.*-${session_id}\\.jsonl$" |
-      head -n 1
-  )
+  session_file=$(codex_session_file "$session_id")
   if [[ -z $session_file ]]; then
     printf 'Matched %s\n' "${session_id:0:8}"
     return 0

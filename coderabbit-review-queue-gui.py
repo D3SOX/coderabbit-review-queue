@@ -790,15 +790,17 @@ class QueueWindow(QMainWindow):
         delete_box = QCheckBox("Delete the branch after merging")
         delete_box.setChecked(delete_branch)
         delegated_box = QCheckBox(
-            "Tell the delegated agent to merge after completing the fix"
+            "Merge after a delegated fix without another CodeRabbit review"
         )
         delegated_box.setChecked(merge_after_delegation)
         approval_box = QCheckBox("Merge after CodeRabbit approval")
         approval_box.setChecked(merge_after_approval)
         explanation = QLabel(
-            "For delegated fixes, the agent verifies feedback and CI, then merges. "
-            "For CodeRabbit approvals, the app performs the merge. Both paths run "
-            "on the selected agent host and never enable GitHub auto-merge."
+            "When the delegated-fix option is off, the agent leaves the PR open "
+            "for another CodeRabbit review. The separate approval option lets the "
+            "app merge an approved head. Merges run on the selected agent host and "
+            "never enable GitHub auto-merge. Branch protection is bypassed only "
+            "when your GitHub account permits it."
         )
         explanation.setWordWrap(True)
 

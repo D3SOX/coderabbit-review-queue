@@ -335,6 +335,34 @@ codex_session_state "$session"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, 'running\n')
 
+    def test_codex_state_uses_current_continuation_rollout(self):
+        result = self.run_shell(r'''
+codex_sessions_root="$state_root/sessions"
+codex_state_db="$state_root/state.sqlite"
+mkdir -p "$codex_sessions_root"
+session=12345678-1234-1234-1234-123456789abc
+old="$codex_sessions_root/rollout-test-$session.jsonl"
+current="$codex_sessions_root/rollout-test-${session}_turn.jsonl"
+printf '%s\n' \
+  '{"type":"event_msg","payload":{"type":"task_started","turn_id":"old"}}' \
+  '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"old"}}' \
+  >"$old"
+printf '%s\n' \
+  '{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}' \
+  >"$current"
+python3 - "$codex_state_db" "$session" "$current" <<'PY'
+import sqlite3
+import sys
+db, session, path = sys.argv[1:]
+with sqlite3.connect(db) as connection:
+    connection.execute('CREATE TABLE threads (id TEXT, rollout_path TEXT)')
+    connection.execute('INSERT INTO threads VALUES (?, ?)', (session, path))
+PY
+codex_session_state "$session"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'running\n')
+
     def test_codex_match_uses_worktree_recorded_after_session_start(self):
         result = self.run_shell(r'''
 codex_sessions_root="$state_root/sessions"
@@ -697,6 +725,7 @@ auto_merge_instruction
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('gh pr merge --rebase', result.stdout)
         self.assertIn('wait for CI to pass', result.stdout)
+        self.assertIn('gh pr merge --rebase --admin', result.stdout)
 
 
 if __name__ == '__main__':
