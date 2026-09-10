@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock
 
@@ -20,6 +21,65 @@ SPEC.loader.exec_module(queue_gui)
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_tray_click_hides_visible_window(self):
+        window = Mock()
+        window.window_is_shown.return_value = True
+
+        queue_gui.QueueWindow.toggle_from_tray(window)
+
+        window.hide.assert_called_once_with()
+        window.show_from_tray.assert_not_called()
+
+    def test_tray_click_restores_minimized_window(self):
+        window = Mock()
+        window.window_is_shown.return_value = False
+
+        queue_gui.QueueWindow.toggle_from_tray(window)
+
+        window.show_from_tray.assert_called_once_with()
+        window.hide.assert_not_called()
+
+    def test_tray_menu_action_matches_window_visibility(self):
+        window = Mock()
+        window.isVisible.return_value = True
+        window.isMinimized.return_value = False
+
+        queue_gui.QueueWindow.update_tray_window_action(window)
+
+        window.window_action.setText.assert_called_once_with("Hide CodeRabbit queue")
+
+    def test_recent_complete_status_cache_skips_startup_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "status.txt"
+            cache.write_text("Repository: example/repo\nQueued PRs:\n  #42 cached\n")
+            window = Mock()
+            window.status_cache_file.return_value = cache
+
+            fresh = queue_gui.QueueWindow.load_cached_status(
+                window, "example/repo"
+            )
+
+            self.assertTrue(fresh)
+            window.populate_queue.assert_called_once_with(cache.read_text())
+            window.populate_tasks.assert_called_once_with(cache.read_text())
+
+    def test_old_complete_status_cache_displays_before_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "status.txt"
+            cache.write_text("Repository: example/repo\n")
+            old = time.time() - 120
+            os.utime(cache, (old, old))
+            window = Mock()
+            window.status_cache_file.return_value = cache
+
+            fresh = queue_gui.QueueWindow.load_cached_status(
+                window, "example/repo"
+            )
+
+            self.assertFalse(fresh)
+            window.populate_queue.assert_called_once_with(cache.read_text())
+            window.populate_tasks.assert_called_once_with(cache.read_text())
+
     def test_ssh_hosts_exclude_patterns_and_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config"

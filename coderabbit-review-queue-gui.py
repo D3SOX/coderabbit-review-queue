@@ -6,6 +6,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QDateTime, QLocale, QProcess, QTimer, Qt, QUrl
@@ -45,6 +46,7 @@ STATE_ROOT = (
 )
 SELECTED_REPO_FILE = STATE_ROOT / "selected-repo"
 REPOSITORY_CACHE_FILE = STATE_ROOT / "repositories.txt"
+STATUS_CACHE_MAX_AGE = 60
 SHORT_DELEGATION_PROMPT = "Resolve the CodeRabbit review and stop."
 DEFAULT_DELEGATION_PROMPT = """Address unresolved CodeRabbit feedback on PR #{pr_number} ({pr_title}).
 PR: {pr_url}
@@ -371,19 +373,20 @@ class QueueWindow(QMainWindow):
         self.setCentralWidget(container)
         self.tray_icon = QSystemTrayIcon(QIcon.fromTheme("system-software-update"), self)
         tray_menu = QMenu(self)
-        show_action = QAction("Open CodeRabbit queue", self)
-        show_action.triggered.connect(self.show_from_tray)
+        self.window_action = QAction("Hide CodeRabbit queue", self)
+        self.window_action.triggered.connect(self.toggle_from_tray)
         refresh_action = QAction("Refresh status", self)
         refresh_action.triggered.connect(lambda: self.refresh(manual=True))
         quit_action = QAction("Quit queue window", self)
         quit_action.triggered.connect(QApplication.instance().quit)
         stop_and_quit_action = QAction("Quit and stop all monitors", self)
         stop_and_quit_action.triggered.connect(self.stop_all_monitors_and_quit)
-        tray_menu.addAction(show_action)
+        tray_menu.addAction(self.window_action)
         tray_menu.addAction(refresh_action)
         tray_menu.addSeparator()
         tray_menu.addAction(quit_action)
         tray_menu.addAction(stop_and_quit_action)
+        tray_menu.aboutToShow.connect(self.update_tray_window_action)
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.tray_activated)
         self.tray_icon.setToolTip(self.base_window_title)
@@ -429,12 +432,28 @@ class QueueWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def window_is_shown(self) -> bool:
+        return self.isVisible() and not self.isMinimized()
+
+    def toggle_from_tray(self) -> None:
+        if self.window_is_shown():
+            self.hide()
+        else:
+            self.show_from_tray()
+
+    def update_tray_window_action(self) -> None:
+        self.window_action.setText(
+            "Hide CodeRabbit queue"
+            if self.window_is_shown()
+            else "Show CodeRabbit queue"
+        )
+
     def tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (
             QSystemTrayIcon.ActivationReason.Trigger,
             QSystemTrayIcon.ActivationReason.DoubleClick,
         ):
-            self.show_from_tray()
+            self.toggle_from_tray()
 
     def set_tray_countdown(self, text: str | None, tooltip: str) -> None:
         if text is None:
@@ -613,12 +632,39 @@ class QueueWindow(QMainWindow):
         self.load_excluded_authors(repo)
         self.load_notify_sound(repo)
         self.load_new_items_at_top(repo)
+        cache_is_fresh = self.load_cached_status(repo)
         self.waiting_for_review_window = False
         self.update_monitor_state()
-        self.refresh()
+        if not cache_is_fresh:
+            self.refresh()
 
     def auto_delegate_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-auto-delegate"
+
+    def status_cache_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-status.txt"
+
+    def load_cached_status(self, repo: str) -> bool:
+        cache = self.status_cache_file(repo)
+        try:
+            status = cache.read_text()
+            age = time.time() - cache.stat().st_mtime
+        except OSError:
+            return False
+        if not status.strip():
+            return False
+        self.populate_queue(status)
+        self.populate_tasks(status)
+        return age <= STATUS_CACHE_MAX_AGE
+
+    def save_status_cache(self, repo: str, status: str) -> None:
+        if not status.strip():
+            return
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = self.status_cache_file(repo)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(status.rstrip() + "\n")
+        os.replace(temporary, target)
 
     def agent_host_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-agent-host"
@@ -1198,6 +1244,7 @@ class QueueWindow(QMainWindow):
             return
 
         self.status_failures = 0
+        self.save_status_cache(self.status_repo, stdout)
         self.populate_queue(stdout)
         self.populate_tasks(stdout)
         self.show_transient_status("Status refreshed", 3000)
