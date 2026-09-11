@@ -41,6 +41,7 @@ merge_method_file=''
 delete_branch_file=''
 merge_after_delegation_file=''
 merge_after_approval_file=''
+merge_admin_file=''
 monitor_state_file=''
 snapshot_cache_file=''
 snapshot_cache_lock_file=''
@@ -66,6 +67,7 @@ auto_merge_override=''
 merge_method_override=''
 delete_branch_override=''
 merge_after_delegation_override=''
+merge_admin_override=''
 empty_announced=0
 declare -A attempted_route_threads=()
 declare -A completed_review_heads=()
@@ -321,6 +323,7 @@ configure_repo() {
   delete_branch_file="$state_root/$repo_key-delete-branch"
   merge_after_delegation_file="$state_root/$repo_key-merge-after-delegation"
   merge_after_approval_file="$state_root/$repo_key-merge-after-approval"
+  merge_admin_file="$state_root/$repo_key-merge-admin"
   monitor_state_file="$state_root/$repo_key-monitor-state.tsv"
   snapshot_cache_file="$state_root/$repo_key-snapshot.json"
   snapshot_cache_lock_file="$state_root/$repo_key-snapshot.lock"
@@ -1795,17 +1798,26 @@ merge_after_approval_enabled() {
     [[ $(head -n 1 "$merge_after_approval_file") != 0 ]]
 }
 
+merge_admin_enabled() {
+  if [[ -n $merge_admin_override ]]; then
+    [[ $merge_admin_override == 1 ]]
+    return
+  fi
+  [[ -f $merge_admin_file ]] && [[ $(head -n 1 "$merge_admin_file") == 1 ]]
+}
+
 auto_merge_instruction() {
   auto_merge_enabled || return 0
-  local method delete_text=' Keep the branch after merging.'
+  local method delete_text=' Keep the branch after merging.' admin_text=''
   merge_after_delegation_enabled || {
     printf '\n\nDo not merge this PR after this pass. Let the queue request another CodeRabbit review; auto-merge requires CodeRabbit approval of the updated head.\n'
     return 0
   }
   method=$(merge_method)
   delete_branch_enabled && delete_text=' Delete the branch after merging.'
-  printf '\n\nAfter all CodeRabbit threads are resolved and the task work is complete, wait for CI to pass, then merge this PR with `gh pr merge --%s` without enabling GitHub auto-merge.%s If the merge is blocked only by branch protection and your GitHub account can bypass it, retry with `gh pr merge --%s --admin`. Stop if CI fails, the head changes, or the PR otherwise cannot merge cleanly.\n' \
-    "$method" "$delete_text" "$method"
+  merge_admin_enabled && admin_text=' --admin'
+  printf '\n\nAfter all CodeRabbit threads are resolved and the task work is complete, wait for CI to pass, then merge this PR with `gh pr merge --%s%s` without enabling GitHub auto-merge.%s Stop if CI fails, the head changes, or the PR cannot merge cleanly.\n' \
+    "$method" "$admin_text" "$delete_text"
 }
 
 default_delegation_prompt() {
@@ -2120,16 +2132,17 @@ route_unresolved_review() {
 
   host=$(agent_host 2>/dev/null || true)
   if [[ -n $host ]]; then
-    local merge_enabled=0 merge_delete=0 merge_after_delegation=0
+    local merge_enabled=0 merge_delete=0 merge_after_delegation=0 merge_admin=0
     auto_merge_enabled && merge_enabled=1
     delete_branch_enabled && merge_delete=1
     merge_after_delegation_enabled && merge_after_delegation=1
+    merge_admin_enabled && merge_admin=1
     if remote_output=$(remote_agent_command \
       --delegate "$pr" --agent-mode "$mode" --local-agents \
       --delegation-prompt-mode "$(delegation_prompt_mode)" \
       --delegation-prompt-template "$(delegation_prompt_template)" \
       --auto-merge-setting "$merge_enabled" "$(merge_method)" "$merge_delete" \
-      "$merge_after_delegation"); then
+      "$merge_after_delegation" "$merge_admin"); then
       printf '%s\n' "$remote_output"
       if [[ $remote_output == *"Routing unresolved CodeRabbit review"* ]]; then
         mark_pr_delegated "$pr"
@@ -2575,15 +2588,16 @@ merge_pr_now() {
 }
 
 route_merge_pr() {
-  local pr=$1 head_sha=$2 method delete_branch=0 host
+  local pr=$1 head_sha=$2 method delete_branch=0 merge_admin=0 host
   method=$(merge_method)
   delete_branch_enabled && delete_branch=1
+  merge_admin_enabled && merge_admin=1
   host=$(agent_host 2>/dev/null || true)
   if [[ -n $host ]]; then
     remote_agent_command --merge-now "$pr" "$head_sha" "$method" "$delete_branch" \
-      --local-agents
+      "$merge_admin" --local-agents
   else
-    merge_pr_now "$pr" "$head_sha" "$method" "$delete_branch"
+    merge_pr_now "$pr" "$head_sha" "$method" "$delete_branch" "$merge_admin"
   fi
 }
 
@@ -2805,6 +2819,20 @@ delegate_pr_now() {
   return 1
 }
 
+delegate_all_now() {
+  local state pr branch_name head_sha title failed=0
+  state=$(snapshot 0)
+  force_delegation=1
+  while IFS=$'\t' read -r pr branch_name head_sha title; do
+    [[ -n ${pr:-} ]] || continue
+    if ! route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"; then
+      failed=1
+      break
+    fi
+  done < <(reviewed_rows <<<"$state")
+  return "$failed"
+}
+
 validate_repo() {
   local canonical
   if ! canonical=$(gh repo view "$repo" --json nameWithOwner --jq .nameWithOwner 2>/dev/null); then
@@ -2924,7 +2952,7 @@ main() {
   local task_branch=''
   local task_head=''
   local codex_state_session=''
-  local merge_pr='' merge_head='' merge_method_arg='' merge_delete='0'
+  local merge_pr='' merge_head='' merge_method_arg='' merge_delete='0' merge_admin_arg='0'
 
   while (( $# > 0 )); do
     case $1 in
@@ -2962,6 +2990,10 @@ main() {
         delegate_pr=$2
         shift 2
         ;;
+      --delegate-all)
+        action='delegate-all'
+        shift
+        ;;
       --task-progress)
         (( $# >= 3 )) || {
           printf '%s\n' '--task-progress requires a branch and head SHA.' >&2
@@ -2994,9 +3026,10 @@ main() {
         shift
         ;;
       --merge-now)
-        (( $# >= 5 )) && [[ $2 =~ ^[0-9]+$ ]] \
-          && [[ $4 =~ ^(merge|squash|rebase)$ ]] && [[ $5 =~ ^[01]$ ]] || {
-          printf '%s\n' '--merge-now requires PR, head SHA, method, and delete flag.' >&2
+        (( $# >= 6 )) && [[ $2 =~ ^[0-9]+$ ]] \
+          && [[ $4 =~ ^(merge|squash|rebase)$ ]] && [[ $5 =~ ^[01]$ ]] \
+          && [[ $6 =~ ^[01]$ ]] || {
+          printf '%s\n' '--merge-now requires PR, head SHA, method, delete flag, and admin flag.' >&2
           return 2
         }
         action='merge-now'
@@ -3004,7 +3037,8 @@ main() {
         merge_head=$3
         merge_method_arg=$4
         merge_delete=$5
-        shift 5
+        merge_admin_arg=$6
+        shift 6
         ;;
       --delegation-prompt-mode)
         (( $# >= 2 )) && [[ $2 =~ ^(default|short|custom)$ ]] || {
@@ -3023,17 +3057,19 @@ main() {
         shift 2
         ;;
       --auto-merge-setting)
-        (( $# >= 5 )) && [[ $2 =~ ^[01]$ ]] \
+        (( $# >= 6 )) && [[ $2 =~ ^[01]$ ]] \
           && [[ $3 =~ ^(merge|squash|rebase)$ ]] \
-          && [[ $4 =~ ^[01]$ ]] && [[ $5 =~ ^[01]$ ]] || {
-          printf '%s\n' '--auto-merge-setting requires enabled, method, delete, and post-delegation values.' >&2
+          && [[ $4 =~ ^[01]$ ]] && [[ $5 =~ ^[01]$ ]] \
+          && [[ $6 =~ ^[01]$ ]] || {
+          printf '%s\n' '--auto-merge-setting requires enabled, method, delete, post-delegation, and admin values.' >&2
           return 2
         }
         auto_merge_override=$2
         merge_method_override=$3
         delete_branch_override=$4
         merge_after_delegation_override=$5
-        shift 5
+        merge_admin_override=$6
+        shift 6
         ;;
       *)
         printf 'Usage: %s [--repo OWNER/NAME] [--status|--gui|--list-repos|--play-notify-sound|--delegate PR|--set-excluded-authors LIST]\n' "$0" >&2
@@ -3075,7 +3111,7 @@ main() {
     return 0
   fi
   if [[ $action == merge-now ]]; then
-    merge_pr_now "$merge_pr" "$merge_head" "$merge_method_arg" "$merge_delete"
+    merge_pr_now "$merge_pr" "$merge_head" "$merge_method_arg" "$merge_delete" "$merge_admin_arg"
     return $?
   fi
 
@@ -3104,6 +3140,10 @@ main() {
   fi
   if [[ $action == delegate ]]; then
     delegate_pr_now "$delegate_pr"
+    return $?
+  fi
+  if [[ $action == delegate-all ]]; then
+    delegate_all_now
     return $?
   fi
 

@@ -353,8 +353,15 @@ class QueueWindow(QMainWindow):
         )
         self.delegate_button.setEnabled(False)
         self.delegate_button.clicked.connect(self.delegate_selected)
+        self.delegate_all_button = QPushButton(
+            QIcon.fromTheme("system-run"),
+            "Delegate all idle",
+        )
+        self.delegate_all_button.setEnabled(False)
+        self.delegate_all_button.clicked.connect(self.delegate_all_idle)
         task_buttons = QHBoxLayout()
         task_buttons.addStretch()
+        task_buttons.addWidget(self.delegate_all_button)
         task_buttons.addWidget(self.delegate_button)
 
         queue_panel = QWidget()
@@ -746,6 +753,9 @@ class QueueWindow(QMainWindow):
     def merge_after_approval_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-merge-after-approval"
 
+    def merge_admin_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-merge-admin"
+
     def configure_auto_merge(self) -> None:
         repo = self.selected_repo()
         if not repo:
@@ -776,6 +786,10 @@ class QueueWindow(QMainWindow):
             )
         except OSError:
             merge_after_approval = True
+        try:
+            merge_admin = self.merge_admin_file(repo).read_text().strip() == "1"
+        except OSError:
+            merge_admin = False
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Configure auto-merge")
@@ -795,6 +809,8 @@ class QueueWindow(QMainWindow):
         delegated_box.setChecked(merge_after_delegation)
         approval_box = QCheckBox("Merge after CodeRabbit approval")
         approval_box.setChecked(merge_after_approval)
+        admin_box = QCheckBox("Use --admin to bypass branch protection")
+        admin_box.setChecked(merge_admin)
         explanation = QLabel(
             "When the delegated-fix option is off, the agent leaves the PR open "
             "for another CodeRabbit review. The separate approval option lets the "
@@ -811,6 +827,7 @@ class QueueWindow(QMainWindow):
             delete_box.setEnabled(active)
             delegated_box.setEnabled(active)
             approval_box.setEnabled(active)
+            admin_box.setEnabled(active)
 
         enabled_box.toggled.connect(lambda _checked: update_controls())
         update_controls()
@@ -826,6 +843,7 @@ class QueueWindow(QMainWindow):
         layout.addWidget(method_label)
         layout.addWidget(method_select)
         layout.addWidget(delete_box)
+        layout.addWidget(admin_box)
         layout.addWidget(explanation)
         layout.addWidget(buttons)
         if dialog.exec() != QDialog.Accepted:
@@ -843,6 +861,10 @@ class QueueWindow(QMainWindow):
             (
                 self.merge_after_approval_file(repo),
                 "1\n" if approval_box.isChecked() else "0\n",
+            ),
+            (
+                self.merge_admin_file(repo),
+                "1\n" if admin_box.isChecked() else "0\n",
             ),
         )
         for target, value in values:
@@ -1859,12 +1881,21 @@ class QueueWindow(QMainWindow):
 
     def update_delegate_button(self) -> None:
         item = self.tasks.currentItem()
+        process_idle = self.delegate_process.state() == QProcess.NotRunning
         self.delegate_button.setEnabled(
             item is not None
             and bool(self.selected_repo())
             and bool(item.data(0, Qt.UserRole + 2))
             and not bool(item.data(0, Qt.UserRole + 1))
-            and self.delegate_process.state() == QProcess.NotRunning
+            and process_idle
+        )
+        has_idle = any(
+            bool(self.tasks.topLevelItem(index).data(0, Qt.UserRole + 2))
+            and not bool(self.tasks.topLevelItem(index).data(0, Qt.UserRole + 1))
+            for index in range(self.tasks.topLevelItemCount())
+        )
+        self.delegate_all_button.setEnabled(
+            bool(self.selected_repo()) and has_idle and process_idle
         )
 
     def delegate_selected(self) -> None:
@@ -1896,6 +1927,20 @@ class QueueWindow(QMainWindow):
         )
         self.delegate_process.start()
 
+    def delegate_all_idle(self) -> None:
+        repo = self.selected_repo()
+        if not repo or self.delegate_process.state() != QProcess.NotRunning:
+            return
+        self.delegate_pr = ""
+        self.delegate_repo = repo
+        self.delegate_button.setEnabled(False)
+        self.delegate_all_button.setEnabled(False)
+        self.delegate_all_button.setText("Delegating all…")
+        self.statusBar().showMessage("Delegating all reachable idle tasks…")
+        self.delegate_process.setProgram(SCRIPT)
+        self.delegate_process.setArguments(["--repo", repo, "--delegate-all"])
+        self.delegate_process.start()
+
     def mark_delegation_running(self, number: str) -> None:
         for index in range(self.tasks.topLevelItemCount()):
             item = self.tasks.topLevelItem(index)
@@ -1911,6 +1956,13 @@ class QueueWindow(QMainWindow):
         stdout = bytes(self.delegate_process.readAllStandardOutput()).decode()
         stderr = bytes(self.delegate_process.readAllStandardError()).decode().strip()
         self.delegate_button.setText("Delegate selected")
+        self.delegate_all_button.setText("Delegate all idle")
+        for number in set(re.findall(r"PR #(\d+)", stdout)):
+            if (
+                "Routing unresolved CodeRabbit review on PR #" + number in stdout
+                or "for PR #" + number + " is already running" in stdout
+            ):
+                self.mark_delegation_running(number)
         if exit_code != 0:
             self.update_delegate_button()
             self.show_transient_status("Delegation failed", 6000)
@@ -1919,12 +1971,21 @@ class QueueWindow(QMainWindow):
                 "Delegation failed",
                 stderr or stdout.strip() or "Unknown delegation error",
             )
+        elif not self.delegate_pr:
+            self.update_delegate_button()
+            started = len(
+                set(re.findall(r"Routing unresolved CodeRabbit review on PR #(\d+)", stdout))
+            )
+            self.show_transient_status(
+                f"Started {started} idle agent task{'' if started == 1 else 's'}"
+            )
         elif (
             "already running" in stdout
             or "started while routing" in stdout
             or "Routing unresolved CodeRabbit review" in stdout
         ):
-            self.mark_delegation_running(self.delegate_pr)
+            if self.delegate_pr:
+                self.mark_delegation_running(self.delegate_pr)
             if "Routing unresolved CodeRabbit review" in stdout:
                 self.show_transient_status(
                     f"PR #{self.delegate_pr}: agent task started"

@@ -452,6 +452,21 @@ route_unresolved_review 42 branch head title
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('manual delegation resumed session-1', result.stdout)
 
+    def test_delegate_all_routes_each_idle_eligible_review(self):
+        result = self.run_shell(r'''
+snapshot() { printf '{}\n'; }
+reviewed_rows() {
+  printf '41\tbranch-a\thead-a\tfirst\n42\tbranch-b\thead-b\tsecond\n'
+}
+route_unresolved_review() {
+  printf 'routed:%s:force=%s\n' "$1" "$force_delegation"
+}
+delegate_all_now
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('routed:41:force=1', result.stdout)
+        self.assertIn('routed:42:force=1', result.stdout)
+
     def test_codex_daemon_resume_avoids_cli_fallback(self):
         result = self.run_shell(r'''
 worktree="$state_root/worktree"
@@ -703,6 +718,7 @@ merge_pr_now 42 head rebase 0
 printf '%s\n' desktop >"$agent_host_file"
 printf '%s\n' rebase >"$merge_method_file"
 printf '%s\n' 0 >"$delete_branch_file"
+printf '%s\n' 1 >"$merge_admin_file"
 ssh() { printf '%s\n' "$*"; }
 route_merge_pr 42 head
 ''')
@@ -710,6 +726,7 @@ route_merge_pr 42 head
         self.assertIn('desktop', result.stdout)
         self.assertIn('--merge-now', result.stdout)
         self.assertIn('rebase', result.stdout)
+        self.assertIn('--merge-now 42 head rebase 0 1', result.stdout)
 
     def test_post_delegation_merge_defaults_on(self):
         result = self.run_shell('merge_after_delegation_enabled')
@@ -720,12 +737,22 @@ route_merge_pr 42 head
 printf '1\n' >"$auto_merge_file"
 printf '1\n' >"$merge_after_delegation_file"
 printf 'rebase\n' >"$merge_method_file"
+printf '1\n' >"$merge_admin_file"
 auto_merge_instruction
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('gh pr merge --rebase', result.stdout)
         self.assertIn('wait for CI to pass', result.stdout)
         self.assertIn('gh pr merge --rebase --admin', result.stdout)
+
+    def test_post_delegation_merge_does_not_use_admin_by_default(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$auto_merge_file"
+printf '1\n' >"$merge_after_delegation_file"
+auto_merge_instruction
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('--admin', result.stdout)
 
 
 if __name__ == '__main__':
