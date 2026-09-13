@@ -893,15 +893,20 @@ record_review_request() {
   printf '%s\t%s\t%s\n' "$pr" "$head_sha" "$requested_at" \
     >>"$review_requests_file"
 
-  # Keep an active review pinned visually at the top, but place it last in the
-  # saved queue so it returns there if GitHub still reports it as stale after
-  # the active state clears.
+  # Keep an active review pinned visually at the top. Its saved position after
+  # the review follows the same top/bottom preference as every other new row.
   if (( requested_at > 0 )); then
     exec {order_lock_fd}>"$order_lock_file"
     flock -x "$order_lock_fd"
-    awk -v pr="$pr" '$0 != pr { print } END { print pr }' \
-      "$queue_order_file" 2>/dev/null >"$queue_order_file.tmp.$$" ||
-      printf '%s\n' "$pr" >"$queue_order_file.tmp.$$"
+    if new_items_at_top_enabled; then
+      awk -v pr="$pr" 'BEGIN { print pr } $0 != pr { print }' \
+        "$queue_order_file" 2>/dev/null >"$queue_order_file.tmp.$$" ||
+        printf '%s\n' "$pr" >"$queue_order_file.tmp.$$"
+    else
+      awk -v pr="$pr" '$0 != pr { print } END { print pr }' \
+        "$queue_order_file" 2>/dev/null >"$queue_order_file.tmp.$$" ||
+        printf '%s\n' "$pr" >"$queue_order_file.tmp.$$"
+    fi
     mv "$queue_order_file.tmp.$$" "$queue_order_file"
     flock -u "$order_lock_fd"
     exec {order_lock_fd}>&-

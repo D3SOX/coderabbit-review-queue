@@ -119,12 +119,23 @@ wait_for_review_completion 1162 2026-09-06T21:05:08Z head title
 
     def test_recording_review_request_moves_pr_to_bottom(self):
         result = self.run_shell(r'''
+printf '0\n' >"$new_items_at_top_file"
 printf '%s\n' 4 2 9 >"$queue_order_file"
 record_review_request 2 head-2 123
 cat "$queue_order_file"
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines(), ['4', '9', '2'])
+
+    def test_recording_review_request_moves_pr_to_top_when_configured(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$new_items_at_top_file"
+printf '%s\n' 4 2 9 >"$queue_order_file"
+record_review_request 2 head-2 123
+cat "$queue_order_file"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['2', '4', '9'])
 
     def test_monitor_order_update_does_not_overwrite_concurrent_gui_order(self):
         with tempfile.TemporaryDirectory() as state:
@@ -149,7 +160,7 @@ cat "$queue_order_file"
                 fcntl.flock(lock, fcntl.LOCK_UN)
             stdout, stderr = process.communicate(timeout=5)
             self.assertEqual(process.returncode, 0, stdout + stderr)
-            self.assertEqual(order.read_text().splitlines(), ['3', '1', '2'])
+            self.assertEqual(order.read_text().splitlines(), ['2', '3', '1'])
 
     def test_monitor_rereads_queue_order_after_quota_check(self):
         result = self.run_shell(r'''
@@ -375,6 +386,7 @@ git -C "$old" init -q
 git -C "$old" remote add origin git@github.com:example/repo.git
 git -C "$current" config user.email test@example.com
 git -C "$current" config user.name Test
+git -C "$current" config commit.gpgSign false
 git -C "$current" remote add origin git@github.com:example/repo.git
 touch "$current/file"
 git -C "$current" add file
