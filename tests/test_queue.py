@@ -301,6 +301,28 @@ main --repo example/repo
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Merged approved review immediately', result.stdout)
 
+    def test_approved_review_is_merged_before_initial_quota_wait(self):
+        result = self.run_shell(r'''
+claim_monitor() { :; }
+cleanup_monitor() { :; }
+write_monitor_state() { :; }
+shared_expiry() { echo 9999999999; }
+monitor_snapshot() { printf 'approved snapshot\n'; }
+route_all_unresolved_async() { :; }
+wait_until() {
+  [[ -f $state_root/merged ]] || exit 99
+  exit 0
+}
+merge_approved_reviews() {
+  [[ $1 == 'approved snapshot' ]] || exit 98
+  touch "$state_root/merged"
+  echo 'Merged before quota wait'
+}
+main --repo example/repo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Merged before quota wait', result.stdout)
+
     def test_snapshot_cache_is_shared(self):
         result = self.run_shell(r'''
 calls="$state_root/calls"
@@ -531,23 +553,34 @@ main --repo example/repo --validate-repo
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_monitor_restart_waits_for_saved_quota_before_refreshing(self):
+    def test_monitor_restart_refreshes_prs_before_saved_quota_wait(self):
         result = self.run_shell(r'''
 claim_monitor() { :; }
 cleanup_monitor() { :; }
-monitor_snapshot() { echo 'Refreshed before saved expiry' >&2; exit 99; }
-wait_until() { echo "Waited for saved expiry $1"; exit 0; }
+monitor_snapshot() { echo 'current snapshot'; }
+route_all_unresolved_async() { :; }
+merge_approved_reviews() {
+  [[ $1 == 'current snapshot' ]] || exit 99
+  touch "$state_root/refreshed"
+}
+wait_until() {
+  [[ -f $state_root/refreshed ]] || exit 98
+  echo "Waited for saved expiry $1"
+  exit 0
+}
 printf '%s\n' "$(( $(date +%s) + 600 ))" >"$quota_expiry_file"
 main --repo example/repo
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Waited for saved expiry', result.stdout)
-        self.assertNotIn('Refreshed before saved expiry', result.stderr)
 
     def test_monitor_restart_restores_saved_wait_without_notification(self):
         result = self.run_shell(r'''
 claim_monitor() { :; }
 cleanup_monitor() { :; }
+monitor_snapshot() { printf '{}\n'; }
+route_all_unresolved_async() { :; }
+merge_approved_reviews() { :; }
 wait_until() { printf 'mode=%s\n' "${2:-notify}"; exit 0; }
 printf '%s\n' "$(( $(date +%s) + 600 ))" >"$quota_expiry_file"
 main --repo example/repo
@@ -729,7 +762,7 @@ query_quota 42 title
         result = self.run_shell(r'''
 gh() {
   if [[ $1 == pr && $2 == view ]]; then
-    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}'
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}'
   else
     printf '%s\n' "$*"
   fi
@@ -740,10 +773,24 @@ merge_pr_now 42 head squash 1
         self.assertIn('pr merge 42 --repo example/repo --squash --delete-branch', result.stdout)
         self.assertNotIn('--auto', result.stdout)
 
+    def test_merge_accepts_clean_pr_with_cancelled_nonblocking_check(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"CANCELLED"},{"status":"COMPLETED","conclusion":"SUCCESS"}]}'
+  else
+    printf '%s\n' "$*"
+  fi
+}
+merge_pr_now 42 head squash 1
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('pr merge 42', result.stdout)
+
     def test_merge_refuses_pending_ci(self):
         result = self.run_shell(r'''
 gh() {
-  printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""}]}'
+  printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""}]}'
 }
 merge_pr_now 42 head rebase 0
 ''')

@@ -2608,18 +2608,12 @@ agent_task_progress() {
 merge_pr_now() {
   local pr=$1 expected_head=$2 method=$3 delete_branch=$4 bypass_approval=${5:-0} data
   data=$(gh pr view "$pr" --repo "$repo" \
-    --json state,headRefOid,mergeable,statusCheckRollup) || return 1
+    --json state,headRefOid,mergeable,mergeStateStatus) || return 1
   if ! jq -e --arg head "$expected_head" '
     .state == "OPEN"
     and .headRefOid == $head
     and .mergeable == "MERGEABLE"
-    and all(.statusCheckRollup[]?;
-      if has("status") then
-        .status == "COMPLETED"
-        and ((.conclusion // "") | IN("SUCCESS", "NEUTRAL", "SKIPPED"))
-      else
-        (.state // "") == "SUCCESS"
-      end)
+    and .mergeStateStatus == "CLEAN"
   ' <<<"$data" >/dev/null; then
     return 1
   fi
@@ -3209,6 +3203,12 @@ main() {
   fi
   trap cleanup_monitor EXIT
   write_monitor_state idle
+
+  # Agent and merge work is independent of CodeRabbit's review quota. Process
+  # it once before a cached quota window can put the monitor to sleep.
+  state=$(monitor_snapshot)
+  route_all_unresolved_async "$state"
+  merge_approved_reviews "$state"
 
   quota_expiry=$(shared_expiry)
   now=$(date -u +%s)
