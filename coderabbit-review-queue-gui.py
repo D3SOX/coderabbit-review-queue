@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSlider,
     QSystemTrayIcon,
     QTextEdit,
     QSplitter,
@@ -49,6 +51,7 @@ SELECTED_REPO_FILE = STATE_ROOT / "selected-repo"
 REPOSITORY_CACHE_FILE = STATE_ROOT / "repositories.txt"
 STATUS_CACHE_MAX_AGE = 60
 SHORT_DELEGATION_PROMPT = "Resolve the CodeRabbit review and stop."
+BABYSIT_DELEGATION_PROMPT = """Continue babysitting this PR. Resolve the current CodeRabbit feedback, monitor CI and new review feedback, fix actionable failures and comments, and continue until the PR is merge-ready. Never trigger CodeRabbit reviews through comments."""
 DEFAULT_DELEGATION_PROMPT = """Address unresolved CodeRabbit feedback on PR #{pr_number} ({pr_title}).
 PR: {pr_url}
 Threads that triggered this delegation: {threads}
@@ -276,6 +279,15 @@ class QueueWindow(QMainWindow):
         )
         self.notify_sound.setChecked(True)
         self.notify_sound.toggled.connect(self.notify_sound_changed)
+        self.notify_sound_button = QPushButton(
+            QIcon.fromTheme("audio-volume-high"), "Configure sound…"
+        )
+        self.notify_sound_button.setEnabled(False)
+        self.notify_sound_button.clicked.connect(self.configure_notify_sound)
+        notify_sound_row = QHBoxLayout()
+        notify_sound_row.addWidget(self.notify_sound)
+        notify_sound_row.addStretch()
+        notify_sound_row.addWidget(self.notify_sound_button)
         self.new_items_at_top = QCheckBox("Add new queue items at the top")
         self.new_items_at_top.setToolTip(
             "Per repository. When disabled, newly discovered PRs are appended at the bottom."
@@ -395,7 +407,7 @@ class QueueWindow(QMainWindow):
         layout.addWidget(self.ignore_drafts)
         layout.addLayout(excluded_row)
         layout.addLayout(authors_row)
-        layout.addWidget(self.notify_sound)
+        layout.addLayout(notify_sound_row)
         layout.addWidget(self.new_items_at_top)
         layout.addLayout(header_buttons)
         layout.addWidget(self.table_splitter, 1)
@@ -682,6 +694,7 @@ class QueueWindow(QMainWindow):
         self.load_excluded_branches(repo)
         self.load_excluded_authors(repo)
         self.load_notify_sound(repo)
+        self.notify_sound_button.setEnabled(bool(repo))
         self.load_new_items_at_top(repo)
         cache_is_fresh = self.load_cached_status(repo)
         self.waiting_for_review_window = False
@@ -878,7 +891,7 @@ class QueueWindow(QMainWindow):
             mode = self.delegation_prompt_mode_file(repo).read_text().strip()
         except OSError:
             mode = "default"
-        if mode not in {"default", "short", "custom"}:
+        if mode not in {"default", "short", "babysit", "custom"}:
             mode = "default"
         try:
             custom = self.delegation_prompt_template_file(repo).read_text()
@@ -899,6 +912,7 @@ class QueueWindow(QMainWindow):
         mode_select = QComboBox()
         mode_select.addItem("Default review workflow", "default")
         mode_select.addItem("Resolve review and stop", "short")
+        mode_select.addItem("Continue babysitting", "babysit")
         mode_select.addItem("Custom prompt", "custom")
         mode_select.setCurrentIndex(mode_select.findData(current_mode))
 
@@ -922,6 +936,8 @@ class QueueWindow(QMainWindow):
                 prompt_editor.setPlainText(DEFAULT_DELEGATION_PROMPT)
             elif mode == "short":
                 prompt_editor.setPlainText(SHORT_DELEGATION_PROMPT)
+            elif mode == "babysit":
+                prompt_editor.setPlainText(BABYSIT_DELEGATION_PROMPT)
             else:
                 prompt_editor.setPlainText(editor_state["custom"])
             prompt_editor.setEnabled(mode == "custom")
@@ -1217,6 +1233,120 @@ class QueueWindow(QMainWindow):
 
     def notify_sound_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-notify-sound"
+
+    def notify_sound_path_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-notify-sound-path"
+
+    def notify_sound_volume_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-notify-sound-volume"
+
+    def notify_sound_settings(self, repo: str) -> tuple[str, int]:
+        try:
+            path = self.notify_sound_path_file(repo).read_text().strip()
+        except OSError:
+            path = ""
+        try:
+            volume = int(self.notify_sound_volume_file(repo).read_text().strip())
+        except (OSError, ValueError):
+            volume = 100
+        return path, max(0, min(volume, 100))
+
+    def configure_notify_sound(self) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        current_path, current_volume = self.notify_sound_settings(repo)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Notification sound")
+
+        sound_label = QLabel("Sound")
+        sound_select = QComboBox()
+        sound_select.addItem("Automatic", "")
+        candidates = (
+            ("Freedesktop complete", "/usr/share/sounds/freedesktop/stereo/complete.oga"),
+            ("Ocean information", "/usr/share/sounds/ocean/stereo/dialog-information.oga"),
+            ("Oxygen information", "/usr/share/sounds/oxygen/stereo/dialog-information.ogg"),
+        )
+        for label, path in candidates:
+            if Path(path).is_file():
+                sound_select.addItem(label, path)
+        if current_path and sound_select.findData(current_path) < 0:
+            sound_select.addItem(Path(current_path).name, current_path)
+        current_index = sound_select.findData(current_path)
+        sound_select.setCurrentIndex(current_index if current_index >= 0 else 0)
+
+        choose_button = QPushButton(QIcon.fromTheme("document-open"), "Choose file…")
+
+        def choose_sound() -> None:
+            selected, _filter = QFileDialog.getOpenFileName(
+                dialog,
+                "Choose notification sound",
+                str(Path(current_path).parent if current_path else Path.home()),
+                "Audio files (*.oga *.ogg *.wav *.flac *.mp3);;All files (*)",
+            )
+            if not selected:
+                return
+            index = sound_select.findData(selected)
+            if index < 0:
+                sound_select.addItem(Path(selected).name, selected)
+                index = sound_select.count() - 1
+            sound_select.setCurrentIndex(index)
+
+        choose_button.clicked.connect(choose_sound)
+        sound_row = QHBoxLayout()
+        sound_row.addWidget(sound_select, 1)
+        sound_row.addWidget(choose_button)
+
+        volume_label = QLabel(f"Volume: {current_volume}%")
+        volume_slider = QSlider(Qt.Horizontal)
+        volume_slider.setRange(0, 100)
+        volume_slider.setValue(current_volume)
+        volume_slider.setAccessibleName("Notification sound volume")
+        volume_slider.valueChanged.connect(
+            lambda value: volume_label.setText(f"Volume: {value}%")
+        )
+        preview_button = QPushButton(QIcon.fromTheme("media-playback-start"), "Preview")
+
+        def preview_sound() -> None:
+            path = sound_select.currentData()
+            QProcess.startDetached(
+                SCRIPT,
+                [
+                    "--repo",
+                    repo,
+                    "--preview-notify-sound",
+                    path if isinstance(path, str) else "",
+                    str(volume_slider.value()),
+                ],
+            )
+
+        preview_button.clicked.connect(preview_sound)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(sound_label)
+        layout.addLayout(sound_row)
+        layout.addWidget(volume_label)
+        layout.addWidget(volume_slider)
+        layout.addWidget(preview_button)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        path = sound_select.currentData()
+        if not isinstance(path, str):
+            path = ""
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        values = (
+            (self.notify_sound_path_file(repo), path + "\n"),
+            (self.notify_sound_volume_file(repo), f"{volume_slider.value()}\n"),
+        )
+        for target, value in values:
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(value)
+            os.replace(temporary, target)
+        self.show_transient_status("Notification sound settings saved")
 
     def load_notify_sound(self, repo: str) -> None:
         self.notify_sound.blockSignals(True)

@@ -31,6 +31,8 @@ ignore_drafts_file=''
 excluded_branches_file=''
 excluded_authors_file=''
 notify_sound_file=''
+notify_sound_path_file=''
+notify_sound_volume_file=''
 new_items_at_top_file=''
 agent_host_file=''
 delegated_prs_file=''
@@ -63,6 +65,8 @@ force_local_agents=0
 agent_mode_override=''
 delegation_prompt_mode_override=''
 delegation_prompt_template_override=''
+sound_path_override=''
+sound_volume_override=''
 auto_merge_override=''
 merge_method_override=''
 delete_branch_override=''
@@ -82,7 +86,34 @@ notify_sound_enabled() {
 }
 
 play_notification_sound() {
-  local sound_file
+  local sound_file volume percent volume_scalar
+
+  volume=${sound_volume_override:-}
+  if [[ -z $volume && -f $notify_sound_volume_file ]]; then
+    volume=$(head -n 1 "$notify_sound_volume_file")
+  fi
+  [[ $volume =~ ^[0-9]+$ ]] || volume=100
+  (( volume > 100 )) && volume=100
+  percent=$((volume * 65536 / 100))
+  volume_scalar=$(awk -v volume="$volume" 'BEGIN { printf "%.2f", volume / 100 }')
+
+  if [[ -n $sound_path_override ]]; then
+    sound_file=$sound_path_override
+  elif [[ -s $notify_sound_path_file ]]; then
+    sound_file=$(head -n 1 "$notify_sound_path_file")
+  else
+    sound_file=''
+  fi
+
+  if [[ -n $sound_file && -f $sound_file ]]; then
+    if command -v pw-play >/dev/null 2>&1; then
+      pw-play --volume "$volume_scalar" "$sound_file" \
+        >/dev/null 2>&1 && return
+    fi
+    if command -v paplay >/dev/null 2>&1; then
+      paplay --volume="$percent" "$sound_file" >/dev/null 2>&1 && return
+    fi
+  fi
 
   for sound_file in \
     /usr/share/sounds/freedesktop/stereo/complete.oga \
@@ -90,10 +121,11 @@ play_notification_sound() {
     /usr/share/sounds/oxygen/stereo/dialog-information.ogg; do
     [[ -f $sound_file ]] || continue
     if command -v pw-play >/dev/null 2>&1; then
-      pw-play "$sound_file" >/dev/null 2>&1 && return
+      pw-play --volume "$volume_scalar" "$sound_file" \
+        >/dev/null 2>&1 && return
     fi
     if command -v paplay >/dev/null 2>&1; then
-      paplay "$sound_file" >/dev/null 2>&1 && return
+      paplay --volume="$percent" "$sound_file" >/dev/null 2>&1 && return
     fi
   done
 
@@ -313,6 +345,8 @@ configure_repo() {
   excluded_branches_file="$state_root/$repo_key-excluded-branches"
   excluded_authors_file="$state_root/$repo_key-excluded-authors"
   notify_sound_file="$state_root/$repo_key-notify-sound"
+  notify_sound_path_file="$state_root/$repo_key-notify-sound-path"
+  notify_sound_volume_file="$state_root/$repo_key-notify-sound-volume"
   new_items_at_top_file="$state_root/$repo_key-new-items-at-top"
   agent_host_file="$state_root/$repo_key-agent-host"
   delegated_prs_file="$state_root/$repo_key-delegated-prs.txt"
@@ -1849,7 +1883,7 @@ delegation_prompt_mode() {
     mode=$(head -n 1 "$delegation_prompt_mode_file")
   fi
   case $mode in
-    default | short | custom) printf '%s\n' "$mode" ;;
+    default | short | babysit | custom) printf '%s\n' "$mode" ;;
     *) printf 'default\n' ;;
   esac
 }
@@ -1857,6 +1891,9 @@ delegation_prompt_mode() {
 delegation_prompt_template() {
   case $(delegation_prompt_mode) in
     short) printf 'Resolve the CodeRabbit review and stop.\n' ;;
+    babysit)
+      printf '%s\n' 'Continue babysitting this PR. Resolve the current CodeRabbit feedback, monitor CI and new review feedback, fix actionable failures and comments, and continue until the PR is merge-ready. Never trigger CodeRabbit reviews through comments.'
+      ;;
     custom)
       if [[ -n $delegation_prompt_template_override ]]; then
         printf '%s\n' "$delegation_prompt_template_override"
@@ -2973,6 +3010,16 @@ main() {
         action=${1#--}
         shift
         ;;
+      --preview-notify-sound)
+        (( $# >= 3 )) && [[ $3 =~ ^[0-9]+$ ]] || {
+          printf '%s\n' '--preview-notify-sound requires a path (or empty string) and volume.' >&2
+          return 2
+        }
+        action='preview-notify-sound'
+        sound_path_override=$2
+        sound_volume_override=$3
+        shift 3
+        ;;
       --cached-status)
         action='cached-status'
         shift
@@ -3046,8 +3093,8 @@ main() {
         shift 6
         ;;
       --delegation-prompt-mode)
-        (( $# >= 2 )) && [[ $2 =~ ^(default|short|custom)$ ]] || {
-          printf '%s\n' '--delegation-prompt-mode requires default, short, or custom.' >&2
+        (( $# >= 2 )) && [[ $2 =~ ^(default|short|babysit|custom)$ ]] || {
+          printf '%s\n' '--delegation-prompt-mode requires default, short, babysit, or custom.' >&2
           return 2
         }
         delegation_prompt_mode_override=$2
@@ -3133,6 +3180,10 @@ main() {
     if notify_sound_enabled; then
       play_notification_sound || true
     fi
+    return 0
+  fi
+  if [[ $action == preview-notify-sound ]]; then
+    play_notification_sound || true
     return 0
   fi
   if [[ $action == status ]]; then

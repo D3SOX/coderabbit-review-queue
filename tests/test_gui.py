@@ -21,6 +21,38 @@ SPEC.loader.exec_module(queue_gui)
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_notification_sound_settings_clamp_saved_volume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path_file = Path(directory) / "sound-path"
+            volume_file = Path(directory) / "sound-volume"
+            path_file.write_text("/tmp/complete.oga\n")
+            volume_file.write_text("140\n")
+            window = Mock()
+            window.notify_sound_path_file.return_value = path_file
+            window.notify_sound_volume_file.return_value = volume_file
+
+            settings = queue_gui.QueueWindow.notify_sound_settings(
+                window, "example/repo"
+            )
+
+            self.assertEqual(settings, ("/tmp/complete.oga", 100))
+
+    def test_babysit_delegation_prompt_mode_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mode_file = Path(directory) / "prompt-mode"
+            custom_file = Path(directory) / "prompt-custom"
+            mode_file.write_text("babysit\n")
+            window = Mock()
+            window.delegation_prompt_mode_file.return_value = mode_file
+            window.delegation_prompt_template_file.return_value = custom_file
+
+            mode, custom = queue_gui.QueueWindow.delegation_prompt_settings(
+                window, "example/repo"
+            )
+
+            self.assertEqual(mode, "babysit")
+            self.assertEqual(custom, "")
+
     def test_zombie_monitor_is_not_considered_running(self):
         self.assertFalse(queue_gui.proc_stat_is_running("1040817 (bash) Z 1 2 3"))
         self.assertTrue(queue_gui.proc_stat_is_running("1040817 (bash) S 1 2 3"))

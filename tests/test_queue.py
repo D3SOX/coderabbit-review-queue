@@ -657,6 +657,30 @@ render_delegation_prompt 42 'title & details' 'thread-1 (src/app.py:7)'
         self.assertIn('https://github.com/example/repo/pull/42', result.stdout)
         self.assertIn('thread-1 (src/app.py:7)', result.stdout)
 
+    def test_babysit_delegation_prompt_keeps_monitoring(self):
+        result = self.run_shell(r'''
+delegation_prompt_mode_override=babysit
+render_delegation_prompt 42 title thread-1
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Continue babysitting this PR', result.stdout)
+        self.assertIn('monitor CI and new review feedback', result.stdout)
+        self.assertNotIn('stop.', result.stdout.lower())
+
+    def test_notification_sound_uses_configured_file_and_volume(self):
+        result = self.run_shell(r'''
+sound="$state_root/custom.ogg"
+touch "$sound"
+printf '%s\n' "$sound" >"$notify_sound_path_file"
+printf '25\n' >"$notify_sound_volume_file"
+pw-play() { printf '<%s>' "$@" >"$state_root/player-args"; }
+play_notification_sound
+cat "$state_root/player-args"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('<--volume><0.25>', result.stdout)
+        self.assertIn('custom.ogg>', result.stdout)
+
     def test_quota_wait_replaces_checking_monitor_state(self):
         result = self.run_shell(r'''
 claim_monitor() { :; }
