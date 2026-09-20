@@ -11,7 +11,16 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QDateTime, QLocale, QProcess, QSize, QTimer, Qt, QUrl
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QDesktopServices,
+    QFont,
+    QIcon,
+    QPainter,
+    QPalette,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -83,6 +92,19 @@ def app_icon() -> QIcon:
     return icon
 
 
+def titlebar_icon(palette: QPalette) -> QIcon:
+    # Oxygen applies the positive-color icon effect at a transparent outer
+    # edge. Give only the window-menu icon an opaque decoration-colored canvas;
+    # the regular app icon stays transparent everywhere else.
+    pixmap = QPixmap(22, 22)
+    pixmap.fill(palette.color(QPalette.Window).lighter(145))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.drawPixmap(0, 0, app_icon().pixmap(22, 22))
+    painter.end()
+    return QIcon(pixmap)
+
+
 def ssh_config_hosts(path: Path | None = None) -> list[str]:
     config = path or Path.home() / ".ssh" / "config"
     try:
@@ -128,7 +150,7 @@ class QueueWindow(QMainWindow):
         super().__init__()
         self.base_window_title = "CodeRabbit Review Queue"
         self.setWindowTitle(self.base_window_title)
-        self.setWindowIcon(app_icon())
+        self.setWindowIcon(titlebar_icon(self.palette()))
         self.resize(1100, 820)
         self.next_review_at: QDateTime | None = None
         self.has_queued_reviews = False
