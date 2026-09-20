@@ -70,24 +70,17 @@ Never trigger CodeRabbit reviews through comments; the queue handles requests. F
 
 def app_icon() -> QIcon:
     icon = QIcon()
+    has_raster_icon = False
     for size in (16, 22, 24, 32, 48, 64):
         path = APP_ICON_PATH.with_name(f"coderabbit-logomark-{size}.png")
         if path.is_file():
             icon.addFile(str(path), QSize(size, size))
-    if APP_ICON_PATH.is_file():
+            has_raster_icon = True
+    if not has_raster_icon and APP_ICON_PATH.is_file():
         icon.addFile(str(APP_ICON_PATH))
     if icon.isNull():
         return QIcon.fromTheme("system-software-update")
     return icon
-
-
-def transparent_window_icon() -> QIcon:
-    # Oxygen draws its positive-color glow around the alpha mask of a window
-    # menu icon. Keep that decoration slot blank; the desktop file still gives
-    # launchers and task switchers the branded application icon.
-    pixmap = QPixmap(1, 1)
-    pixmap.fill(Qt.transparent)
-    return QIcon(pixmap)
 
 
 def ssh_config_hosts(path: Path | None = None) -> list[str]:
@@ -135,7 +128,7 @@ class QueueWindow(QMainWindow):
         super().__init__()
         self.base_window_title = "CodeRabbit Review Queue"
         self.setWindowTitle(self.base_window_title)
-        self.setWindowIcon(transparent_window_icon())
+        self.setWindowIcon(app_icon())
         self.resize(1100, 820)
         self.next_review_at: QDateTime | None = None
         self.has_queued_reviews = False
