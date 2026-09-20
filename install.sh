@@ -7,6 +7,7 @@ data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
 bin_dir=${XDG_BIN_HOME:-"$HOME/.local/bin"}
 lib_dir="$data_home/coderabbit-review-queue"
 applications_dir="$data_home/applications"
+icons_dir="$data_home/icons/hicolor"
 desktop_tmp=$(mktemp)
 
 cleanup() {
@@ -40,6 +41,17 @@ install -m 644 \
   "$source_dir/coderabbit-logomark.svg" \
   "$lib_dir/coderabbit-logomark.svg"
 install -m 644 "$source_dir"/coderabbit-logomark-*.png "$lib_dir/"
+for size in 16 22 24 32 48 64; do
+  icon_dir="$icons_dir/${size}x${size}/apps"
+  install -d "$icon_dir"
+  install -m 644 \
+    "$source_dir/coderabbit-logomark-$size.png" \
+    "$icon_dir/coderabbit-review-queue.png"
+done
+install -d "$icons_dir/scalable/apps"
+install -m 644 \
+  "$source_dir/coderabbit-logomark.svg" \
+  "$icons_dir/scalable/apps/coderabbit-review-queue.svg"
 install -m 755 \
   "$source_dir/uninstall.sh" \
   "$lib_dir/uninstall.sh"
@@ -52,17 +64,16 @@ escaped_exec="$bin_dir/coderabbit-review-queue"
 escaped_exec=${escaped_exec//\\/\\\\}
 escaped_exec=${escaped_exec//&/\\&}
 escaped_exec=${escaped_exec//|/\\|}
-escaped_icon="$lib_dir/coderabbit-logomark-64.png"
-escaped_icon=${escaped_icon//\\/\\\\}
-escaped_icon=${escaped_icon//&/\\&}
-escaped_icon=${escaped_icon//|/\\|}
-sed -e "s|@EXEC@|$escaped_exec|" -e "s|@ICON@|$escaped_icon|" \
+sed "s|@EXEC@|$escaped_exec|" \
   "$source_dir/coderabbit-review-queue.desktop.in" >"$desktop_tmp"
 install -m 644 "$desktop_tmp" \
   "$applications_dir/coderabbit-review-queue.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$applications_dir" >/dev/null 2>&1 || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q -t "$icons_dir" >/dev/null 2>&1 || true
 fi
 
 printf 'Installed CodeRabbit Review Queue.\n'
