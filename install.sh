@@ -36,6 +36,9 @@ install -m 755 \
 install -m 755 \
   "$source_dir/coderabbit-review-queue-gui.py" \
   "$lib_dir/coderabbit-review-queue-gui.py"
+install -m 644 \
+  "$source_dir/coderabbit-logomark.svg" \
+  "$lib_dir/coderabbit-logomark.svg"
 install -m 755 \
   "$source_dir/uninstall.sh" \
   "$lib_dir/uninstall.sh"
@@ -48,7 +51,11 @@ escaped_exec="$bin_dir/coderabbit-review-queue"
 escaped_exec=${escaped_exec//\\/\\\\}
 escaped_exec=${escaped_exec//&/\\&}
 escaped_exec=${escaped_exec//|/\\|}
-sed "s|@EXEC@|$escaped_exec|" \
+escaped_icon="$lib_dir/coderabbit-logomark.svg"
+escaped_icon=${escaped_icon//\\/\\\\}
+escaped_icon=${escaped_icon//&/\\&}
+escaped_icon=${escaped_icon//|/\\|}
+sed -e "s|@EXEC@|$escaped_exec|" -e "s|@ICON@|$escaped_icon|" \
   "$source_dir/coderabbit-review-queue.desktop.in" >"$desktop_tmp"
 install -m 644 "$desktop_tmp" \
   "$applications_dir/coderabbit-review-queue.desktop"

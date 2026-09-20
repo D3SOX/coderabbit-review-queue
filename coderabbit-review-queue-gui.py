@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 SCRIPT = str(Path(__file__).with_name("coderabbit-review-queue"))
+APP_ICON_PATH = Path(__file__).with_name("coderabbit-logomark.svg")
 STATE_ROOT = (
     Path(
         os.environ.get(
@@ -65,6 +66,13 @@ Follow repository instructions and existing task context.
 5. Reply directly to existing threads without creating or submitting reviews. Verify no pending reviews remain; delete accidental pending reviews only if they contain no unrelated user comments.
 
 Never trigger CodeRabbit reviews through comments; the queue handles requests. Finish this pass without waiting for another review. Report changes, validation, the pushed commit, and blockers."""
+
+
+def app_icon() -> QIcon:
+    icon = QIcon(str(APP_ICON_PATH))
+    if icon.isNull():
+        return QIcon.fromTheme("system-software-update")
+    return icon
 
 
 def ssh_config_hosts(path: Path | None = None) -> list[str]:
@@ -151,9 +159,7 @@ class QueueWindow(QMainWindow):
         self.waiting_for_review_window = False
 
         title_icon = QLabel()
-        title_icon.setPixmap(
-            QIcon.fromTheme("system-software-update").pixmap(32, 32)
-        )
+        title_icon.setPixmap(app_icon().pixmap(32, 32))
         title = QLabel("CodeRabbit Review Queue")
         title.setObjectName("title")
         title_row = QHBoxLayout()
@@ -415,7 +421,7 @@ class QueueWindow(QMainWindow):
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
-        self.tray_icon = QSystemTrayIcon(QIcon.fromTheme("system-software-update"), self)
+        self.tray_icon = QSystemTrayIcon(app_icon(), self)
         tray_menu = QMenu(self)
         self.window_action = QAction("Hide CodeRabbit queue", self)
         self.window_action.triggered.connect(self.toggle_from_tray)
@@ -519,7 +525,7 @@ class QueueWindow(QMainWindow):
 
     def set_tray_countdown(self, text: str | None, tooltip: str) -> None:
         if text is None:
-            self.tray_icon.setIcon(QIcon.fromTheme("system-software-update"))
+            self.tray_icon.setIcon(app_icon())
         else:
             pixmap = QPixmap(64, 64)
             pixmap.fill(Qt.transparent)
@@ -2266,7 +2272,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("CodeRabbit Review Queue")
     app.setDesktopFileName("coderabbit-review-queue")
-    app.setWindowIcon(QIcon.fromTheme("system-software-update"))
+    app.setWindowIcon(app_icon())
     window = QueueWindow()
     window.show()
     if "--smoke-test" in sys.argv:

@@ -14,6 +14,7 @@ rm -f \
   "$applications_dir/coderabbit-review-queue.desktop" \
   "$lib_dir/coderabbit-review-queue" \
   "$lib_dir/coderabbit-review-queue-gui.py" \
+  "$lib_dir/coderabbit-logomark.svg" \
   "$lib_dir/uninstall.sh"
 rmdir "$lib_dir" 2>/dev/null || true
 
