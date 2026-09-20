@@ -81,6 +81,15 @@ def app_icon() -> QIcon:
     return icon
 
 
+def transparent_window_icon() -> QIcon:
+    # Oxygen draws its positive-color glow around the alpha mask of a window
+    # menu icon. Keep that decoration slot blank; the desktop file still gives
+    # launchers and task switchers the branded application icon.
+    pixmap = QPixmap(1, 1)
+    pixmap.fill(Qt.transparent)
+    return QIcon(pixmap)
+
+
 def ssh_config_hosts(path: Path | None = None) -> list[str]:
     config = path or Path.home() / ".ssh" / "config"
     try:
@@ -126,6 +135,7 @@ class QueueWindow(QMainWindow):
         super().__init__()
         self.base_window_title = "CodeRabbit Review Queue"
         self.setWindowTitle(self.base_window_title)
+        self.setWindowIcon(transparent_window_icon())
         self.resize(1100, 820)
         self.next_review_at: QDateTime | None = None
         self.has_queued_reviews = False
