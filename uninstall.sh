@@ -15,6 +15,12 @@ rm -f \
   "$lib_dir/coderabbit-review-queue" \
   "$lib_dir/coderabbit-review-queue-gui.py" \
   "$lib_dir/coderabbit-logomark.svg" \
+  "$lib_dir/coderabbit-logomark-16.png" \
+  "$lib_dir/coderabbit-logomark-22.png" \
+  "$lib_dir/coderabbit-logomark-24.png" \
+  "$lib_dir/coderabbit-logomark-32.png" \
+  "$lib_dir/coderabbit-logomark-48.png" \
+  "$lib_dir/coderabbit-logomark-64.png" \
   "$lib_dir/uninstall.sh"
 rmdir "$lib_dir" 2>/dev/null || true
 

@@ -39,6 +39,7 @@ install -m 755 \
 install -m 644 \
   "$source_dir/coderabbit-logomark.svg" \
   "$lib_dir/coderabbit-logomark.svg"
+install -m 644 "$source_dir"/coderabbit-logomark-*.png "$lib_dir/"
 install -m 755 \
   "$source_dir/uninstall.sh" \
   "$lib_dir/uninstall.sh"

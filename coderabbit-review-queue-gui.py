@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, QLocale, QProcess, QTimer, Qt, QUrl
+from PySide6.QtCore import QDate, QDateTime, QLocale, QProcess, QSize, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -69,7 +69,13 @@ Never trigger CodeRabbit reviews through comments; the queue handles requests. F
 
 
 def app_icon() -> QIcon:
-    icon = QIcon(str(APP_ICON_PATH))
+    icon = QIcon()
+    for size in (16, 22, 24, 32, 48, 64):
+        path = APP_ICON_PATH.with_name(f"coderabbit-logomark-{size}.png")
+        if path.is_file():
+            icon.addFile(str(path), QSize(size, size))
+    if APP_ICON_PATH.is_file():
+        icon.addFile(str(APP_ICON_PATH))
     if icon.isNull():
         return QIcon.fromTheme("system-software-update")
     return icon
