@@ -858,17 +858,45 @@ archive_matching_codex_thread feature head
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), 'session-1')
 
-    def test_approved_head_is_archived_only_once(self):
+    def test_approval_queues_archive_without_archiving_before_merge(self):
         result = self.run_shell(r'''
-printf '1\n' >"$archive_after_approval_file"
+printf '1\n' >"$archive_after_merge_file"
 approved_archive_rows() { printf '42\tfeature\thead\tTitle\n'; }
 route_archive_codex_thread() { printf 'called\n' >>"$state_root/calls"; }
-archive_approved_threads '{}'
-archive_approved_threads '{}'
+queue_approved_thread_archives '{}'
+cat "$pending_archives_file"
+[[ ! -e $state_root/calls ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('42\tfeature\thead\tTitle', result.stdout)
+
+    def test_merged_head_is_archived_only_once(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$archive_after_merge_file"
+approved_archive_rows() { printf '42\tfeature\thead\tTitle\n'; }
+gh() { printf '{"state":"MERGED","headRefOid":"head"}\n'; }
+route_archive_codex_thread() { printf 'called\n' >>"$state_root/calls"; }
+queue_approved_thread_archives '{}'
+process_pending_thread_archives '{}'
+queue_approved_thread_archives '{}'
+process_pending_thread_archives '{}'
 cat "$state_root/calls"
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.count('called'), 1)
+
+    def test_open_pr_keeps_pending_archive_without_archiving(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$archive_after_merge_file"
+printf '42\tfeature\thead\tTitle\n' >"$pending_archives_file"
+gh() { printf '{"state":"OPEN","headRefOid":"head"}\n'; }
+route_archive_codex_thread() { touch "$state_root/archived"; }
+process_pending_thread_archives '{}'
+cat "$pending_archives_file"
+[[ ! -e $state_root/archived ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('42\tfeature\thead\tTitle', result.stdout)
 
     def test_post_delegation_merge_defaults_on(self):
         result = self.run_shell('merge_after_delegation_enabled')

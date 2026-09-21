@@ -44,8 +44,9 @@ delete_branch_file=''
 merge_after_delegation_file=''
 merge_after_approval_file=''
 merge_admin_file=''
-archive_after_approval_file=''
+archive_after_merge_file=''
 archived_heads_file=''
+pending_archives_file=''
 monitor_state_file=''
 snapshot_cache_file=''
 snapshot_cache_lock_file=''
@@ -363,8 +364,9 @@ configure_repo() {
   merge_after_delegation_file="$state_root/$repo_key-merge-after-delegation"
   merge_after_approval_file="$state_root/$repo_key-merge-after-approval"
   merge_admin_file="$state_root/$repo_key-merge-admin"
-  archive_after_approval_file="$state_root/$repo_key-archive-after-approval"
+  archive_after_merge_file="$state_root/$repo_key-archive-after-merge"
   archived_heads_file="$state_root/$repo_key-archived-heads.tsv"
+  pending_archives_file="$state_root/$repo_key-pending-archives.tsv"
   monitor_state_file="$state_root/$repo_key-monitor-state.tsv"
   snapshot_cache_file="$state_root/$repo_key-snapshot.json"
   snapshot_cache_lock_file="$state_root/$repo_key-snapshot.lock"
@@ -2768,9 +2770,9 @@ merge_approved_reviews() {
   done < <(approved_merge_rows "$state")
 }
 
-archive_after_approval_enabled() {
-  [[ -f $archive_after_approval_file ]] &&
-    [[ $(head -n 1 "$archive_after_approval_file") == 1 ]]
+archive_after_merge_enabled() {
+  [[ -f $archive_after_merge_file ]] &&
+    [[ $(head -n 1 "$archive_after_merge_file") == 1 ]]
 }
 
 route_archive_codex_thread() {
@@ -2783,9 +2785,9 @@ route_archive_codex_thread() {
   fi
 }
 
-archive_approved_threads() {
+queue_approved_thread_archives() {
   local state=$1 pr branch_name head_sha title marker
-  archive_after_approval_enabled || return 0
+  archive_after_merge_enabled || return 0
   while IFS=$'\t' read -r pr branch_name head_sha title; do
     [[ -n ${pr:-} ]] || continue
     marker="$pr"$'\t'"$head_sha"
@@ -2793,11 +2795,62 @@ archive_approved_threads() {
       rg -q --fixed-strings --line-regexp "$marker" "$archived_heads_file"; then
       continue
     fi
-    if route_archive_codex_thread "$branch_name" "$head_sha"; then
-      printf '%s\n' "$marker" >>"$archived_heads_file"
-      printf 'Archived the matching Codex task for approved PR #%s.\n' "$pr"
+    if [[ ! -f $pending_archives_file ]] ||
+      ! awk -F '\t' -v pr="$pr" -v head="$head_sha" \
+        '$1 == pr && $3 == head { found=1 } END { exit !found }' \
+        "$pending_archives_file"; then
+      title=${title//$'\t'/ }
+      title=${title//$'\n'/ }
+      printf '%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" \
+        >>"$pending_archives_file"
     fi
   done < <(approved_archive_rows "$state")
+}
+
+process_pending_thread_archives() {
+  local state=$1 pr branch_name head_sha title marker data pr_state current_head
+  local temporary
+  archive_after_merge_enabled || return 0
+  [[ -s $pending_archives_file ]] || return 0
+  temporary=$(mktemp "$pending_archives_file.XXXXXX")
+  while IFS=$'\t' read -r pr branch_name head_sha title; do
+    [[ -n ${pr:-} ]] || continue
+    marker="$pr"$'\t'"$head_sha"
+    if [[ -f $archived_heads_file ]] &&
+      rg -q --fixed-strings --line-regexp "$marker" "$archived_heads_file"; then
+      continue
+    fi
+    if jq -e --argjson pr "$pr" --arg head "$head_sha" '
+      any(.data.repository.pullRequests.nodes[]?;
+        .number == $pr and .headRefOid == $head)
+    ' <<<"$state" >/dev/null; then
+      printf '%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" \
+        >>"$temporary"
+      continue
+    fi
+    if ! data=$(gh pr view "$pr" --repo "$repo" --json state,headRefOid 2>/dev/null); then
+      printf '%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" \
+        >>"$temporary"
+      continue
+    fi
+    pr_state=$(jq -r '.state' <<<"$data")
+    current_head=$(jq -r '.headRefOid' <<<"$data")
+    if [[ $pr_state == OPEN ]]; then
+      printf '%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" \
+        >>"$temporary"
+      continue
+    fi
+    if [[ $pr_state == MERGED && $current_head == "$head_sha" ]]; then
+      if route_archive_codex_thread "$branch_name" "$head_sha"; then
+        printf '%s\n' "$marker" >>"$archived_heads_file"
+        printf 'Archived the matching Codex task for merged PR #%s.\n' "$pr"
+        continue
+      fi
+      printf '%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" \
+        >>"$temporary"
+    fi
+  done <"$pending_archives_file"
+  mv "$temporary" "$pending_archives_file"
 }
 
 show_status() {
@@ -3376,7 +3429,8 @@ main() {
   state=$(monitor_snapshot)
   route_all_unresolved_async "$state"
   merge_approved_reviews "$state"
-  archive_approved_threads "$state"
+  queue_approved_thread_archives "$state"
+  process_pending_thread_archives "$state"
 
   quota_expiry=$(shared_expiry)
   now=$(date -u +%s)
@@ -3389,7 +3443,8 @@ while true; do
   state=$(monitor_snapshot)
   route_all_unresolved_async "$state"
   merge_approved_reviews "$state"
-  archive_approved_threads "$state"
+  queue_approved_thread_archives "$state"
+  process_pending_thread_archives "$state"
   load_stale_rows "$state"
 
   if (( ${#stale[@]} == 0 )); then
@@ -3563,7 +3618,8 @@ while true; do
 
   state=$(monitor_snapshot)
   merge_approved_reviews "$state"
-  archive_approved_threads "$state"
+  queue_approved_thread_archives "$state"
+  process_pending_thread_archives "$state"
   route_all_unresolved_async "$state"
   load_stale_rows "$state"
   if (( ${#stale[@]} == 0 )); then

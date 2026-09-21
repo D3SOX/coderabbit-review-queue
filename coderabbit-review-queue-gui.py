@@ -242,7 +242,7 @@ class QueueWindow(QMainWindow):
             QIcon.fromTheme("configure"), "Configure approval actions…"
         )
         self.auto_merge_button.setToolTip(
-            "Configure merging and Codex task archiving after approval."
+            "Configure merging and Codex task archiving after a merge."
         )
         self.auto_merge_button.setEnabled(False)
         self.auto_merge_button.clicked.connect(self.configure_auto_merge)
@@ -791,8 +791,8 @@ class QueueWindow(QMainWindow):
     def merge_admin_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-merge-admin"
 
-    def archive_after_approval_file(self, repo: str) -> Path:
-        return STATE_ROOT / f"{repo.replace('/', '__')}-archive-after-approval"
+    def archive_after_merge_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-archive-after-merge"
 
     def configure_auto_merge(self) -> None:
         repo = self.selected_repo()
@@ -829,18 +829,18 @@ class QueueWindow(QMainWindow):
         except OSError:
             merge_admin = False
         try:
-            archive_after_approval = (
-                self.archive_after_approval_file(repo).read_text().strip() == "1"
+            archive_after_merge = (
+                self.archive_after_merge_file(repo).read_text().strip() == "1"
             )
         except OSError:
-            archive_after_approval = False
+            archive_after_merge = False
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Configure approval actions")
         archive_box = QCheckBox(
-            "Archive the matching Codex task after CodeRabbit approval"
+            "Archive the matching Codex task after the PR is merged"
         )
-        archive_box.setChecked(archive_after_approval)
+        archive_box.setChecked(archive_after_merge)
         enabled_box = QCheckBox("Automatically merge pull requests")
         enabled_box.setChecked(enabled)
         method_label = QLabel("Merge method")
@@ -865,7 +865,8 @@ class QueueWindow(QMainWindow):
             "app merge an approved head. Merges run on the selected agent host and "
             "never enable GitHub auto-merge. Branch protection is bypassed only "
             "when your GitHub account permits it. Task archiving is independent "
-            "of auto-merge and waits until the matching Codex task is idle."
+            "of auto-merge and happens only after a merge is confirmed and the "
+            "matching Codex task is idle."
         )
         explanation.setWordWrap(True)
 
@@ -917,7 +918,7 @@ class QueueWindow(QMainWindow):
                 "1\n" if admin_box.isChecked() else "0\n",
             ),
             (
-                self.archive_after_approval_file(repo),
+                self.archive_after_merge_file(repo),
                 "1\n" if archive_box.isChecked() else "0\n",
             ),
         )
