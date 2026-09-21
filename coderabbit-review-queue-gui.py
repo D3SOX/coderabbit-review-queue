@@ -239,10 +239,10 @@ class QueueWindow(QMainWindow):
             self.configure_delegation_prompt
         )
         self.auto_merge_button = QPushButton(
-            QIcon.fromTheme("configure"), "Configure auto-merge…"
+            QIcon.fromTheme("configure"), "Configure approval actions…"
         )
         self.auto_merge_button.setToolTip(
-            "Configure merging after CodeRabbit approval or completed delegation."
+            "Configure merging and Codex task archiving after approval."
         )
         self.auto_merge_button.setEnabled(False)
         self.auto_merge_button.clicked.connect(self.configure_auto_merge)
@@ -791,6 +791,9 @@ class QueueWindow(QMainWindow):
     def merge_admin_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-merge-admin"
 
+    def archive_after_approval_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-archive-after-approval"
+
     def configure_auto_merge(self) -> None:
         repo = self.selected_repo()
         if not repo:
@@ -825,9 +828,19 @@ class QueueWindow(QMainWindow):
             merge_admin = self.merge_admin_file(repo).read_text().strip() == "1"
         except OSError:
             merge_admin = False
+        try:
+            archive_after_approval = (
+                self.archive_after_approval_file(repo).read_text().strip() == "1"
+            )
+        except OSError:
+            archive_after_approval = False
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Configure auto-merge")
+        dialog.setWindowTitle("Configure approval actions")
+        archive_box = QCheckBox(
+            "Archive the matching Codex task after CodeRabbit approval"
+        )
+        archive_box.setChecked(archive_after_approval)
         enabled_box = QCheckBox("Automatically merge pull requests")
         enabled_box.setChecked(enabled)
         method_label = QLabel("Merge method")
@@ -851,7 +864,8 @@ class QueueWindow(QMainWindow):
             "for another CodeRabbit review. The separate approval option lets the "
             "app merge an approved head. Merges run on the selected agent host and "
             "never enable GitHub auto-merge. Branch protection is bypassed only "
-            "when your GitHub account permits it."
+            "when your GitHub account permits it. Task archiving is independent "
+            "of auto-merge and waits until the matching Codex task is idle."
         )
         explanation.setWordWrap(True)
 
@@ -872,6 +886,7 @@ class QueueWindow(QMainWindow):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout = QVBoxLayout(dialog)
+        layout.addWidget(archive_box)
         layout.addWidget(enabled_box)
         layout.addWidget(approval_box)
         layout.addWidget(delegated_box)
@@ -901,12 +916,16 @@ class QueueWindow(QMainWindow):
                 self.merge_admin_file(repo),
                 "1\n" if admin_box.isChecked() else "0\n",
             ),
+            (
+                self.archive_after_approval_file(repo),
+                "1\n" if archive_box.isChecked() else "0\n",
+            ),
         )
         for target, value in values:
             temporary = target.with_suffix(".tmp")
             temporary.write_text(value)
             os.replace(temporary, target)
-        self.show_transient_status("Auto-merge settings saved")
+        self.show_transient_status("Approval action settings saved")
 
     def delegation_prompt_settings(self, repo: str) -> tuple[str, str]:
         try:

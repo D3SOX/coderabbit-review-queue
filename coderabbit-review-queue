@@ -44,6 +44,8 @@ delete_branch_file=''
 merge_after_delegation_file=''
 merge_after_approval_file=''
 merge_admin_file=''
+archive_after_approval_file=''
+archived_heads_file=''
 monitor_state_file=''
 snapshot_cache_file=''
 snapshot_cache_lock_file=''
@@ -361,6 +363,8 @@ configure_repo() {
   merge_after_delegation_file="$state_root/$repo_key-merge-after-delegation"
   merge_after_approval_file="$state_root/$repo_key-merge-after-approval"
   merge_admin_file="$state_root/$repo_key-merge-admin"
+  archive_after_approval_file="$state_root/$repo_key-archive-after-approval"
+  archived_heads_file="$state_root/$repo_key-archived-heads.tsv"
   monitor_state_file="$state_root/$repo_key-monitor-state.tsv"
   snapshot_cache_file="$state_root/$repo_key-snapshot.json"
   snapshot_cache_lock_file="$state_root/$repo_key-snapshot.lock"
@@ -692,6 +696,19 @@ approved_merge_rows() {
         and (.commit.oid // "") == $pr.headRefOid
         and (.state // "") == "APPROVED"))
     | [.number, .headRefOid, .title]
+    | @tsv
+  '
+}
+
+approved_archive_rows() {
+  eligible_state <<<"$1" | jq -r '
+    .data.repository.pullRequests.nodes[]
+    | . as $pr
+    | select(any(.reviews.nodes[]?;
+        (.author.login // "") == "coderabbitai"
+        and (.commit.oid // "") == $pr.headRefOid
+        and (.state // "") == "APPROVED"))
+    | [.number, .headRefName, .headRefOid, .title]
     | @tsv
   '
 }
@@ -2077,6 +2094,105 @@ codex_session_state() {
   esac
 }
 
+codex_thread_is_archived() {
+  local session_id=$1
+  [[ -f $codex_state_db ]] || return 1
+  [[ $(python3 - "$codex_state_db" "$session_id" <<'PY'
+import sqlite3
+import sys
+
+database, session_id = sys.argv[1:]
+with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+    row = connection.execute(
+        "SELECT archived FROM threads WHERE id = ?", (session_id,)
+    ).fetchone()
+print(row[0] if row else 0)
+PY
+  ) == 1 ]]
+}
+
+archive_codex_thread() {
+  local session_id=$1
+  codex_thread_is_archived "$session_id" && return 0
+  python3 - "$session_id" <<'PY'
+import json
+import select
+import subprocess
+import sys
+
+session_id = sys.argv[1]
+try:
+    process = subprocess.Popen(
+        ["codex", "app-server", "--stdio"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    requests = (
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "coderabbit-review-queue", "version": "1"}
+            },
+        },
+        {
+            "id": 2,
+            "method": "thread/archive",
+            "params": {"threadId": session_id},
+        },
+    )
+    responses = {}
+    for request in requests:
+        process.stdin.write(json.dumps(request) + "\n")
+        process.stdin.flush()
+        while request["id"] not in responses:
+            readable, _, _ = select.select([process.stdout], [], [], 10)
+            if not readable:
+                raise RuntimeError("timed out waiting for the app server")
+            line = process.stdout.readline()
+            if not line:
+                raise RuntimeError("app server closed without responding")
+            response = json.loads(line)
+            if "id" in response:
+                responses[response["id"]] = response
+    process.stdin.close()
+    process.wait(timeout=10)
+except (OSError, subprocess.TimeoutExpired, RuntimeError) as error:
+    if "process" in locals():
+        process.kill()
+    print(f"Could not archive Codex task {session_id}: {error}", file=sys.stderr)
+    raise SystemExit(1)
+if process.returncode:
+    sys.stderr.write(process.stderr.read())
+    raise SystemExit(process.returncode)
+response = responses[2]
+if "error" in response:
+    print(
+        f"Could not archive Codex task {session_id}: "
+        f"{response['error']}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+}
+
+archive_matching_codex_thread() {
+  local branch_name=$1 head_sha=$2 match session_id session_cwd state
+  if ! match=$(matching_codex_session "$branch_name" "$head_sha"); then
+    printf 'No matching Codex task to archive.\n'
+    return 2
+  fi
+  IFS=$'\t' read -r session_id session_cwd <<<"$match"
+  state=$(codex_session_state "$session_id")
+  if [[ $state != idle ]]; then
+    printf 'Codex task %s is %s; deferring archive.\n' "$session_id" "$state"
+    return 3
+  fi
+  archive_codex_thread "$session_id"
+}
+
 resume_codex_via_daemon() {
   local session_id=$1 prompt=$2 socket_path log_path pid_file client_pid
   local started=0 attempt command watcher_pid_file
@@ -2652,6 +2768,38 @@ merge_approved_reviews() {
   done < <(approved_merge_rows "$state")
 }
 
+archive_after_approval_enabled() {
+  [[ -f $archive_after_approval_file ]] &&
+    [[ $(head -n 1 "$archive_after_approval_file") == 1 ]]
+}
+
+route_archive_codex_thread() {
+  local branch_name=$1 head_sha=$2 host
+  host=$(agent_host 2>/dev/null || true)
+  if [[ -n $host ]]; then
+    remote_agent_command --archive-task "$branch_name" "$head_sha" --local-agents
+  else
+    archive_matching_codex_thread "$branch_name" "$head_sha"
+  fi
+}
+
+archive_approved_threads() {
+  local state=$1 pr branch_name head_sha title marker
+  archive_after_approval_enabled || return 0
+  while IFS=$'\t' read -r pr branch_name head_sha title; do
+    [[ -n ${pr:-} ]] || continue
+    marker="$pr"$'\t'"$head_sha"
+    if [[ -f $archived_heads_file ]] &&
+      rg -q --fixed-strings --line-regexp "$marker" "$archived_heads_file"; then
+      continue
+    fi
+    if route_archive_codex_thread "$branch_name" "$head_sha"; then
+      printf '%s\n' "$marker" >>"$archived_heads_file"
+      printf 'Archived the matching Codex task for approved PR #%s.\n' "$pr"
+    fi
+  done < <(approved_archive_rows "$state")
+}
+
 show_status() {
   local snapshot_max_age=${1:-10}
   local state expiry now row pr branch_name head_sha title count task_progress
@@ -2990,6 +3138,8 @@ main() {
   local excluded_authors=''
   local task_branch=''
   local task_head=''
+  local archive_branch=''
+  local archive_head=''
   local codex_state_session=''
   local merge_pr='' merge_head='' merge_method_arg='' merge_delete='0' merge_admin_arg='0'
 
@@ -3061,6 +3211,16 @@ main() {
         action='codex-session-state'
         codex_state_session=$2
         shift 2
+        ;;
+      --archive-task)
+        (( $# >= 3 )) || {
+          printf '%s\n' '--archive-task requires a branch and head SHA.' >&2
+          return 2
+        }
+        action='archive-task'
+        archive_branch=$2
+        archive_head=$3
+        shift 3
         ;;
       --agent-mode)
         (( $# >= 2 )) && [[ $2 =~ ^(auto|codex|claude)$ ]] || {
@@ -3159,6 +3319,10 @@ main() {
     codex_session_state "$codex_state_session"
     return 0
   fi
+  if [[ $action == archive-task ]]; then
+    archive_matching_codex_thread "$archive_branch" "$archive_head"
+    return $?
+  fi
   if [[ $action == merge-now ]]; then
     merge_pr_now "$merge_pr" "$merge_head" "$merge_method_arg" "$merge_delete" "$merge_admin_arg"
     return $?
@@ -3212,6 +3376,7 @@ main() {
   state=$(monitor_snapshot)
   route_all_unresolved_async "$state"
   merge_approved_reviews "$state"
+  archive_approved_threads "$state"
 
   quota_expiry=$(shared_expiry)
   now=$(date -u +%s)
@@ -3224,6 +3389,7 @@ while true; do
   state=$(monitor_snapshot)
   route_all_unresolved_async "$state"
   merge_approved_reviews "$state"
+  archive_approved_threads "$state"
   load_stale_rows "$state"
 
   if (( ${#stale[@]} == 0 )); then
@@ -3397,6 +3563,7 @@ while true; do
 
   state=$(monitor_snapshot)
   merge_approved_reviews "$state"
+  archive_approved_threads "$state"
   route_all_unresolved_async "$state"
   load_stale_rows "$state"
   if (( ${#stale[@]} == 0 )); then

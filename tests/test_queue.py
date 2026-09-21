@@ -608,6 +608,22 @@ main --repo example/repo
         self.assertEqual(self.rows('state=$(cat); approved_review_rows "$state"',
                                    [approved, old_head]), [1])
 
+    def test_approved_archive_rows_include_branch_and_current_head(self):
+        approved = self.pr(1)
+        approved['headRefName'] = 'fix-review'
+        approved['reviews']['nodes'] = [{
+            'author': {'login': 'coderabbitai'},
+            'body': 'No issues found',
+            'state': 'APPROVED',
+            'commit': {'oid': 'head'},
+        }]
+        result = self.run_shell(
+            'state=$(cat); approved_archive_rows "$state"',
+            {'data': {'repository': {'pullRequests': {'nodes': [approved]}}}},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '1\tfix-review\thead\t[pull] example')
+
     def test_reviewed_rows_include_only_substantive_current_head_reviews(self):
         current = self.pr(1)
         current['reviews']['nodes'] = [{
@@ -810,6 +826,49 @@ route_merge_pr 42 head
         self.assertIn('--merge-now', result.stdout)
         self.assertIn('rebase', result.stdout)
         self.assertIn('--merge-now 42 head rebase 0 1', result.stdout)
+
+    def test_archive_runs_on_configured_agent_host(self):
+        result = self.run_shell(r'''
+printf '%s\n' desktop >"$agent_host_file"
+ssh() { printf '%s\n' "$*"; }
+route_archive_codex_thread feature head
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('desktop', result.stdout)
+        self.assertIn('--archive-task feature head --local-agents', result.stdout)
+
+    def test_archive_waits_for_matching_codex_task_to_be_idle(self):
+        result = self.run_shell(r'''
+matching_codex_session() { printf 'session-1\t%s\n' "$state_root/worktree"; }
+codex_session_state() { printf 'running\n'; }
+archive_codex_thread() { touch "$state_root/archived"; }
+archive_matching_codex_thread feature head
+[[ ! -e $state_root/archived ]]
+''')
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('deferring archive', result.stdout)
+
+    def test_archive_archives_idle_matching_codex_task(self):
+        result = self.run_shell(r'''
+matching_codex_session() { printf 'session-1\t%s\n' "$state_root/worktree"; }
+codex_session_state() { printf 'idle\n'; }
+archive_codex_thread() { printf '%s\n' "$1"; }
+archive_matching_codex_thread feature head
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), 'session-1')
+
+    def test_approved_head_is_archived_only_once(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$archive_after_approval_file"
+approved_archive_rows() { printf '42\tfeature\thead\tTitle\n'; }
+route_archive_codex_thread() { printf 'called\n' >>"$state_root/calls"; }
+archive_approved_threads '{}'
+archive_approved_threads '{}'
+cat "$state_root/calls"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count('called'), 1)
 
     def test_post_delegation_merge_defaults_on(self):
         result = self.run_shell('merge_after_delegation_enabled')
