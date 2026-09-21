@@ -44,8 +44,11 @@ install -m 644 "$source_dir"/coderabbit-logomark-*.png "$lib_dir/"
 for size in 16 22 24 32 48 64; do
   icon_dir="$icons_dir/${size}x${size}/apps"
   install -d "$icon_dir"
+  icon_source="$source_dir/coderabbit-logomark-$size.png"
+  [[ -f $source_dir/coderabbit-titlebar-$size.png ]] && \
+    icon_source="$source_dir/coderabbit-titlebar-$size.png"
   install -m 644 \
-    "$source_dir/coderabbit-logomark-$size.png" \
+    "$icon_source" \
     "$icon_dir/coderabbit-review-queue.png"
 done
 install -d "$icons_dir/scalable/apps"
