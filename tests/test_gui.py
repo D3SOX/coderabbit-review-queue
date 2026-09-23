@@ -114,6 +114,23 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.populate_tasks.assert_not_called()
         window.refresh.assert_called_once_with()
 
+    def test_refresh_during_repository_switch_cannot_fill_previous_tables(self):
+        window = Mock()
+        window.status_repo = "new/repo"
+        window.displayed_repo = "old/repo"
+        window.status_monitor_signature = None
+        window.monitor_state_file.return_value = Path("/nonexistent-monitor-state")
+        window.selected_repo.return_value = "new/repo"
+        window.status_process.readAllStandardOutput.return_value = (
+            b"Repository: new/repo\nQueued PRs:\n  #2 new PR\n"
+        )
+        window.status_process.readAllStandardError.return_value = b""
+
+        queue_gui.QueueWindow.status_finished(window, 0)
+
+        window.populate_queue.assert_not_called()
+        window.populate_tasks.assert_not_called()
+
     def test_uncached_repository_shows_loading_instead_of_old_availability(self):
         window = Mock()
         window.base_window_title = "CodeRabbit Review Queue"
@@ -273,6 +290,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.status_process.state.return_value = QProcess.NotRunning
         window.status_retry_timer.isActive.return_value = False
         window.selected_repo.return_value = "example/repo"
+        window.displayed_repo = "example/repo"
 
         queue_gui.QueueWindow.refresh(window)
 
@@ -285,6 +303,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.status_process.state.return_value = QProcess.NotRunning
         window.status_retry_timer.isActive.return_value = False
         window.selected_repo.return_value = "example/repo"
+        window.displayed_repo = "example/repo"
 
         queue_gui.QueueWindow.refresh(window, manual=True)
 
@@ -404,6 +423,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             window.status_process.state.return_value = QProcess.NotRunning
             window.status_retry_timer.isActive.return_value = False
             window.selected_repo.return_value = "example/repo"
+            window.displayed_repo = "example/repo"
             window.monitor_state_file.return_value = monitor
 
             queue_gui.QueueWindow.refresh(window)

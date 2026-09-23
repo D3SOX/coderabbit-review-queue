@@ -1564,7 +1564,7 @@ class QueueWindow(QMainWindow):
                 return
             self.status_retry_timer.stop()
         repo = self.selected_repo()
-        if not repo:
+        if not repo or repo != self.displayed_repo:
             return
         if not retry:
             self.status_failures = 0
@@ -1597,6 +1597,8 @@ class QueueWindow(QMainWindow):
         if self.status_repo != self.selected_repo():
             self.status_failures = 0
             self.refresh()
+            return
+        if self.status_repo != self.displayed_repo:
             return
         if self.status_monitor_signature != file_signature(
             self.monitor_state_file(self.status_repo)
