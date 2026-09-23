@@ -763,6 +763,18 @@ cat "$state_root/player-args"
         self.assertIn('<--volume><0.25>', result.stdout)
         self.assertIn('custom.ogg>', result.stdout)
 
+    def test_notification_sound_defaults_to_30_percent(self):
+        result = self.run_shell(r'''
+sound="$state_root/custom.ogg"
+touch "$sound"
+printf '%s\n' "$sound" >"$notify_sound_path_file"
+pw-play() { printf '<%s>' "$@" >"$state_root/player-args"; }
+play_notification_sound
+cat "$state_root/player-args"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('<--volume><0.30>', result.stdout)
+
     def test_quota_wait_replaces_checking_monitor_state(self):
         result = self.run_shell(r'''
 claim_monitor() { :; }
@@ -1035,9 +1047,89 @@ cat "$pending_archives_file"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('42\tfeature\thead\tTitle', result.stdout)
 
-    def test_post_delegation_merge_defaults_on(self):
-        result = self.run_shell('merge_after_delegation_enabled')
+    def test_post_delegation_review_mode_preserves_saved_boolean_settings(self):
+        result = self.run_shell(r'''
+merge_after_delegation_mode
+printf '0\n' >"$merge_after_delegation_file"
+merge_after_delegation_mode
+printf 'agent\n' >"$merge_after_delegation_file"
+merge_after_delegation_mode
+''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['1', '0', 'agent'])
+
+    def test_agent_decides_whether_another_review_is_worthwhile(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$auto_merge_file"
+printf 'agent\n' >"$merge_after_delegation_file"
+auto_merge_instruction 42
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('decide whether another CodeRabbit review is worthwhile', result.stdout)
+        self.assertIn('leave the PR open for the queue', result.stdout)
+        self.assertIn('--merge-now 42', result.stdout)
+        self.assertIn('Never trigger the review yourself', result.stdout)
+
+    def test_remote_delegation_accepts_agent_review_mode(self):
+        result = self.run_shell(r'''
+gh() { printf 'example/repo\n'; }
+main --repo example/repo --auto-merge-setting 1 squash 1 agent 0 --validate-repo
+merge_after_delegation_mode
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], 'agent')
+
+    def test_agent_decision_defers_queue_until_task_is_idle(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$auto_merge_file"
+printf 'agent\n' >"$merge_after_delegation_file"
+printf '42\n' >"$delegated_prs_file"
+agent_task_progress() { printf '%s\n' "$task_state"; }
+state=$(cat)
+task_state='Codex Running'
+load_stale_rows "$state" 1
+printf 'running=%s deferred=%s\n' "${#stale[@]}" "$deferred_review_count"
+task_state='Remote agent host unavailable (desktop)'
+agent_review_decision_cache=()
+load_stale_rows "$state" 1
+printf 'unavailable=%s deferred=%s\n' "${#stale[@]}" "$deferred_review_count"
+task_state='Codex Idle'
+agent_review_decision_cache=()
+load_stale_rows "$state" 1
+printf 'idle=%s deferred=%s\n' "${#stale[@]}" "$deferred_review_count"
+''', {'data': {'repository': {'pullRequests': {'nodes': [self.pr(42)]}}}})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('running=0 deferred=1', result.stdout)
+        self.assertIn('unavailable=0 deferred=1', result.stdout)
+        self.assertIn('idle=1 deferred=0', result.stdout)
+
+    def test_monitor_waits_for_agent_decision_instead_of_stopping(self):
+        result = self.run_shell(r'''
+claim_monitor() { :; }
+cleanup_monitor() { :; }
+monitor_snapshot() { printf '{}\n'; }
+route_all_unresolved_async() { :; }
+queue_approved_thread_archives() { :; }
+merge_approved_reviews() { :; }
+process_pending_thread_archives() { :; }
+shared_expiry() { echo 0; }
+load_stale_rows() { stale=(); deferred_review_count=1; }
+wait_on_empty_queue() { echo 'stopped too soon' >&2; exit 99; }
+sleep() { printf 'Waiting for agent decision: %s seconds\n' "$1"; exit 0; }
+main --repo example/repo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Waiting for agent decision: 30 seconds', result.stdout)
+
+    def test_required_follow_up_review_does_not_instruct_merge(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$auto_merge_file"
+printf '0\n' >"$merge_after_delegation_file"
+auto_merge_instruction 42
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Do not merge this PR', result.stdout)
+        self.assertNotIn('--merge-now', result.stdout)
 
     def test_post_delegation_merge_instructs_agent(self):
         result = self.run_shell(r'''

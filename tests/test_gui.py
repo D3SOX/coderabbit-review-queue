@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21,6 +21,126 @@ SPEC.loader.exec_module(queue_gui)
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_delegated_review_mode_preserves_saved_choice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            setting = Path(directory) / "merge-after-delegation"
+            window = Mock()
+            window.merge_after_delegation_file.return_value = setting
+            self.assertEqual(
+                queue_gui.QueueWindow.post_delegation_review_mode(window, "example/repo"),
+                "1",
+            )
+            setting.write_text("0\n")
+            self.assertEqual(
+                queue_gui.QueueWindow.post_delegation_review_mode(window, "example/repo"),
+                "0",
+            )
+            setting.write_text("agent\n")
+            self.assertEqual(
+                queue_gui.QueueWindow.post_delegation_review_mode(window, "example/repo"),
+                "agent",
+            )
+
+    def test_approval_dialog_saves_agent_review_choice(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            window = queue_gui.QMainWindow()
+            window.selected_repo = lambda: "example/repo"
+            window.show_transient_status = Mock()
+            for name in (
+                "auto_merge_file", "merge_method_file", "delete_branch_file",
+                "merge_after_delegation_file", "merge_after_approval_file",
+                "merge_admin_file", "archive_after_merge_file",
+            ):
+                setattr(window, name, lambda repo, name=name: Path(directory) / name)
+            window.post_delegation_review_mode = lambda repo: (
+                queue_gui.QueueWindow.post_delegation_review_mode(window, repo)
+            )
+
+            def choose_agent(dialog):
+                review_select = next(
+                    combo for combo in dialog.findChildren(queue_gui.QComboBox)
+                    if combo.findData("agent") >= 0
+                )
+                self.assertEqual(review_select.count(), 3)
+                review_select.setCurrentIndex(review_select.findData("agent"))
+                return queue_gui.QDialog.Accepted
+
+            with patch.object(queue_gui.QDialog, "exec", choose_agent):
+                queue_gui.QueueWindow.configure_auto_merge(window)
+
+            self.assertEqual(
+                (Path(directory) / "merge_after_delegation_file").read_text(),
+                "agent\n",
+            )
+            app.processEvents()
+
+    def test_switch_to_uncached_repository_clears_both_tables_before_refresh(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            window = Mock()
+            window.queue = queue_gui.QTreeWidget()
+            window.tasks = queue_gui.QTreeWidget()
+            window.queue.addTopLevelItem(queue_gui.QTreeWidgetItem(["#1", "old queue"]))
+            window.tasks.addTopLevelItem(queue_gui.QTreeWidgetItem(["#2", "old review"]))
+            window.status_cache_file.return_value = Path(directory) / "uncached-status.txt"
+            window.load_cached_status = lambda repo: queue_gui.QueueWindow.load_cached_status(window, repo)
+            window.active_reviews = [("1", "old queue")]
+            window.finished_review_numbers = {"2"}
+            window.has_queued_reviews = True
+
+            with patch.object(queue_gui, "STATE_ROOT", Path(directory)), patch.object(
+                queue_gui, "SELECTED_REPO_FILE", Path(directory) / "selected-repo"
+            ):
+                queue_gui.QueueWindow.activate_repo(window, "new/repo")
+
+            self.assertEqual(window.queue.topLevelItemCount(), 0)
+            self.assertEqual(window.tasks.topLevelItemCount(), 0)
+            window.refresh.assert_called_once_with()
+            app.processEvents()
+
+    def test_old_repository_refresh_cannot_fill_new_repository_tables(self):
+        window = Mock()
+        window.status_repo = "old/repo"
+        window.selected_repo.return_value = "new/repo"
+        window.status_process.readAllStandardOutput.return_value = (
+            b"Repository: old/repo\nQueued PRs:\n  #1 old PR\n"
+        )
+        window.status_process.readAllStandardError.return_value = b""
+
+        queue_gui.QueueWindow.status_finished(window, 0)
+
+        window.populate_queue.assert_not_called()
+        window.populate_tasks.assert_not_called()
+        window.refresh.assert_called_once_with()
+
+    def test_uncached_repository_shows_loading_instead_of_old_availability(self):
+        window = Mock()
+        window.base_window_title = "CodeRabbit Review Queue"
+        window.status_loading_repo = "new/repo"
+        window.monitor_activity = None
+        window.selected_repo.return_value = "new/repo"
+
+        queue_gui.QueueWindow.update_countdown_display(window)
+
+        window.timer_label.setText.assert_called_once_with(
+            "Next review: Loading status…"
+        )
+        window.set_tray_countdown.assert_called_once_with(
+            "…", "new/repo\nLoading status…"
+        )
+
+    def test_notification_sound_settings_default_to_30_percent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            window = Mock()
+            window.notify_sound_path_file.return_value = Path(directory) / "missing-path"
+            window.notify_sound_volume_file.return_value = Path(directory) / "missing-volume"
+
+            self.assertEqual(
+                queue_gui.QueueWindow.notify_sound_settings(window, "example/repo"),
+                ("", 30),
+            )
+
     def test_notification_sound_settings_clamp_saved_volume(self):
         with tempfile.TemporaryDirectory() as directory:
             path_file = Path(directory) / "sound-path"

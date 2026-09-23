@@ -78,6 +78,8 @@ merge_admin_override=''
 empty_announced=0
 declare -A attempted_route_threads=()
 declare -A completed_review_heads=()
+declare -A agent_review_decision_cache=()
+deferred_review_count=0
 
 notify_sound_enabled() {
   # Default on: missing file or anything other than 0.
@@ -95,7 +97,7 @@ play_notification_sound() {
   if [[ -z $volume && -f $notify_sound_volume_file ]]; then
     volume=$(head -n 1 "$notify_sound_volume_file")
   fi
-  [[ $volume =~ ^[0-9]+$ ]] || volume=100
+  [[ $volume =~ ^[0-9]+$ ]] || volume=30
   (( volume > 100 )) && volume=100
   percent=$((volume * 65536 / 100))
   volume_scalar=$(awk -v volume="$volume" 'BEGIN { printf "%.2f", volume / 100 }')
@@ -603,15 +605,22 @@ stale_rows() {
 
 load_stale_rows() {
   local state=$1
+  local defer_agent_decisions=${2:-0}
   local row wanted pr index head_sha completed_key
   local -a loaded=()
   local -a ordered=()
+
+  deferred_review_count=0
 
   while IFS= read -r row; do
     [[ -n $row ]] || continue
     IFS=$'\t' read -r pr _updated_at _branch_name head_sha _title _limit_at <<<"$row"
     completed_key="$pr:$head_sha"
     if [[ -n ${completed_review_heads[$completed_key]+present} ]]; then
+      continue
+    fi
+    if (( defer_agent_decisions )) && agent_review_decision_pending "$row"; then
+      ((deferred_review_count+=1))
       continue
     fi
     loaded+=("$row")
@@ -637,6 +646,21 @@ load_stale_rows() {
   else
     stale=("${ordered[@]}" "${loaded[@]}")
   fi
+}
+
+agent_review_decision_pending() {
+  local row=$1 pr branch_name head_sha key progress
+  auto_merge_enabled || return 1
+  [[ $(merge_after_delegation_mode) == agent ]] || return 1
+  IFS=$'\t' read -r pr _updated_at branch_name head_sha _title _limit_at <<<"$row"
+  [[ -f $delegated_prs_file ]] &&
+    rg -q --fixed-strings --line-regexp "$pr" "$delegated_prs_file" || return 1
+  key="$pr:$head_sha"
+  if [[ -z ${agent_review_decision_cache[$key]+present} ]]; then
+    agent_review_decision_cache[$key]=$(agent_task_progress "$branch_name" "$head_sha")
+  fi
+  progress=${agent_review_decision_cache[$key]}
+  [[ $progress == *Running* || $progress == 'Remote agent host unavailable'* ]]
 }
 
 mark_head_verified() {
@@ -1860,13 +1884,16 @@ delete_branch_enabled() {
   [[ ! -f $delete_branch_file ]] || [[ $(head -n 1 "$delete_branch_file") != 0 ]]
 }
 
-merge_after_delegation_enabled() {
+merge_after_delegation_mode() {
+  local mode=1
   if [[ -n $merge_after_delegation_override ]]; then
-    [[ $merge_after_delegation_override == 1 ]]
-    return
+    mode=$merge_after_delegation_override
+  elif [[ -f $merge_after_delegation_file ]]; then
+    mode=$(head -n 1 "$merge_after_delegation_file")
   fi
-  [[ ! -f $merge_after_delegation_file ]] ||
-    [[ $(head -n 1 "$merge_after_delegation_file") != 0 ]]
+  case $mode in 0 | 1 | agent) printf '%s\n' "$mode" ;;
+    *) printf '1\n' ;;
+  esac
 }
 
 merge_after_approval_enabled() {
@@ -1884,19 +1911,23 @@ merge_admin_enabled() {
 
 auto_merge_instruction() {
   auto_merge_enabled || return 0
-  local pr=${1:-PR} method delete_text=' Keep the branch after merging.' delete_branch=0 admin=0
-  merge_after_delegation_enabled || {
+  local pr=${1:-PR} method review_mode decision_text='' delete_text=' Keep the branch after merging.' delete_branch=0 admin=0
+  review_mode=$(merge_after_delegation_mode)
+  if [[ $review_mode == 0 ]]; then
     printf '\n\nDo not merge this PR after this pass. Let the queue request another CodeRabbit review; auto-merge requires CodeRabbit approval of the updated head.\n'
     return 0
-  }
+  fi
+  if [[ $review_mode == agent ]]; then
+    decision_text='After pushing the fix, decide whether another CodeRabbit review is worthwhile based on the changes and remaining risk. If it is, leave the PR open for the queue to request that review and stop; do not merge. Never trigger the review yourself. If it is not worthwhile, proceed with the guarded merge below. '
+  fi
   method=$(merge_method)
   if delete_branch_enabled; then
     delete_branch=1
     delete_text=' Delete the branch after merging.'
   fi
   merge_admin_enabled && admin=1
-  printf '\n\nAfter the task work is complete, wait for CI and every review bot to finish and resolve all review threads. Use the queue merge guard on this agent host: `~/.local/bin/coderabbit-review-queue --repo %s --merge-now %s "$(gh pr view %s --repo %s --json headRefOid --jq .headRefOid)" %s %s %s --local-agents`. The command uses the selected merge method without GitHub auto-merge and checks the live head, reviews, checks, and threads before merging.%s If it refuses, stop and report the blocker.\n' \
-    "$repo" "$pr" "$pr" "$repo" "$method" "$delete_branch" "$admin" "$delete_text"
+  printf '\n\n%sAfter the task work is complete, wait for CI and every review bot to finish and resolve all review threads. Use the queue merge guard on this agent host: `~/.local/bin/coderabbit-review-queue --repo %s --merge-now %s "$(gh pr view %s --repo %s --json headRefOid --jq .headRefOid)" %s %s %s --local-agents`. The command uses the selected merge method without GitHub auto-merge and checks the live head, reviews, checks, and threads before merging.%s If it refuses, stop and report the blocker.\n' \
+    "$decision_text" "$repo" "$pr" "$pr" "$repo" "$method" "$delete_branch" "$admin" "$delete_text"
 }
 
 default_delegation_prompt() {
@@ -2320,10 +2351,10 @@ route_unresolved_review() {
 
   host=$(agent_host 2>/dev/null || true)
   if [[ -n $host ]]; then
-    local merge_enabled=0 merge_delete=0 merge_after_delegation=0 merge_admin=0
+    local merge_enabled=0 merge_delete=0 merge_after_delegation merge_admin=0
     auto_merge_enabled && merge_enabled=1
     delete_branch_enabled && merge_delete=1
-    merge_after_delegation_enabled && merge_after_delegation=1
+    merge_after_delegation=$(merge_after_delegation_mode)
     merge_admin_enabled && merge_admin=1
     if remote_output=$(remote_agent_command \
       --delegate "$pr" --agent-mode "$mode" --local-agents \
@@ -3464,7 +3495,7 @@ main() {
       --auto-merge-setting)
         (( $# >= 6 )) && [[ $2 =~ ^[01]$ ]] \
           && [[ $3 =~ ^(merge|squash|rebase)$ ]] \
-          && [[ $4 =~ ^[01]$ ]] && [[ $5 =~ ^[01]$ ]] \
+          && [[ $4 =~ ^[01]$ ]] && [[ $5 =~ ^(0|1|agent)$ ]] \
           && [[ $6 =~ ^[01]$ ]] || {
           printf '%s\n' '--auto-merge-setting requires enabled, method, delete, post-delegation, and admin values.' >&2
           return 2
@@ -3591,14 +3622,20 @@ main() {
   fi
 
 while true; do
+  agent_review_decision_cache=()
   state=$(monitor_snapshot)
   route_all_unresolved_async "$state"
   queue_approved_thread_archives "$state"
   merge_approved_reviews "$state"
   process_pending_thread_archives "$state"
-  load_stale_rows "$state"
+  load_stale_rows "$state" 1
 
   if (( ${#stale[@]} == 0 )); then
+    if (( deferred_review_count > 0 )); then
+      write_monitor_state waiting '' '' 0
+      sleep 30
+      continue
+    fi
     write_monitor_state idle
     if wait_on_empty_queue; then
       continue
@@ -3615,8 +3652,9 @@ while true; do
   wait_until "$expiry"
 
   state=$(monitor_snapshot)
-  load_stale_rows "$state"
+  load_stale_rows "$state" 1
   if (( ${#stale[@]} == 0 )); then
+    (( deferred_review_count > 0 )) && continue
     if wait_on_empty_queue; then
       continue
     fi
@@ -3633,7 +3671,7 @@ while true; do
   claim_dispatch
 
   state=$(monitor_snapshot)
-  load_stale_rows "$state"
+  load_stale_rows "$state" 1
   if (( ${#stale[@]} == 0 )); then
     release_dispatch
     continue
@@ -3661,7 +3699,8 @@ while true; do
 
   # The quota query can take long enough for the GUI order to change. Reapply
   # the persisted order before choosing which PR receives the available slot.
-  load_stale_rows "$state"
+  agent_review_decision_cache=()
+  load_stale_rows "$state" 1
   if (( ${#stale[@]} == 0 )); then
     release_dispatch
     continue
@@ -3777,7 +3816,7 @@ while true; do
   merge_approved_reviews "$state"
   process_pending_thread_archives "$state"
   route_all_unresolved_async "$state"
-  load_stale_rows "$state"
+  load_stale_rows "$state" 1
   if (( ${#stale[@]} == 0 )); then
     continue
   fi

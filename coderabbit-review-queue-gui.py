@@ -144,6 +144,8 @@ class QueueWindow(QMainWindow):
         self.status_process = QProcess(self)
         self.status_process.finished.connect(self.status_finished)
         self.status_repo = ""
+        self.displayed_repo = ""
+        self.status_loading_repo = ""
         self.status_monitor_signature: tuple[int, int] | None = None
         self.status_failures = 0
         self.status_manual = False
@@ -701,6 +703,18 @@ class QueueWindow(QMainWindow):
         self.repo_combo.blockSignals(False)
 
     def activate_repo(self, repo: str) -> None:
+        if self.displayed_repo != repo:
+            self.displayed_repo = repo
+            self.status_loading_repo = repo
+            self.queue.clear()
+            self.tasks.clear()
+            self.active_reviews = []
+            self.finished_review_numbers = set()
+            self.has_queued_reviews = False
+            self.next_review_at = None
+            self.monitor_activity = None
+            self.update_queue_buttons()
+            self.update_delegate_button()
         self.status_retry_timer.stop()
         self.status_failures = 0
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -740,6 +754,7 @@ class QueueWindow(QMainWindow):
             return False
         if not status.strip():
             return False
+        self.status_loading_repo = ""
         self.populate_queue(status)
         self.populate_tasks(status)
         newer_state_exists = False
@@ -785,6 +800,13 @@ class QueueWindow(QMainWindow):
     def merge_after_delegation_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-merge-after-delegation"
 
+    def post_delegation_review_mode(self, repo: str) -> str:
+        try:
+            mode = self.merge_after_delegation_file(repo).read_text().strip()
+        except OSError:
+            mode = "1"
+        return mode if mode in {"0", "1", "agent"} else "1"
+
     def merge_after_approval_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-merge-after-approval"
 
@@ -812,12 +834,7 @@ class QueueWindow(QMainWindow):
             delete_branch = self.delete_branch_file(repo).read_text().strip() != "0"
         except OSError:
             delete_branch = True
-        try:
-            merge_after_delegation = (
-                self.merge_after_delegation_file(repo).read_text().strip() != "0"
-            )
-        except OSError:
-            merge_after_delegation = True
+        review_mode = self.post_delegation_review_mode(repo)
         try:
             merge_after_approval = (
                 self.merge_after_approval_file(repo).read_text().strip() != "0"
@@ -851,17 +868,20 @@ class QueueWindow(QMainWindow):
         method_select.setCurrentIndex(method_select.findData(method))
         delete_box = QCheckBox("Delete the branch after merging")
         delete_box.setChecked(delete_branch)
-        delegated_box = QCheckBox(
-            "Merge after a delegated fix without another CodeRabbit review"
-        )
-        delegated_box.setChecked(merge_after_delegation)
+        review_label = QLabel("After a delegated fix")
+        review_select = QComboBox()
+        review_select.addItem("Require another CodeRabbit review", "0")
+        review_select.addItem("Merge without another review", "1")
+        review_select.addItem("Let the agent decide", "agent")
+        review_select.setCurrentIndex(review_select.findData(review_mode))
         approval_box = QCheckBox("Merge after CodeRabbit approval")
         approval_box.setChecked(merge_after_approval)
         admin_box = QCheckBox("Use --admin to bypass branch protection")
         admin_box.setChecked(merge_admin)
         explanation = QLabel(
-            "When the delegated-fix option is off, the agent leaves the PR open "
-            "for another CodeRabbit review. The separate approval option lets the "
+            "The agent-decision option lets the agent request another review by "
+            "leaving the PR open for the queue, or merge without one when it judges "
+            "the fix sufficiently covered. The separate approval option lets the "
             "app merge an approved head. Merges run on the selected agent host and "
             "never enable GitHub auto-merge. Branch protection is bypassed only "
             "when your GitHub account permits it. Task archiving is independent "
@@ -875,7 +895,8 @@ class QueueWindow(QMainWindow):
             method_label.setEnabled(active)
             method_select.setEnabled(active)
             delete_box.setEnabled(active)
-            delegated_box.setEnabled(active)
+            review_label.setEnabled(active)
+            review_select.setEnabled(active)
             approval_box.setEnabled(active)
             admin_box.setEnabled(active)
 
@@ -890,7 +911,8 @@ class QueueWindow(QMainWindow):
         layout.addWidget(archive_box)
         layout.addWidget(enabled_box)
         layout.addWidget(approval_box)
-        layout.addWidget(delegated_box)
+        layout.addWidget(review_label)
+        layout.addWidget(review_select)
         layout.addWidget(method_label)
         layout.addWidget(method_select)
         layout.addWidget(delete_box)
@@ -907,7 +929,7 @@ class QueueWindow(QMainWindow):
             (self.delete_branch_file(repo), "1\n" if delete_box.isChecked() else "0\n"),
             (
                 self.merge_after_delegation_file(repo),
-                "1\n" if delegated_box.isChecked() else "0\n",
+                f"{review_select.currentData()}\n",
             ),
             (
                 self.merge_after_approval_file(repo),
@@ -1290,7 +1312,7 @@ class QueueWindow(QMainWindow):
         try:
             volume = int(self.notify_sound_volume_file(repo).read_text().strip())
         except (OSError, ValueError):
-            volume = 100
+            volume = 30
         return path, max(0, min(volume, 100))
 
     def configure_notify_sound(self) -> None:
@@ -1624,6 +1646,7 @@ class QueueWindow(QMainWindow):
 
         self.status_failures = 0
         self.save_status_cache(self.status_repo, stdout)
+        self.status_loading_repo = ""
         self.populate_queue(stdout)
         self.populate_tasks(stdout)
         self.show_transient_status("Status refreshed", 3000)
@@ -1714,6 +1737,11 @@ class QueueWindow(QMainWindow):
                 self.set_tray_countdown("…", f"{repo}\n{summary}\n{title}")
                 self.waiting_for_review_window = False
                 return
+        if self.status_loading_repo and self.status_loading_repo == self.selected_repo():
+            self.timer_label.setText("Next review: Loading status…")
+            self.set_tray_countdown("…", f"{repo}\nLoading status…")
+            self.waiting_for_review_window = False
+            return
         if self.active_reviews:
             labels = ", ".join(f"#{number}" for number, _title in self.active_reviews)
             detail = self.active_reviews[0][1]
