@@ -2128,14 +2128,15 @@ archive_codex_thread() {
 }
 
 find_codex_session_id() {
-  local branch_name=$1 head_sha=$2 match session_id
-  if match=$(matching_codex_session "$branch_name" "$head_sha"); then
+  local branch_name=$1 head_sha=$2 match session_id file
+  local -A candidates=()
+  if match=$(matching_codex_session "$branch_name" "$head_sha" 2>/dev/null); then
     IFS=$'\t' read -r session_id _ <<<"$match"
     printf '%s\n' "$session_id"
     return 0
   fi
   [[ -f $codex_state_db ]] || return 1
-  python3 - "$codex_state_db" "$repo" "$branch_name" "$head_sha" <<'PY'
+  if python3 - "$codex_state_db" "$repo" "$branch_name" "$head_sha" <<'PY'
 import sqlite3
 import sys
 
@@ -2159,6 +2160,29 @@ for matches in (
         break
 raise SystemExit(1)
 PY
+  then
+    return 0
+  fi
+  # A task can create several PRs; its stored branch then reflects only the
+  # last one. Search its rollout when the exact stored branch/head is gone.
+  while IFS= read -r file; do
+    [[ -f $file ]] || continue
+    session_id=$(head -n 1 "$file" 2>/dev/null | jq -r --arg repo "$repo" '
+      select(.type == "session_meta"
+        and .payload.originator == "Codex Desktop"
+        and (.payload.thread_source // "") != "subagent"
+        and ((.payload.git.repository_url // "")
+          | endswith("github.com:" + $repo + ".git")
+            or endswith("github.com/" + $repo + ".git")))
+      | .payload.session_id // .payload.id // empty
+    ' 2>/dev/null) || continue
+    [[ -n $session_id ]] && candidates["$session_id"]=1
+  done < <(
+    rg -l --fixed-strings -- "$branch_name" \
+      "$codex_sessions_root" "$codex_home/archived_sessions" 2>/dev/null || true
+  )
+  (( ${#candidates[@]} == 1 )) || return 1
+  printf '%s\n' "${!candidates[@]}"
 }
 
 archive_matching_codex_thread() {

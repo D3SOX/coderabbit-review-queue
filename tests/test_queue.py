@@ -940,6 +940,29 @@ find_codex_session_id feature merged-head
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), 'session-1')
 
+    def test_archive_lookup_finds_earlier_pr_created_by_same_task(self):
+        result = self.run_shell(r'''
+codex_home="$state_root/codex"
+codex_sessions_root="$codex_home/sessions"
+codex_state_db="$state_root/state.sqlite"
+mkdir -p "$codex_sessions_root" "$codex_home/archived_sessions"
+python3 - "$codex_state_db" <<'PY'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute('CREATE TABLE threads (id TEXT, originator TEXT, git_origin_url TEXT, git_branch TEXT, git_sha TEXT)')
+    db.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?)',
+               ('session-1', 'Codex Desktop', 'git@github.com:example/repo.git', 'later-branch', 'later-head'))
+PY
+printf '%s\n' \
+  '{"type":"session_meta","payload":{"session_id":"session-1","originator":"Codex Desktop","git":{"repository_url":"git@github.com:example/repo.git"}}}' \
+  '{"type":"event_msg","payload":{"message":"Created PR for earlier-branch"}}' \
+  >"$codex_home/archived_sessions/rollout-session-1.jsonl"
+matching_codex_session() { return 1; }
+find_codex_session_id earlier-branch merged-head
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), 'session-1')
+
     def test_approval_queues_archive_without_archiving_before_merge(self):
         result = self.run_shell(r'''
 printf '1\n' >"$archive_after_merge_file"
@@ -971,6 +994,7 @@ cat "$state_root/target"
 printf '1\n' >"$archive_after_merge_file"
 approved_archive_rows() { printf '42\tfeature\thead\tTitle\n'; }
 gh() { printf '{"state":"MERGED","headRefOid":"head"}\n'; }
+agent_codex_session_id() { :; }
 route_archive_codex_thread() { printf 'called\n' >>"$state_root/calls"; }
 queue_approved_thread_archives '{}'
 process_pending_thread_archives '{}'
