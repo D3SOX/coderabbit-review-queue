@@ -122,6 +122,12 @@ def status_belongs_to_repo(status: str, repo: str) -> bool:
     return status.splitlines()[0:1] == [f"Repository: {repo}"]
 
 
+def live_review_number(activity: tuple[str, str, str, int] | None) -> str | None:
+    if isinstance(activity, tuple) and activity[0] in {"checking", "triggering", "reviewing"}:
+        return activity[1] or None
+    return None
+
+
 def proc_stat_is_running(stat: str) -> bool:
     remainder = stat.rpartition(")")[2].strip().split()
     return bool(remainder) and remainder[0] != "Z"
@@ -511,6 +517,7 @@ class QueueWindow(QMainWindow):
         self.tasks.clear()
         self.active_reviews = []
         self.finished_review_numbers = set()
+        self.approved_review_numbers = set()
         self.has_queued_reviews = False
         self.next_review_at = None
         self.monitor_activity = None
@@ -733,6 +740,7 @@ class QueueWindow(QMainWindow):
             self.tasks.clear()
             self.active_reviews = []
             self.finished_review_numbers = set()
+            self.approved_review_numbers = set()
             self.has_queued_reviews = False
             self.next_review_at = None
             self.monitor_activity = None
@@ -1844,6 +1852,8 @@ class QueueWindow(QMainWindow):
         queued: list[tuple[str, str]] = []
         active: list[tuple[str, str]] = []
         finished_numbers: set[str] = set()
+        approved_numbers: set[str] = set()
+        current_finished_number = ""
         section = ""
         expiry: QDateTime | None = None
         for line in status.splitlines():
@@ -1857,7 +1867,10 @@ class QueueWindow(QMainWindow):
                 expiry = self.parse_expiry(line)
             elif section == "finished" and line.startswith("  #"):
                 number, _, _title = line.strip().partition(" ")
-                finished_numbers.add(number.removeprefix("#"))
+                current_finished_number = number.removeprefix("#")
+                finished_numbers.add(current_finished_number)
+            elif section == "finished" and line == "    Result: Approved":
+                approved_numbers.add(current_finished_number)
             elif section in {"active", "queue"} and line.startswith("  #"):
                 number, _, title = line.strip().partition(" ")
                 number = number.removeprefix("#")
@@ -1886,6 +1899,10 @@ class QueueWindow(QMainWindow):
                 queued = saved_queued + new_queued
 
         self.active_reviews = active
+        self.approved_review_numbers = approved_numbers
+        live_number = live_review_number(self.monitor_activity)
+        if live_number and live_number not in approved_numbers:
+            finished_numbers.discard(live_number)
         self.finished_review_numbers = finished_numbers
         self.has_queued_reviews = bool(queued)
         self.next_review_at = expiry
@@ -1935,11 +1952,17 @@ class QueueWindow(QMainWindow):
                 item.setData(0, Qt.UserRole + 1, base_status)
             self.update_queue_buttons()
             return
-        if (
-            not number
-            or number in getattr(self, "finished_review_numbers", set())
-        ):
+        if not number:
             return
+        approved_numbers = getattr(self, "approved_review_numbers", None)
+        if isinstance(approved_numbers, set) and number in approved_numbers:
+            return
+        self.finished_review_numbers.discard(number)
+        if isinstance(self.tasks, QTreeWidget):
+            for index in range(self.tasks.topLevelItemCount() - 1, -1, -1):
+                if self.tasks.topLevelItem(index).data(0, Qt.UserRole) == number:
+                    self.tasks.takeTopLevelItem(index)
+                    self.update_delegate_button()
         selected = self.queue.currentItem()
         selected_number = selected.data(0, Qt.UserRole) if selected else None
         base_status = "Queued"
@@ -2034,6 +2057,8 @@ class QueueWindow(QMainWindow):
 
         self.tasks.clear()
         for number, title, result, progress in rows:
+            if number == live_review_number(self.monitor_activity) and result != "Approved":
+                continue
             fields = progress.split("\t", 2)
             if len(fields) == 3:
                 state, task_name, detail = fields

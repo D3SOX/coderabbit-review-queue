@@ -658,6 +658,52 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.update_queue_buttons.assert_called_once_with()
         app.processEvents()
 
+    def test_live_review_displaces_stale_finished_row(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.tasks = queue_gui.QTreeWidget()
+        window.monitor_activity = ("reviewing", "42", "live review", 0)
+        window.selected_repo.return_value = ""
+        window.update_countdown_display = Mock()
+        window.update_queue_buttons = Mock()
+        window.update_delegate_button = Mock()
+        window.apply_monitor_activity_to_queue = lambda: (
+            queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        )
+        status = """Repository: example/repo
+Finished CodeRabbit reviews:
+  #42 live review
+    Result: Agent completed review
+    Agent task: Codex Idle\tReview task\tdone
+"""
+
+        queue_gui.QueueWindow.populate_queue(window, status)
+        queue_gui.QueueWindow.populate_tasks(window, status)
+
+        self.assertEqual(window.queue.topLevelItemCount(), 1)
+        self.assertEqual(window.queue.topLevelItem(0).text(2), "In progress")
+        self.assertEqual(window.tasks.topLevelItemCount(), 0)
+        app.processEvents()
+
+    def test_monitor_transition_moves_existing_finished_row_immediately(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.tasks = queue_gui.QTreeWidget()
+        window.monitor_activity = ("reviewing", "42", "live review", 0)
+        window.finished_review_numbers = {"42"}
+        window.approved_review_numbers = set()
+        task = queue_gui.QTreeWidgetItem(["#42", "live review"])
+        task.setData(0, Qt.UserRole, "42")
+        window.tasks.addTopLevelItem(task)
+
+        queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+
+        self.assertEqual(window.queue.topLevelItemCount(), 1)
+        self.assertEqual(window.tasks.topLevelItemCount(), 0)
+        app.processEvents()
+
     def test_refresh_preserves_scroll_position_for_offscreen_selection(self):
         app = QApplication.instance() or QApplication([])
         window = Mock()
