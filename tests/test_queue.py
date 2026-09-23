@@ -323,6 +323,22 @@ main --repo example/repo
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Merged before quota wait', result.stdout)
 
+    def test_monitor_records_archive_target_before_merging(self):
+        result = self.run_shell(r'''
+claim_monitor() { :; }
+cleanup_monitor() { :; }
+write_monitor_state() { :; }
+shared_expiry() { echo 9999999999; }
+monitor_snapshot() { printf '{}\n'; }
+route_all_unresolved_async() { :; }
+queue_approved_thread_archives() { touch "$state_root/archive-target-recorded"; }
+merge_approved_reviews() { [[ -f $state_root/archive-target-recorded ]] || exit 99; }
+process_pending_thread_archives() { :; }
+wait_until() { exit 0; }
+main --repo example/repo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_snapshot_cache_is_shared(self):
         result = self.run_shell(r'''
 calls="$state_root/calls"
@@ -890,10 +906,45 @@ archive_matching_codex_thread feature head
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.strip(), 'session-1')
 
+    def test_archive_uses_desktop_daemon_when_available(self):
+        result = self.run_shell(r'''
+codex_home="$state_root/codex"
+mkdir -p "$codex_home/app-server-control"
+python3 - "$codex_home/app-server-control/app-server-control.sock" <<'PY'
+import socket, sys
+sock = socket.socket(socket.AF_UNIX)
+sock.bind(sys.argv[1])
+sock.close()
+PY
+codex_thread_is_archived() { return 1; }
+codex() { printf '%s\n' "$*"; }
+archive_codex_thread 12345678-1234-1234-1234-123456789abc
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('archive --remote unix://', result.stdout)
+        self.assertIn('12345678-1234-1234-1234-123456789abc', result.stdout)
+
+    def test_archive_lookup_survives_deleted_worktree(self):
+        result = self.run_shell(r'''
+codex_state_db="$state_root/state.sqlite"
+python3 - "$codex_state_db" <<'PY'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute('CREATE TABLE threads (id TEXT, originator TEXT, git_origin_url TEXT, git_branch TEXT, git_sha TEXT)')
+    db.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?)',
+               ('session-1', 'Codex Desktop', 'git@github.com:example/repo.git', 'feature', 'old-head'))
+PY
+matching_codex_session() { return 1; }
+find_codex_session_id feature merged-head
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), 'session-1')
+
     def test_approval_queues_archive_without_archiving_before_merge(self):
         result = self.run_shell(r'''
 printf '1\n' >"$archive_after_merge_file"
 approved_archive_rows() { printf '42\tfeature\thead\tTitle\n'; }
+agent_codex_session_id() { printf 'session-1\n'; }
 route_archive_codex_thread() { printf 'called\n' >>"$state_root/calls"; }
 queue_approved_thread_archives '{}'
 cat "$pending_archives_file"
@@ -901,6 +952,19 @@ cat "$pending_archives_file"
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('42\tfeature\thead\tTitle', result.stdout)
+        self.assertIn('session-1', result.stdout)
+
+    def test_merged_pr_uses_saved_session_after_branch_disappears(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$archive_after_merge_file"
+printf '42\tfeature\thead\tTitle\tsession-1\n' >"$pending_archives_file"
+gh() { printf '{"state":"MERGED","headRefOid":"head"}\n'; }
+route_archive_codex_thread() { printf '%s\n' "$3" >"$state_root/target"; }
+process_pending_thread_archives '{}'
+cat "$state_root/target"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], 'session-1')
 
     def test_merged_head_is_archived_only_once(self):
         result = self.run_shell(r'''

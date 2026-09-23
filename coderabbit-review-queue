@@ -2117,79 +2117,62 @@ PY
 }
 
 archive_codex_thread() {
-  local session_id=$1
+  local session_id=$1 socket_path
   codex_thread_is_archived "$session_id" && return 0
-  python3 - "$session_id" <<'PY'
-import json
-import select
-import subprocess
+  socket_path="$codex_home/app-server-control/app-server-control.sock"
+  if [[ -S $socket_path ]]; then
+    codex archive --remote "unix://$socket_path" "$session_id"
+  else
+    codex archive "$session_id"
+  fi
+}
+
+find_codex_session_id() {
+  local branch_name=$1 head_sha=$2 match session_id
+  if match=$(matching_codex_session "$branch_name" "$head_sha"); then
+    IFS=$'\t' read -r session_id _ <<<"$match"
+    printf '%s\n' "$session_id"
+    return 0
+  fi
+  [[ -f $codex_state_db ]] || return 1
+  python3 - "$codex_state_db" "$repo" "$branch_name" "$head_sha" <<'PY'
+import sqlite3
 import sys
 
-session_id = sys.argv[1]
-try:
-    process = subprocess.Popen(
-        ["codex", "app-server", "--stdio"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    requests = (
-        {
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {"name": "coderabbit-review-queue", "version": "1"}
-            },
-        },
-        {
-            "id": 2,
-            "method": "thread/archive",
-            "params": {"threadId": session_id},
-        },
-    )
-    responses = {}
-    for request in requests:
-        process.stdin.write(json.dumps(request) + "\n")
-        process.stdin.flush()
-        while request["id"] not in responses:
-            readable, _, _ = select.select([process.stdout], [], [], 10)
-            if not readable:
-                raise RuntimeError("timed out waiting for the app server")
-            line = process.stdout.readline()
-            if not line:
-                raise RuntimeError("app server closed without responding")
-            response = json.loads(line)
-            if "id" in response:
-                responses[response["id"]] = response
-    process.stdin.close()
-    process.wait(timeout=10)
-except (OSError, subprocess.TimeoutExpired, RuntimeError) as error:
-    if "process" in locals():
-        process.kill()
-    print(f"Could not archive Codex task {session_id}: {error}", file=sys.stderr)
-    raise SystemExit(1)
-if process.returncode:
-    sys.stderr.write(process.stderr.read())
-    raise SystemExit(process.returncode)
-response = responses[2]
-if "error" in response:
-    print(
-        f"Could not archive Codex task {session_id}: "
-        f"{response['error']}",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
+database, repo, branch, head = sys.argv[1:]
+with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
+    rows = connection.execute(
+        """SELECT id, git_branch, git_sha FROM threads
+        WHERE originator = 'Codex Desktop'
+          AND (git_origin_url LIKE ? OR git_origin_url LIKE ?)
+          AND (git_branch = ? OR git_sha = ?)""",
+        (f"%github.com:{repo}.git", f"%github.com/{repo}.git", branch, head),
+    ).fetchall()
+for matches in (
+    [row[0] for row in rows if row[2] == head],
+    [row[0] for row in rows if row[1] == branch],
+):
+    if len(matches) == 1:
+        print(matches[0])
+        raise SystemExit(0)
+    if matches:
+        break
+raise SystemExit(1)
 PY
 }
 
 archive_matching_codex_thread() {
-  local branch_name=$1 head_sha=$2 match session_id session_cwd state
-  if ! match=$(matching_codex_session "$branch_name" "$head_sha"); then
+  local branch_name=$1 head_sha=$2 session_id state
+  if ! session_id=$(find_codex_session_id "$branch_name" "$head_sha"); then
     printf 'No matching Codex task to archive.\n'
     return 2
   fi
-  IFS=$'\t' read -r session_id session_cwd <<<"$match"
+  archive_codex_session_if_idle "$session_id"
+}
+
+archive_codex_session_if_idle() {
+  local session_id=$1 state
+  codex_thread_is_archived "$session_id" && return 0
   state=$(codex_session_state "$session_id")
   if [[ $state != idle ]]; then
     printf 'Codex task %s is %s; deferring archive.\n' "$session_id" "$state"
@@ -2312,6 +2295,12 @@ route_unresolved_review() {
       printf '%s\n' "$remote_output"
       if [[ $remote_output == *"Routing unresolved CodeRabbit review"* ]]; then
         mark_pr_delegated "$pr"
+        if archive_after_merge_enabled; then
+          local archive_session_id
+          archive_session_id=$(agent_codex_session_id "$branch_name" "$head_sha" || true)
+          queue_pending_archive "$pr" "$branch_name" "$head_sha" "$title" \
+            "$archive_session_id"
+        fi
         for thread_id in "${new_ids[@]}"; do
           attempted_route_threads["$thread_id"]=1
           printf '%s\n' "$thread_id" >>"$routed_threads_file"
@@ -2824,44 +2813,90 @@ archive_after_merge_enabled() {
 }
 
 route_archive_codex_thread() {
-  local branch_name=$1 head_sha=$2 host
+  local branch_name=$1 head_sha=$2 session_id=${3:-} host
   host=$(agent_host 2>/dev/null || true)
   if [[ -n $host ]]; then
-    remote_agent_command --archive-task "$branch_name" "$head_sha" --local-agents
+    if [[ -n $session_id ]]; then
+      remote_agent_command --archive-session "$session_id" --local-agents
+    else
+      remote_agent_command --archive-task "$branch_name" "$head_sha" --local-agents
+    fi
   else
-    archive_matching_codex_thread "$branch_name" "$head_sha"
+    if [[ -n $session_id ]]; then
+      archive_codex_session_if_idle "$session_id"
+    else
+      archive_matching_codex_thread "$branch_name" "$head_sha"
+    fi
   fi
 }
 
+agent_codex_session_id() {
+  local branch_name=$1 head_sha=$2 host
+  host=$(agent_host 2>/dev/null || true)
+  if [[ -n $host ]]; then
+    remote_command_timeout=30 remote_agent_command \
+      --task-id "$branch_name" "$head_sha" --local-agents 2>/dev/null
+  else
+    find_codex_session_id "$branch_name" "$head_sha"
+  fi
+}
+
+queue_pending_archive() {
+  local pr=$1 branch_name=$2 head_sha=$3 title=$4 session_id=${5:-} marker archive_lock_fd temporary
+  archive_after_merge_enabled || return 0
+  marker="$pr"$'\t'"$head_sha"
+  if [[ -f $archived_heads_file ]] &&
+    rg -q --fixed-strings --line-regexp "$marker" "$archived_heads_file"; then
+    return 0
+  fi
+  exec {archive_lock_fd}>"$pending_archives_file.lock"
+  flock "$archive_lock_fd"
+  if [[ -f $pending_archives_file ]] &&
+    awk -F '\t' -v pr="$pr" -v head="$head_sha" \
+      '$1 == pr && $3 == head { found=1 } END { exit !found }' \
+      "$pending_archives_file"; then
+    if [[ -n $session_id ]]; then
+      temporary=$(mktemp "$pending_archives_file.XXXXXX")
+      awk -F '\t' -v OFS='\t' -v pr="$pr" -v head="$head_sha" -v id="$session_id" \
+        '$1 == pr && $3 == head && $5 == "" { $5=id } { print }' \
+        "$pending_archives_file" >"$temporary"
+      mv "$temporary" "$pending_archives_file"
+    fi
+  else
+    title=${title//$'\t'/ }
+    title=${title//$'\n'/ }
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$pr" "$branch_name" "$head_sha" "$title" "$session_id" \
+      >>"$pending_archives_file"
+  fi
+  exec {archive_lock_fd}>&-
+}
+
 queue_approved_thread_archives() {
-  local state=$1 pr branch_name head_sha title marker
+  local state=$1 pr branch_name head_sha title session_id
   archive_after_merge_enabled || return 0
   while IFS=$'\t' read -r pr branch_name head_sha title; do
     [[ -n ${pr:-} ]] || continue
-    marker="$pr"$'\t'"$head_sha"
-    if [[ -f $archived_heads_file ]] &&
-      rg -q --fixed-strings --line-regexp "$marker" "$archived_heads_file"; then
-      continue
-    fi
-    if [[ ! -f $pending_archives_file ]] ||
-      ! awk -F '\t' -v pr="$pr" -v head="$head_sha" \
+    if [[ -f $pending_archives_file ]] &&
+      awk -F '\t' -v pr="$pr" -v head="$head_sha" \
         '$1 == pr && $3 == head { found=1 } END { exit !found }' \
         "$pending_archives_file"; then
-      title=${title//$'\t'/ }
-      title=${title//$'\n'/ }
-      printf '%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" \
-        >>"$pending_archives_file"
+      continue
     fi
+    session_id=$(agent_codex_session_id "$branch_name" "$head_sha" || true)
+    queue_pending_archive "$pr" "$branch_name" "$head_sha" "$title" "$session_id"
   done < <(approved_archive_rows "$state")
 }
 
 process_pending_thread_archives() {
-  local state=$1 pr branch_name head_sha title marker data pr_state current_head
-  local temporary
+  local state=$1 pr branch_name head_sha title session_id marker data pr_state current_head
+  local temporary archive_lock_fd
   archive_after_merge_enabled || return 0
   [[ -s $pending_archives_file ]] || return 0
+  exec {archive_lock_fd}>"$pending_archives_file.lock"
+  flock "$archive_lock_fd"
   temporary=$(mktemp "$pending_archives_file.XXXXXX")
-  while IFS=$'\t' read -r pr branch_name head_sha title; do
+  while IFS=$'\t' read -r pr branch_name head_sha title session_id; do
     [[ -n ${pr:-} ]] || continue
     marker="$pr"$'\t'"$head_sha"
     if [[ -f $archived_heads_file ]] &&
@@ -2872,33 +2907,34 @@ process_pending_thread_archives() {
       any(.data.repository.pullRequests.nodes[]?;
         .number == $pr and .headRefOid == $head)
     ' <<<"$state" >/dev/null; then
-      printf '%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" \
+      printf '%s\t%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" "$session_id" \
         >>"$temporary"
       continue
     fi
     if ! data=$(gh pr view "$pr" --repo "$repo" --json state,headRefOid 2>/dev/null); then
-      printf '%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" \
+      printf '%s\t%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" "$session_id" \
         >>"$temporary"
       continue
     fi
     pr_state=$(jq -r '.state' <<<"$data")
     current_head=$(jq -r '.headRefOid' <<<"$data")
     if [[ $pr_state == OPEN ]]; then
-      printf '%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" \
+      printf '%s\t%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" "$session_id" \
         >>"$temporary"
       continue
     fi
     if [[ $pr_state == MERGED && $current_head == "$head_sha" ]]; then
-      if route_archive_codex_thread "$branch_name" "$head_sha"; then
+      if route_archive_codex_thread "$branch_name" "$head_sha" "$session_id"; then
         printf '%s\n' "$marker" >>"$archived_heads_file"
         printf 'Archived the matching Codex task for merged PR #%s.\n' "$pr"
         continue
       fi
-      printf '%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" \
+      printf '%s\t%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" "$session_id" \
         >>"$temporary"
     fi
   done <"$pending_archives_file"
   mv "$temporary" "$pending_archives_file"
+  exec {archive_lock_fd}>&-
 }
 
 show_status() {
@@ -3241,6 +3277,7 @@ main() {
   local task_head=''
   local archive_branch=''
   local archive_head=''
+  local archive_session=''
   local codex_state_session=''
   local merge_pr='' merge_head='' merge_method_arg='' merge_delete='0' merge_admin_arg='0'
 
@@ -3304,6 +3341,16 @@ main() {
         task_head=$3
         shift 3
         ;;
+      --task-id)
+        (( $# >= 3 )) || {
+          printf '%s\n' '--task-id requires a branch and head SHA.' >&2
+          return 2
+        }
+        action='task-id'
+        task_branch=$2
+        task_head=$3
+        shift 3
+        ;;
       --codex-session-state)
         (( $# >= 2 )) || {
           printf '%s\n' '--codex-session-state requires a session ID.' >&2
@@ -3322,6 +3369,15 @@ main() {
         archive_branch=$2
         archive_head=$3
         shift 3
+        ;;
+      --archive-session)
+        (( $# >= 2 )) && [[ $2 =~ ^[0-9a-fA-F-]{36}$ ]] || {
+          printf '%s\n' '--archive-session requires a Codex session UUID.' >&2
+          return 2
+        }
+        action='archive-session'
+        archive_session=$2
+        shift 2
         ;;
       --agent-mode)
         (( $# >= 2 )) && [[ $2 =~ ^(auto|codex|claude)$ ]] || {
@@ -3416,12 +3472,20 @@ main() {
     local_agent_task_progress "$task_branch" "$task_head"
     return 0
   fi
+  if [[ $action == task-id ]]; then
+    find_codex_session_id "$task_branch" "$task_head"
+    return $?
+  fi
   if [[ $action == codex-session-state ]]; then
     codex_session_state "$codex_state_session"
     return 0
   fi
   if [[ $action == archive-task ]]; then
     archive_matching_codex_thread "$archive_branch" "$archive_head"
+    return $?
+  fi
+  if [[ $action == archive-session ]]; then
+    archive_codex_session_if_idle "$archive_session"
     return $?
   fi
   if [[ $action == merge-now ]]; then
@@ -3476,8 +3540,8 @@ main() {
   # it once before a cached quota window can put the monitor to sleep.
   state=$(monitor_snapshot)
   route_all_unresolved_async "$state"
-  merge_approved_reviews "$state"
   queue_approved_thread_archives "$state"
+  merge_approved_reviews "$state"
   process_pending_thread_archives "$state"
 
   quota_expiry=$(shared_expiry)
@@ -3490,8 +3554,8 @@ main() {
 while true; do
   state=$(monitor_snapshot)
   route_all_unresolved_async "$state"
-  merge_approved_reviews "$state"
   queue_approved_thread_archives "$state"
+  merge_approved_reviews "$state"
   process_pending_thread_archives "$state"
   load_stale_rows "$state"
 
@@ -3665,8 +3729,8 @@ while true; do
   release_dispatch
 
   state=$(monitor_snapshot)
-  merge_approved_reviews "$state"
   queue_approved_thread_archives "$state"
+  merge_approved_reviews "$state"
   process_pending_thread_archives "$state"
   route_all_unresolved_async "$state"
   load_stale_rows "$state"
