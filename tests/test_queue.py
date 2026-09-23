@@ -687,7 +687,7 @@ main --repo example/repo
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), '1\tfix-review\thead\t[pull] example')
 
-    def test_reviewed_rows_include_only_substantive_current_head_reviews(self):
+    def test_reviewed_rows_ignore_empty_nonapproval_and_old_head_reviews(self):
         current = self.pr(1)
         current['reviews']['nodes'] = [{
             'author': {'login': 'coderabbitai'}, 'body': 'Review findings',
@@ -704,6 +704,70 @@ main --repo example/repo
             'state': 'COMMENTED', 'commit': {'oid': 'head'},
         }]
         self.assertEqual(self.rows('reviewed_rows', [current, old, empty]), [1])
+
+    def test_empty_body_approval_is_scanned_for_unresolved_feedback(self):
+        approved = self.pr(4)
+        approved['reviews']['nodes'] = [{
+            'author': {'login': 'coderabbitai'}, 'body': '',
+            'state': 'APPROVED', 'commit': {'oid': 'head'},
+        }]
+        self.assertEqual(self.rows('reviewed_rows', [approved]), [4])
+
+    def test_approved_review_completion_reports_approval_with_feedback(self):
+        result = self.run_shell(r'''
+wait_for_github_quota() { :; }
+gh() {
+  if [[ $* == *'/status'* ]]; then
+    printf '%s\n' '{"statuses":[{"context":"CodeRabbit","created_at":"2026-09-23T07:43:56Z","description":"Review completed"}]}'
+  elif [[ $* == *'/reviews?'* ]]; then
+    printf '%s\n' '[[{"user":{"login":"coderabbitai[bot]"},"state":"APPROVED","commit_id":"head","submitted_at":"2026-09-23T07:43:57Z","body":""}]]'
+  else
+    printf '%s\n' '[[]]'
+  fi
+}
+unresolved_coderabbit_rows() { printf 'thread-1\tfile\t1\tfalse\n'; }
+desktop_notify() { printf 'NOTIFY: %s | %s\n' "$1" "$2"; }
+sleep() { exit 99; }
+wait_for_review_completion 42 2026-09-23T07:43:46Z head title
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('approved', result.stdout.lower())
+        self.assertIn('feedback', result.stdout.lower())
+
+    def test_empty_body_approval_is_routed_for_feedback(self):
+        approved = self.pr(4)
+        approved['reviews']['nodes'] = [{
+            'author': {'login': 'coderabbitai'}, 'body': '',
+            'state': 'APPROVED', 'commit': {'oid': 'head'},
+        }]
+        result = self.run_shell(r'''
+route_unresolved_review() { printf 'ROUTED: %s\n' "$1"; }
+state=$(cat)
+route_all_unresolved "$state"
+''', {'data': {'repository': {'pullRequests': {'nodes': [approved]}}}})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('ROUTED: 4', result.stdout)
+
+    def test_approved_review_completion_reports_clean_approval(self):
+        result = self.run_shell(r'''
+wait_for_github_quota() { :; }
+gh() {
+  if [[ $* == *'/status'* ]]; then
+    printf '%s\n' '{"statuses":[{"context":"CodeRabbit","created_at":"2026-09-23T07:43:56Z","description":"Review completed"}]}'
+  elif [[ $* == *'/reviews?'* ]]; then
+    printf '%s\n' '[[{"user":{"login":"coderabbitai[bot]"},"state":"APPROVED","commit_id":"head","submitted_at":"2026-09-23T07:43:57Z","body":""}]]'
+  else
+    printf '%s\n' '[[]]'
+  fi
+}
+unresolved_coderabbit_rows() { :; }
+desktop_notify() { printf 'NOTIFY: %s | %s\n' "$1" "$2"; }
+sleep() { exit 99; }
+wait_for_review_completion 42 2026-09-23T07:43:46Z head title
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('CodeRabbit approved PR', result.stdout)
+        self.assertIn('no unresolved feedback', result.stdout)
 
     def test_cached_status_reuses_one_minute_snapshot(self):
         result = self.run_shell(r'''

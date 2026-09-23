@@ -688,7 +688,10 @@ reviewed_rows() {
           .reviews.nodes[]?;
           (.author.login // "") == "coderabbitai"
           and (.commit.oid // "") == $pr.headRefOid
-          and ((.body // "") | gsub("^\\s+|\\s+$"; "") | length) > 0
+          and (
+            (.state // "") == "APPROVED"
+            or ((.body // "") | gsub("^\\s+|\\s+$"; "") | length) > 0
+          )
         )
       )
     | [.number, .headRefName, .headRefOid, .title]
@@ -1339,7 +1342,7 @@ wait_for_review_completion() {
   local triggered_at=$2
   local head_sha=$3
   local title=$4
-  local attempt statuses result reviews comments failure_reason
+  local attempt statuses result reviews comments failure_reason approved feedback
 
   for ((attempt = 1; ; attempt++)); do
     (( attempt % 12 != 1 )) || wait_for_github_quota
@@ -1379,7 +1382,10 @@ wait_for_review_completion() {
             .user.login == "coderabbitai[bot]"
             and (.commit_id // "") == $head
             and (.submitted_at // "") >= $since
-            and ((.body // "") | gsub("^\\s+|\\s+$"; "") | length) > 0
+            and (
+              (.state // "") == "APPROVED"
+              or ((.body // "") | gsub("^\\s+|\\s+$"; "") | length) > 0
+            )
           )
           or any(
             $comments[][];
@@ -1397,9 +1403,28 @@ wait_for_review_completion() {
         ' <<<"$reviews" >/dev/null; then
         write_monitor_state waiting '' '' 0
         printf 'CodeRabbit finished PR #%s.\n' "$pr"
-        desktop_notify \
-          'CodeRabbit review finished' \
-          "PR #$pr — $title"$'\n'"Review finished and is ready to inspect."
+        approved=$(jq -r --arg since "$triggered_at" --arg head "$head_sha" '
+          any(.[][];
+            .user.login == "coderabbitai[bot]"
+            and (.commit_id // "") == $head
+            and (.submitted_at // "") >= $since
+            and (.state // "") == "APPROVED")
+        ' <<<"$reviews")
+        if [[ $approved == true ]]; then
+          if ! feedback=$(unresolved_coderabbit_rows "$pr"); then
+            desktop_notify 'CodeRabbit approved PR' \
+              "PR #$pr — $title"$'\n'"Could not check whether feedback remains."
+          elif [[ -n $feedback ]]; then
+            desktop_notify 'CodeRabbit approved with feedback' \
+              "PR #$pr — $title"$'\n'"Unresolved comments need attention before merging."
+          else
+            desktop_notify 'CodeRabbit approved PR' \
+              "PR #$pr — $title"$'\n'"Approved with no unresolved feedback."
+          fi
+        else
+          desktop_notify 'CodeRabbit review finished' \
+            "PR #$pr — $title"$'\n'"Review finished and is ready to inspect."
+        fi
         return 0
       fi
     fi
@@ -1480,7 +1505,7 @@ GRAPHQL
       -F number="$pr"
     )
     [[ -z $cursor ]] || args+=(-F cursor="$cursor")
-    page=$(gh "${args[@]}")
+    page=$(gh "${args[@]}") || return 1
     jq -r '
       .data.repository.pullRequest.reviewThreads.nodes[]
       | select(
