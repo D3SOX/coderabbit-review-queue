@@ -3051,11 +3051,16 @@ show_status() {
   local -A active_prs=()
   local -A unresolved_prs=()
   local -A finished_prs=()
+  local -A queued_prs=()
 
   status_quota_available || return $?
   state=$(snapshot "$snapshot_max_age")
   _claude_agents_json=''
-  load_stale_rows "$state"
+  load_stale_rows "$state" 1
+  for row in "${stale[@]}"; do
+    IFS=$'\t' read -r pr _ <<<"$row"
+    queued_prs[$pr]=1
+  done
   printf 'Repository: %s\n' "$repo"
 
   while IFS=$'\t' read -r pr title; do
@@ -3105,6 +3110,14 @@ show_status() {
       IFS=$'\t' read -r branch_name head_sha title <<<"$row"
       count=$(unresolved_coderabbit_rows "$pr" |
         awk 'NF { count++ } END { print count + 0 }')
+      # In agent-decision mode, an idle task with a still-unreviewed head
+      # means the monitor can request another review. Show the same queue
+      # decision in the UI instead of pinning its old delegation below.
+      if (( count == 0 )) && auto_merge_enabled && \
+        [[ $(merge_after_delegation_mode) == agent ]] && \
+        [[ -n ${queued_prs[$pr]:-} ]]; then
+        continue
+      fi
       task_progress=$(agent_task_progress "$branch_name" "$head_sha")
       # A delegated review remains completed for this PR even after the agent
       # pushes a new head and becomes idle. Otherwise the new head looks like

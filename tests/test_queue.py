@@ -853,6 +853,46 @@ show_status 60
         self.assertIn('Finished CodeRabbit reviews:\n  #42 fix review', result.stdout)
         self.assertNotIn('Queued PRs:\n  #42 ', result.stdout)
 
+    def test_agent_chosen_follow_up_review_returns_idle_pr_to_queue(self):
+        pr = self.pr(42, head='new-head')
+        pr['reviews']['nodes'] = [{
+            'author': {'login': 'coderabbitai'}, 'body': 'Earlier feedback',
+            'state': 'CHANGES_REQUESTED', 'commit': {'oid': 'old-head'},
+        }]
+        result = self.run_shell(r'''
+printf '1\n' >"$auto_merge_file"
+printf 'agent\n' >"$merge_after_delegation_file"
+printf '42\n' >"$delegated_prs_file"
+snapshot() { cat; }
+status_quota_available() { :; }
+unresolved_coderabbit_rows() { :; }
+agent_task_progress() { printf 'Codex Idle\tReview task\tWaiting for next review\n'; }
+latest_expiry() { printf '0\n'; }
+shared_expiry() { printf '0\n'; }
+show_status 60
+''', {'data': {'repository': {'pullRequests': {'nodes': [pr]}}}})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Queued PRs:\n  #42 ', result.stdout)
+        self.assertNotIn('Finished CodeRabbit reviews:\n  #42 ', result.stdout)
+
+    def test_agent_decision_keeps_unresolved_feedback_in_finished_view(self):
+        pr = self.pr(42, head='new-head')
+        result = self.run_shell(r'''
+printf '1\n' >"$auto_merge_file"
+printf 'agent\n' >"$merge_after_delegation_file"
+printf '42\n' >"$delegated_prs_file"
+snapshot() { cat; }
+status_quota_available() { :; }
+unresolved_coderabbit_rows() { printf 'thread-1\tfile\t1\tfalse\n'; }
+agent_task_progress() { printf 'Codex Idle\tReview task\tdone\n'; }
+latest_expiry() { printf '0\n'; }
+shared_expiry() { printf '0\n'; }
+show_status 60
+''', {'data': {'repository': {'pullRequests': {'nodes': [pr]}}}})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Finished CodeRabbit reviews:\n  #42 ', result.stdout)
+        self.assertNotIn('Queued PRs:\n  #42 ', result.stdout)
+
     def test_custom_delegation_prompt_replaces_project_placeholders(self):
         result = self.run_shell(r'''
 delegation_prompt_mode_override=custom
