@@ -778,7 +778,9 @@ query_quota 42 title
         result = self.run_shell(r'''
 gh() {
   if [[ $1 == pr && $2 == view ]]; then
-    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}'
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviews":[]}'
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
   else
     printf '%s\n' "$*"
   fi
@@ -793,7 +795,9 @@ merge_pr_now 42 head squash 1
         result = self.run_shell(r'''
 gh() {
   if [[ $1 == pr && $2 == view ]]; then
-    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"CANCELLED"},{"status":"COMPLETED","conclusion":"SUCCESS"}]}'
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"CANCELLED"},{"status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[]}'
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
   else
     printf '%s\n' "$*"
   fi
@@ -811,6 +815,34 @@ gh() {
 merge_pr_now 42 head rebase 0
 ''')
         self.assertNotEqual(result.returncode, 0)
+
+    def test_merge_refuses_pending_review_bot_check_even_with_clean_merge_state(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","name":"Sourcery review","status":"IN_PROGRESS","conclusion":null}],"reviews":[]}'
+  elif [[ $1 == pr && $2 == merge ]]; then
+    touch "$state_root/merged"
+  fi
+}
+merge_pr_now 42 head squash 0
+''')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_merge_refuses_unresolved_review_thread(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviews":[]}'
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":false}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  elif [[ $1 == pr && $2 == merge ]]; then
+    touch "$state_root/merged"
+  fi
+}
+merge_pr_now 42 head squash 0
+''')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_merge_runs_on_configured_agent_host(self):
         result = self.run_shell(r'''
@@ -911,9 +943,10 @@ printf '1\n' >"$merge_admin_file"
 auto_merge_instruction
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('gh pr merge --rebase', result.stdout)
-        self.assertIn('wait for CI to pass', result.stdout)
-        self.assertIn('gh pr merge --rebase --admin', result.stdout)
+        self.assertIn('--merge-now PR', result.stdout)
+        self.assertIn(' rebase 1 1 --local-agents', result.stdout)
+        self.assertIn('wait for CI', result.stdout)
+        self.assertIn('every review bot to finish', result.stdout)
 
     def test_post_delegation_merge_does_not_use_admin_by_default(self):
         result = self.run_shell(r'''

@@ -1869,16 +1869,19 @@ merge_admin_enabled() {
 
 auto_merge_instruction() {
   auto_merge_enabled || return 0
-  local method delete_text=' Keep the branch after merging.' admin_text=''
+  local pr=${1:-PR} method delete_text=' Keep the branch after merging.' delete_branch=0 admin=0
   merge_after_delegation_enabled || {
     printf '\n\nDo not merge this PR after this pass. Let the queue request another CodeRabbit review; auto-merge requires CodeRabbit approval of the updated head.\n'
     return 0
   }
   method=$(merge_method)
-  delete_branch_enabled && delete_text=' Delete the branch after merging.'
-  merge_admin_enabled && admin_text=' --admin'
-  printf '\n\nAfter all CodeRabbit threads are resolved and the task work is complete, wait for CI to pass, then merge this PR with `gh pr merge --%s%s` without enabling GitHub auto-merge.%s Stop if CI fails, the head changes, or the PR cannot merge cleanly.\n' \
-    "$method" "$admin_text" "$delete_text"
+  if delete_branch_enabled; then
+    delete_branch=1
+    delete_text=' Delete the branch after merging.'
+  fi
+  merge_admin_enabled && admin=1
+  printf '\n\nAfter the task work is complete, wait for CI and every review bot to finish and resolve all review threads. Use the queue merge guard on this agent host: `~/.local/bin/coderabbit-review-queue --repo %s --merge-now %s "$(gh pr view %s --repo %s --json headRefOid --jq .headRefOid)" %s %s %s --local-agents`. The command uses the selected merge method without GitHub auto-merge and checks the live head, reviews, checks, and threads before merging.%s If it refuses, stop and report the blocker.\n' \
+    "$repo" "$pr" "$pr" "$repo" "$method" "$delete_branch" "$admin" "$delete_text"
 }
 
 default_delegation_prompt() {
@@ -2369,7 +2372,7 @@ route_unresolved_review() {
 
   prompt=$(render_delegation_prompt \
     "$pr" "$title" "$(IFS=', '; printf '%s' "${new_threads[*]}")")
-  prompt+=$(auto_merge_instruction)
+  prompt+=$(auto_merge_instruction "$pr")
 
   case $agent in
     codex)
@@ -2726,18 +2729,63 @@ agent_task_progress() {
   fi
 }
 
+merge_review_threads_clear() {
+  local pr=$1 cursor='' page has_next query
+  local -a args
+  read -r -d '' query <<'GRAPHQL' || true
+query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
+  repository(owner:$owner,name:$name) {
+    pullRequest(number:$number) {
+      reviewThreads(first:100,after:$cursor) {
+        nodes { isResolved }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+GRAPHQL
+  while true; do
+    args=(api graphql -f query="$query" -F owner="$owner" -F name="$name" -F number="$pr")
+    [[ -z $cursor ]] || args+=(-F cursor="$cursor")
+    page=$(gh "${args[@]}") || return 1
+    if ! jq -e '
+      (.data.repository.pullRequest.reviewThreads.nodes | type == "array")
+      and (.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage | type == "boolean")
+      and (all(.data.repository.pullRequest.reviewThreads.nodes[]; .isResolved == true))
+    ' <<<"$page" >/dev/null; then
+      printf 'PR #%s has unresolved review threads or their status is unavailable.\n' "$pr" >&2
+      return 1
+    fi
+    has_next=$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$page")
+    [[ $has_next == true ]] || return 0
+    cursor=$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // empty' <<<"$page")
+    [[ -n $cursor ]] || return 1
+  done
+}
+
 merge_pr_now() {
   local pr=$1 expected_head=$2 method=$3 delete_branch=$4 bypass_approval=${5:-0} data
   data=$(gh pr view "$pr" --repo "$repo" \
-    --json state,headRefOid,mergeable,mergeStateStatus) || return 1
+    --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,reviews) || return 1
   if ! jq -e --arg head "$expected_head" '
     .state == "OPEN"
     and .headRefOid == $head
     and .mergeable == "MERGEABLE"
     and .mergeStateStatus == "CLEAN"
+    and (.statusCheckRollup | type == "array")
+    and (all(.statusCheckRollup[];
+      if .__typename == "StatusContext" then .state == "SUCCESS"
+      else .status == "COMPLETED"
+        and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED", "CANCELLED")) end))
+    and (.reviews | type == "array")
+    and ([.reviews[] | select(.commit.oid == $head and .state != "DISMISSED")]
+      | group_by(.author.login)
+      | all(.[]; .[-1].state != "CHANGES_REQUESTED"))
   ' <<<"$data" >/dev/null; then
+    printf 'PR #%s is not ready to merge: head, checks, or reviews are pending.\n' "$pr" >&2
     return 1
   fi
+  merge_review_threads_clear "$pr" || return 1
   local -a args=(pr merge "$pr" --repo "$repo" "--$method")
   [[ $delete_branch == 1 ]] && args+=(--delete-branch)
   [[ $bypass_approval == 1 ]] && args+=(--admin)
