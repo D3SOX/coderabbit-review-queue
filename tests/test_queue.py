@@ -153,6 +153,37 @@ wait_for_review_completion 1162 2026-09-06T21:05:08Z head title
 ''')
         self.assertEqual(result.returncode, 99, result.stdout + result.stderr)
 
+    def test_accepts_review_started_just_before_manual_request(self):
+        result = self.run_shell(r'''
+wait_for_github_quota() { :; }
+gh() {
+  if [[ $* == *'/status'* ]]; then
+    printf '%s\n' '{"statuses":[{"context":"CodeRabbit","created_at":"2026-09-23T13:48:04Z","state":"pending","description":"Review in progress"}]}'
+  else
+    printf '%s\n' '[]'
+  fi
+}
+sleep() { exit 99; }
+wait_for_acceptance 138 2026-09-23T13:48:07Z head title
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('accepted PR #138', result.stdout)
+
+    def test_old_pending_status_does_not_accept_new_request(self):
+        result = self.run_shell(r'''
+wait_for_github_quota() { :; }
+gh() {
+  if [[ $* == *'/status'* ]]; then
+    printf '%s\n' '{"statuses":[{"context":"CodeRabbit","created_at":"2026-09-23T13:00:00Z","state":"pending","description":"Review in progress"}]}'
+  else
+    printf '%s\n' '[]'
+  fi
+}
+sleep() { exit 99; }
+wait_for_acceptance 138 2026-09-23T13:48:07Z head title
+''')
+        self.assertEqual(result.returncode, 99, result.stdout + result.stderr)
+
     def test_recording_review_request_moves_pr_to_bottom(self):
         result = self.run_shell(r'''
 printf '0\n' >"$new_items_at_top_file"

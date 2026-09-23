@@ -1305,8 +1305,18 @@ wait_for_acceptance() {
           or any(
             $statuses.statuses[];
             .context == "CodeRabbit"
-            and .created_at >= $since
-            and .description != "Review rate limited"
+            and (
+              (
+                .created_at >= $since
+                and .description != "Review rate limited"
+              )
+              or (
+                .description == "Review in progress"
+                and .state == "pending"
+                and (.created_at | fromdateiso8601)
+                    >= (($since | fromdateiso8601) - 60)
+              )
+            )
           )
         ) then
           "accepted"
