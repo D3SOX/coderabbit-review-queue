@@ -38,6 +38,23 @@ fi
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn('112 files exceed the limit of 100', result.stdout)
 
+    def test_failed_review_action_ends_completion_wait(self):
+        result = self.run_shell(r'''
+wait_for_github_quota() { :; }
+desktop_notify() { :; }
+gh() {
+  if [[ $* == *'/status'* ]]; then
+    printf '%s\n' '{"statuses":[{"context":"CodeRabbit","created_at":"2026-09-23T07:43:56Z","description":"Review in progress"}]}'
+  else
+    printf '%s\n' '[[{"user":{"login":"coderabbitai[bot]"},"created_at":"2026-09-23T07:43:54Z","body":"<summary>⚠️ Action not completed</summary>\n\nPull request base or head changed."}]]'
+  fi
+}
+sleep() { echo 'Still waiting after failed action' >&2; exit 99; }
+wait_for_review_completion 1506 2026-09-23T07:43:46Z old-head title
+''')
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn('base or head changed', result.stdout)
+
     @staticmethod
     def pr(number, author='human', description='', head='head'):
         return {

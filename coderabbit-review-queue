@@ -1315,7 +1315,7 @@ wait_for_review_completion() {
   local triggered_at=$2
   local head_sha=$3
   local title=$4
-  local attempt statuses result reviews comments
+  local attempt statuses result reviews comments failure_reason
 
   for ((attempt = 1; ; attempt++)); do
     (( attempt % 12 != 1 )) || wait_for_github_quota
@@ -1377,6 +1377,21 @@ wait_for_review_completion() {
           'CodeRabbit review finished' \
           "PR #$pr — $title"$'\n'"Review finished and is ready to inspect."
         return 0
+      fi
+    fi
+    if (( attempt % 3 == 1 )); then
+      comments=$(gh api --paginate --slurp "repos/$repo/issues/$pr/comments?per_page=100")
+      failure_reason=$(jq -r --arg since "$triggered_at" '
+        [ .[][]
+          | select(.user.login == "coderabbitai[bot]"
+              and .created_at >= $since
+              and (.body | contains("Action not completed")))
+          | {at: .created_at, reason: ((.body | split("</summary>") | .[1] // "") | split("\n") | map(select(length > 0)) | first // "CodeRabbit could not complete the action.")}
+        ] | sort_by(.at) | last | .reason // empty
+      ' <<<"$comments")
+      if [[ -n $failure_reason ]]; then
+        printf 'CodeRabbit did not complete PR #%s: %s Rechecking the queue.\n' "$pr" "$failure_reason"
+        return 4
       fi
     fi
     if [[ $result == limited ]]; then
@@ -3737,6 +3752,11 @@ while true; do
     completion_status=$?
     if (( completion_status == 3 )); then
       clear_review_request "$pr" "$head_sha"
+      release_dispatch
+      continue
+    fi
+    if (( completion_status == 4 )); then
+      write_monitor_state waiting '' '' 0
       release_dispatch
       continue
     fi
