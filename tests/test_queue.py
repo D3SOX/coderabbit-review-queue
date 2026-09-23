@@ -21,6 +21,25 @@ class QueueTests(unittest.TestCase):
                 env={**os.environ, 'XDG_STATE_HOME': state},
             )
 
+    def test_dispatch_and_quota_are_isolated_between_repositories_of_same_owner(self):
+        result = self.run_shell(r'''
+configure_repo example/first
+first_dispatch=$dispatch_lock_file
+first_quota=$quota_expiry_file
+exec {first_fd}>"$first_dispatch"
+flock -n "$first_fd"
+printf '9999999999\n' >"$first_quota"
+configure_repo example/second
+[[ $dispatch_lock_file != "$first_dispatch" ]] || exit 41
+[[ $quota_expiry_file != "$first_quota" ]] || exit 42
+[[ $(shared_expiry) == 0 ]] || exit 43
+exec {second_fd}>"$dispatch_lock_file"
+flock -n "$second_fd" || exit 44
+printf 'Second repository has an independent review slot.\n'
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('independent review slot', result.stdout)
+
     def test_file_limit_ends_completion_wait(self):
         result = self.run_shell('''
 wait_for_github_quota() { :; }

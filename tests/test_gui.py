@@ -341,7 +341,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             "Next review: Preparing availability check"
         )
 
-    def test_shared_dispatch_wait_explains_other_repository_review(self):
+    def test_dispatch_wait_is_scoped_to_current_repository(self):
         window = Mock()
         window.monitor_activity = ("dispatch_wait", "", "", 0)
         window.active_reviews = []
@@ -353,7 +353,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         queue_gui.QueueWindow.update_countdown_display(window)
 
         window.timer_label.setText.assert_called_once_with(
-            "Next review: Waiting for another repository's review"
+            "Next review: Waiting for this repository's review slot"
         )
 
     def test_stopped_monitor_does_not_claim_review_is_available(self):

@@ -1714,7 +1714,7 @@ class QueueWindow(QMainWindow):
         if self.monitor_activity is not None:
             phase, number, title, activity_expiry = self.monitor_activity
             if phase == "dispatch_wait":
-                summary = "Waiting for another repository's review"
+                summary = "Waiting for this repository's review slot"
                 self.timer_label.setText(f"Next review: {summary}")
                 self.set_tray_countdown("…", f"{repo}\n{summary}")
                 self.waiting_for_review_window = False

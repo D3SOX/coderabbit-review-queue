@@ -341,11 +341,11 @@ configure_repo() {
   repo_key=${repo//\//__}
   monitor_pid_file="/tmp/coderabbit-review-queue-$repo_key.pid"
   monitor_lock_file="/tmp/coderabbit-review-queue-$repo_key.lock"
-  dispatch_lock_file="/tmp/coderabbit-review-queue-$owner-dispatch.lock"
+  dispatch_lock_file="/tmp/coderabbit-review-queue-$repo_key-dispatch.lock"
   mkdir -p "$state_root"
   routed_threads_file="$state_root/$repo_key-routed-threads.txt"
   queue_order_file="$state_root/$repo_key-order.txt"
-  quota_expiry_file="$state_root/$owner-quota-expiry.txt"
+  quota_expiry_file="$state_root/$repo_key-quota-expiry.txt"
   review_requests_file="$state_root/$repo_key-review-requests.tsv"
   auto_delegate_file="$state_root/$repo_key-auto-delegate"
   stop_when_empty_file="$state_root/$repo_key-stop-when-empty"

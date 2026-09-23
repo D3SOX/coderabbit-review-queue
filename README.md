@@ -1,7 +1,7 @@
 # CodeRabbit Review Queue
 
-A small Linux desktop tool that serializes CodeRabbit reviews across open
-GitHub pull requests, waits for rate-limit windows, and keeps the queue visible
+A small Linux desktop tool that serializes CodeRabbit reviews within each
+repository, waits for per-repository rate-limit windows, and keeps the queue visible
 from a Qt GUI and system tray.
 
 ## Why this exists
