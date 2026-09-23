@@ -3301,7 +3301,10 @@ claim_monitor() {
 
 claim_dispatch() {
   exec {dispatch_lock_fd}>"$dispatch_lock_file"
-  flock "$dispatch_lock_fd"
+  if ! flock -n "$dispatch_lock_fd"; then
+    write_monitor_state dispatch_wait
+    flock "$dispatch_lock_fd"
+  fi
   set_cloexec "$dispatch_lock_fd" || true
 }
 
@@ -3669,6 +3672,9 @@ while true; do
   fi
 
   claim_dispatch
+  IFS=$'\t' read -r quota_pr _updated_at _branch_name _head_sha quota_title _limit_at \
+    <<<"${stale[0]}"
+  write_monitor_state checking "$quota_pr" "$quota_title"
 
   state=$(monitor_snapshot)
   load_stale_rows "$state" 1

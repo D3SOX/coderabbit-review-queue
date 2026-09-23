@@ -218,6 +218,17 @@ main --repo example/repo
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Dispatched PR #2', result.stdout)
 
+    def test_waiting_for_shared_dispatch_lock_has_distinct_monitor_state(self):
+        result = self.run_shell(r'''
+flock() {
+  if [[ $1 == -n ]]; then return 1; fi
+  head -n 1 "$monitor_state_file"
+}
+claim_dispatch
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('dispatch_wait\t\t\t0', result.stdout)
+
     def test_agent_routing_does_not_block_monitor(self):
         result = self.run_shell(r'''
 route_all_unresolved() { while true; do :; done; }

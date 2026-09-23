@@ -341,6 +341,21 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             "Next review: Preparing availability check"
         )
 
+    def test_shared_dispatch_wait_explains_other_repository_review(self):
+        window = Mock()
+        window.monitor_activity = ("dispatch_wait", "", "", 0)
+        window.active_reviews = []
+        window.has_queued_reviews = True
+        window.next_review_at = None
+        window.status_loading_repo = ""
+        window.selected_repo.return_value = "example/repo"
+
+        queue_gui.QueueWindow.update_countdown_display(window)
+
+        window.timer_label.setText.assert_called_once_with(
+            "Next review: Waiting for another repository's review"
+        )
+
     def test_stopped_monitor_does_not_claim_review_is_available(self):
         window = Mock()
         window.monitor_activity = None
