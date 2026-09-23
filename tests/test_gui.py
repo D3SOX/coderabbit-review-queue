@@ -148,6 +148,27 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.save_status_cache.assert_not_called()
         window.populate_queue.assert_not_called()
 
+    def test_finished_status_applies_before_monitor_update_can_start_new_refresh(self):
+        window = Mock()
+        window.status_repo = "old/repo"
+        window.displayed_repo = "old/repo"
+        window.selected_repo.return_value = "old/repo"
+        window.status_monitor_signature = None
+        window.monitor_state_file.return_value = Path("/nonexistent-monitor-state")
+        window.status_process.readAllStandardOutput.return_value = (
+            b"Repository: old/repo\nQueued PRs:\n  #42 old PR\n"
+        )
+        window.status_process.readAllStandardError.return_value = b""
+        window.update_monitor_state.side_effect = lambda: setattr(
+            window, "status_repo", "new/repo"
+        )
+
+        queue_gui.QueueWindow.status_finished(window, 0)
+
+        window.save_status_cache.assert_called_once_with(
+            "old/repo", "Repository: old/repo\nQueued PRs:\n  #42 old PR"
+        )
+
     def test_changing_repository_text_hides_previous_tables_immediately(self):
         app = QApplication.instance() or QApplication([])
         with patch.object(queue_gui.QueueWindow, "load_cached_repos", return_value=True):

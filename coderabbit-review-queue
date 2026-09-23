@@ -649,9 +649,10 @@ load_stale_rows() {
 }
 
 agent_review_decision_pending() {
-  local row=$1 pr branch_name head_sha key progress
+  local row=$1 pr branch_name head_sha key progress mode
   auto_merge_enabled || return 1
-  [[ $(merge_after_delegation_mode) == agent ]] || return 1
+  mode=$(merge_after_delegation_mode)
+  [[ $mode == agent || $mode == 0 ]] || return 1
   IFS=$'\t' read -r pr _updated_at branch_name head_sha _title _limit_at <<<"$row"
   [[ -f $delegated_prs_file ]] &&
     rg -q --fixed-strings --line-regexp "$pr" "$delegated_prs_file" || return 1
@@ -3044,7 +3045,7 @@ process_pending_thread_archives() {
 
 show_status() {
   local snapshot_max_age=${1:-10}
-  local state expiry now row pr branch_name head_sha title count task_progress
+  local state expiry now row pr branch_name head_sha title count task_progress review_mode
   local finished=''
   local -a active=()
   local -a approved=()
@@ -3055,6 +3056,7 @@ show_status() {
 
   status_quota_available || return $?
   state=$(snapshot "$snapshot_max_age")
+  review_mode=$(merge_after_delegation_mode)
   _claude_agents_json=''
   load_stale_rows "$state" 1
   for row in "${stale[@]}"; do
@@ -3107,6 +3109,7 @@ show_status() {
         | @tsv
       ' <<<"$state")
       [[ -n $row ]] || continue
+      [[ -z ${active_prs[$pr]:-} ]] || continue
       IFS=$'\t' read -r branch_name head_sha title <<<"$row"
       count=$(unresolved_coderabbit_rows "$pr" |
         awk 'NF { count++ } END { print count + 0 }')
@@ -3114,7 +3117,7 @@ show_status() {
       # means the monitor can request another review. Show the same queue
       # decision in the UI instead of pinning its old delegation below.
       if (( count == 0 )) && auto_merge_enabled && \
-        [[ $(merge_after_delegation_mode) == agent ]] && \
+        [[ $review_mode == agent || $review_mode == 0 ]] && \
         [[ -n ${queued_prs[$pr]:-} ]]; then
         continue
       fi

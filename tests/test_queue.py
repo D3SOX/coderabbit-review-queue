@@ -875,6 +875,45 @@ show_status 60
         self.assertIn('Queued PRs:\n  #42 ', result.stdout)
         self.assertNotIn('Finished CodeRabbit reviews:\n  #42 ', result.stdout)
 
+    def test_required_follow_up_review_returns_idle_pr_to_queue(self):
+        pr = self.pr(42, head='new-head')
+        result = self.run_shell(r'''
+printf '1\n' >"$auto_merge_file"
+printf '0\n' >"$merge_after_delegation_file"
+printf '42\n' >"$delegated_prs_file"
+snapshot() { cat; }
+status_quota_available() { :; }
+unresolved_coderabbit_rows() { :; }
+agent_task_progress() { printf 'Codex Idle\tReview task\tdone\n'; }
+latest_expiry() { printf '0\n'; }
+shared_expiry() { printf '0\n'; }
+show_status 60
+''', {'data': {'repository': {'pullRequests': {'nodes': [pr]}}}})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Queued PRs:\n  #42 ', result.stdout)
+        self.assertNotIn('Finished CodeRabbit reviews:\n  #42 ', result.stdout)
+
+    def test_active_follow_up_review_is_not_also_finished(self):
+        pr = self.pr(42, head='new-head')
+        context = pr['commits']['nodes'][0]['commit']['statusCheckRollup']['contexts']['nodes'][0]
+        context['state'] = 'PENDING'
+        context['description'] = 'Review in progress'
+        result = self.run_shell(r'''
+printf '1\n' >"$auto_merge_file"
+printf 'agent\n' >"$merge_after_delegation_file"
+printf '42\n' >"$delegated_prs_file"
+snapshot() { cat; }
+status_quota_available() { :; }
+unresolved_coderabbit_rows() { :; }
+agent_task_progress() { printf 'Codex Idle\tReview task\tdone\n'; }
+latest_expiry() { printf '0\n'; }
+shared_expiry() { printf '0\n'; }
+show_status 60
+''', {'data': {'repository': {'pullRequests': {'nodes': [pr]}}}})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Active reviews:\n  #42 ', result.stdout)
+        self.assertNotIn('Finished CodeRabbit reviews:\n  #42 ', result.stdout)
+
     def test_agent_decision_keeps_unresolved_feedback_in_finished_view(self):
         pr = self.pr(42, head='new-head')
         result = self.run_shell(r'''
@@ -1266,6 +1305,25 @@ printf 'idle=%s deferred=%s\n' "${#stale[@]}" "$deferred_review_count"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('running=0 deferred=1', result.stdout)
         self.assertIn('unavailable=0 deferred=1', result.stdout)
+        self.assertIn('idle=1 deferred=0', result.stdout)
+
+    def test_required_follow_up_review_waits_for_running_agent(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$auto_merge_file"
+printf '0\n' >"$merge_after_delegation_file"
+printf '42\n' >"$delegated_prs_file"
+agent_task_progress() { printf '%s\n' "$task_state"; }
+state=$(cat)
+task_state='Codex Running'
+load_stale_rows "$state" 1
+printf 'running=%s deferred=%s\n' "${#stale[@]}" "$deferred_review_count"
+task_state='Codex Idle'
+agent_review_decision_cache=()
+load_stale_rows "$state" 1
+printf 'idle=%s deferred=%s\n' "${#stale[@]}" "$deferred_review_count"
+''', {'data': {'repository': {'pullRequests': {'nodes': [self.pr(42)]}}}})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('running=0 deferred=1', result.stdout)
         self.assertIn('idle=1 deferred=0', result.stdout)
 
     def test_monitor_waits_for_agent_decision_instead_of_stopping(self):

@@ -1616,7 +1616,6 @@ class QueueWindow(QMainWindow):
         self.refresh_button.setText("Refresh")
         self.spinner_timer.stop()
         self.refresh_spinner.hide()
-        self.update_monitor_state()
         if self.status_repo != self.selected_repo():
             self.status_failures = 0
             self.refresh()
@@ -1681,6 +1680,7 @@ class QueueWindow(QMainWindow):
         self.populate_queue(stdout)
         self.populate_tasks(stdout)
         self.show_transient_status("Status refreshed", 3000)
+        self.update_monitor_state()
 
     def advance_spinner(self) -> None:
         frame = self.spinner_frames[self.spinner_index]
