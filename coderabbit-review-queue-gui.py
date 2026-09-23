@@ -118,6 +118,10 @@ def file_signature(path: Path) -> tuple[int, int, int] | None:
     return stat.st_ino, stat.st_mtime_ns, stat.st_size
 
 
+def status_belongs_to_repo(status: str, repo: str) -> bool:
+    return status.splitlines()[0:1] == [f"Repository: {repo}"]
+
+
 def proc_stat_is_running(stat: str) -> bool:
     remainder = stat.rpartition(")")[2].strip().split()
     return bool(remainder) and remainder[0] != "Z"
@@ -193,6 +197,7 @@ class QueueWindow(QMainWindow):
         self.repo_combo.setMinimumWidth(360)
         self.repo_combo.completer().setCaseSensitivity(Qt.CaseInsensitive)
         self.repo_combo.completer().setFilterMode(Qt.MatchContains)
+        self.repo_combo.editTextChanged.connect(self.repository_text_changed)
         self.repo_combo.currentIndexChanged.connect(
             lambda _index: self.repo_changed(self.selected_repo())
         )
@@ -497,6 +502,22 @@ class QueueWindow(QMainWindow):
     def selected_repo(self) -> str:
         return self.repo_combo.currentText().strip()
 
+    def repository_text_changed(self, _text: str) -> None:
+        if self.selected_repo() == self.displayed_repo:
+            return
+        self.displayed_repo = ""
+        self.status_loading_repo = self.selected_repo()
+        self.queue.clear()
+        self.tasks.clear()
+        self.active_reviews = []
+        self.finished_review_numbers = set()
+        self.has_queued_reviews = False
+        self.next_review_at = None
+        self.monitor_activity = None
+        self.update_queue_buttons()
+        self.update_delegate_button()
+        self.update_countdown_display()
+
     def show_transient_status(self, message: str, timeout: int = 4000) -> None:
         self.statusBar().showMessage(message, timeout)
 
@@ -701,6 +722,8 @@ class QueueWindow(QMainWindow):
         self.repo_combo.blockSignals(True)
         self.repo_combo.setCurrentText(selected)
         self.repo_combo.blockSignals(False)
+        if selected:
+            self.activate_repo(selected)
 
     def activate_repo(self, repo: str) -> None:
         if self.displayed_repo != repo:
@@ -752,7 +775,7 @@ class QueueWindow(QMainWindow):
             age = time.time() - cache_mtime
         except OSError:
             return False
-        if not status.strip():
+        if not status_belongs_to_repo(status, repo):
             return False
         self.status_loading_repo = ""
         self.populate_queue(status)
@@ -771,7 +794,7 @@ class QueueWindow(QMainWindow):
         return age <= STATUS_CACHE_MAX_AGE and not newer_state_exists
 
     def save_status_cache(self, repo: str, status: str) -> None:
-        if not status.strip():
+        if not status_belongs_to_repo(status, repo):
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.status_cache_file(repo)
@@ -1647,6 +1670,12 @@ class QueueWindow(QMainWindow):
             return
 
         self.status_failures = 0
+        if not status_belongs_to_repo(stdout, self.status_repo):
+            self.statusBar().showMessage(
+                "Status response belongs to another repository; retrying…"
+            )
+            self.status_retry_timer.start(5000)
+            return
         self.save_status_cache(self.status_repo, stdout)
         self.status_loading_repo = ""
         self.populate_queue(stdout)

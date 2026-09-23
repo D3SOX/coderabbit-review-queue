@@ -131,6 +131,39 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.populate_queue.assert_not_called()
         window.populate_tasks.assert_not_called()
 
+    def test_status_result_for_other_repository_is_never_cached_or_displayed(self):
+        window = Mock()
+        window.status_repo = "new/repo"
+        window.displayed_repo = "new/repo"
+        window.selected_repo.return_value = "new/repo"
+        window.status_monitor_signature = None
+        window.monitor_state_file.return_value = Path("/nonexistent-monitor-state")
+        window.status_process.readAllStandardOutput.return_value = (
+            b"Repository: old/repo\nQueued PRs:\n  #42 old PR\n"
+        )
+        window.status_process.readAllStandardError.return_value = b""
+
+        queue_gui.QueueWindow.status_finished(window, 0)
+
+        window.save_status_cache.assert_not_called()
+        window.populate_queue.assert_not_called()
+
+    def test_changing_repository_text_hides_previous_tables_immediately(self):
+        app = QApplication.instance() or QApplication([])
+        with patch.object(queue_gui.QueueWindow, "load_cached_repos", return_value=True):
+            window = queue_gui.QueueWindow()
+        window.repo_combo.setEditText("old/repo")
+        window.displayed_repo = "old/repo"
+        window.queue.addTopLevelItem(queue_gui.QTreeWidgetItem(["#42", "old PR"]))
+        window.tasks.addTopLevelItem(queue_gui.QTreeWidgetItem(["#43", "old review"]))
+
+        window.repo_combo.setEditText("new/repo")
+
+        self.assertEqual(window.queue.topLevelItemCount(), 0)
+        self.assertEqual(window.tasks.topLevelItemCount(), 0)
+        window.close()
+        app.processEvents()
+
     def test_uncached_repository_shows_loading_instead_of_old_availability(self):
         window = Mock()
         window.base_window_title = "CodeRabbit Review Queue"
@@ -247,6 +280,31 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             self.assertTrue(fresh)
             window.populate_queue.assert_called_once_with(cache.read_text())
             window.populate_tasks.assert_called_once_with(cache.read_text())
+
+    def test_cache_with_other_repository_header_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "status.txt"
+            cache.write_text("Repository: old/repo\nQueued PRs:\n  #42 old PR\n")
+            window = Mock()
+            window.status_cache_file.return_value = cache
+
+            fresh = queue_gui.QueueWindow.load_cached_status(window, "new/repo")
+
+            self.assertFalse(fresh)
+            window.populate_queue.assert_not_called()
+            window.populate_tasks.assert_not_called()
+
+    def test_status_cache_write_rejects_other_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "status.txt"
+            window = Mock()
+            window.status_cache_file.return_value = cache
+
+            queue_gui.QueueWindow.save_status_cache(
+                window, "new/repo", "Repository: old/repo\nQueued PRs:\n  #42 old PR"
+            )
+
+            self.assertFalse(cache.exists())
 
     def test_old_complete_status_cache_displays_before_refresh(self):
         with tempfile.TemporaryDirectory() as directory:
