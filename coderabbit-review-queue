@@ -1481,6 +1481,16 @@ query(
 ) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
+      headRefOid
+      reviews(last: 100) {
+        nodes {
+          id
+          state
+          body
+          author { login }
+          commit { oid }
+        }
+      }
       reviewThreads(first: 100, after: $cursor) {
         pageInfo {
           hasNextPage
@@ -1517,6 +1527,20 @@ GRAPHQL
     )
     [[ -z $cursor ]] || args+=(-F cursor="$cursor")
     page=$(gh "${args[@]}") || return 1
+    if [[ -z $cursor ]]; then
+      jq -r '
+        .data.repository.pullRequest as $pr
+        | $pr.reviews.nodes[]?
+        | select(
+            .author.login == "coderabbitai"
+            and .commit.oid == $pr.headRefOid
+            and .state != "DISMISSED"
+            and ((.body // "") | test("Nitpick comments \\([1-9][0-9]*\\)"; "i"))
+          )
+        | ["nitpick:" + .id, "CodeRabbit review-body nitpick", 0, false]
+        | @tsv
+      ' <<<"$page"
+    fi
     jq -r '
       .data.repository.pullRequest.reviewThreads.nodes[]
       | select(
@@ -2467,6 +2491,12 @@ route_unresolved_review() {
 
   prompt=$(render_delegation_prompt \
     "$pr" "$title" "$(IFS=', '; printf '%s' "${new_threads[*]}")")
+  for thread_id in "${new_ids[@]}"; do
+    if [[ $thread_id == nitpick:* ]]; then
+      prompt+=$'\n\nCodeRabbit also left nitpick feedback in a review body on the current PR head. Fetch that review with gh, verify and address its findings; it is not a resolvable review thread.'
+      break
+    fi
+  done
   prompt+=$(auto_merge_instruction "$pr")
 
   case $agent in
@@ -2876,6 +2906,11 @@ merge_pr_now() {
     and ([.reviews[] | select(.commit.oid == $head and .state != "DISMISSED")]
       | group_by(.author.login)
       | all(.[]; .[-1].state != "CHANGES_REQUESTED"))
+    and (all(.reviews[];
+      .author.login != "coderabbitai"
+      or .commit.oid != $head
+      or .state == "DISMISSED"
+      or ((.body // "") | test("Nitpick comments \\([1-9][0-9]*\\)"; "i") | not)))
   ' <<<"$data" >/dev/null; then
     printf 'PR #%s is not ready to merge: head, checks, or reviews are pending.\n' "$pr" >&2
     return 1

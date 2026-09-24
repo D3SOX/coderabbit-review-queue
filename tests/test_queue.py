@@ -765,6 +765,32 @@ wait_for_review_completion 42 2026-09-23T07:43:46Z head title
         self.assertIn('approved', result.stdout.lower())
         self.assertIn('feedback', result.stdout.lower())
 
+    def test_review_body_nitpick_counts_as_feedback(self):
+        result = self.run_shell(r'''
+gh() {
+  printf '%s\n' '{"data":{"repository":{"pullRequest":{"headRefOid":"head","reviews":{"nodes":[{"id":"review-1","state":"COMMENTED","body":"<details><summary>🧹 Nitpick comments (1)</summary>\nFix the fixture.</details>","author":{"login":"coderabbitai"},"commit":{"oid":"head"}},{"id":"review-2","state":"APPROVED","body":"","author":{"login":"coderabbitai"},"commit":{"oid":"head"}}]},"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+}
+unresolved_coderabbit_rows 1527
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('nitpick:review-1', result.stdout)
+
+    def test_merge_refuses_current_head_review_body_nitpick(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviews":[{"author":{"login":"coderabbitai"},"state":"COMMENTED","commit":{"oid":"head"},"body":"<summary>🧹 Nitpick comments (1)</summary>"},{"author":{"login":"coderabbitai"},"state":"APPROVED","commit":{"oid":"head"},"body":""}]}'
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  else
+    printf 'UNSAFE MERGE: %s\n' "$*"
+  fi
+}
+merge_pr_now 1527 head squash 1
+''')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('UNSAFE MERGE', result.stdout)
+
     def test_empty_body_approval_is_routed_for_feedback(self):
         approved = self.pr(4)
         approved['reviews']['nodes'] = [{
