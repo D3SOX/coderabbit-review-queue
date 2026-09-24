@@ -47,6 +47,8 @@ from PySide6.QtWidgets import (
 
 SCRIPT = str(Path(__file__).with_name("coderabbit-review-queue"))
 APP_ICON_PATH = Path(__file__).with_name("coderabbit-logomark.svg")
+if not APP_ICON_PATH.is_file():
+    APP_ICON_PATH = Path(__file__).resolve().parent.parent / "assets/icons/coderabbit-logomark.svg"
 STATE_ROOT = (
     Path(
         os.environ.get(

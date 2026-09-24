@@ -1,36 +1,44 @@
 # CodeRabbit Review Queue
 
-A small Linux desktop tool that serializes CodeRabbit reviews within each
-repository, waits for per-repository rate-limit windows, and keeps the queue visible
-from a Qt GUI and system tray.
+A Linux desktop queue for CodeRabbit reviews. It tracks each repository's review
+window, starts the next eligible review, and shows the queue in a Qt window and
+system tray.
 
 ## Why this exists
 
-This was built after managing several active pull requests made CodeRabbit's
-rolling review limits difficult to track manually. Repeatedly checking timers,
-remembering which commit had already been reviewed, and deciding which PR
-should go next was error-prone. The tool turns that workflow into one
-persistent, reorderable queue. Duplicate-comment protection was added later as
-a safeguard for automated operation.
+CodeRabbit's rolling limits make several active PRs awkward to manage by hand:
+the next window, the reviewed head, and the order of pending PRs can all change.
+The queue keeps that state per repository and guards against duplicate review
+requests.
 
 ## Features
 
-- Finds open PR heads that do not have a current CodeRabbit review.
-- Skips heads CodeRabbit rejects for exceeding its file limit and continues the queue.
-- Excludes PR authors per repository, defaulting to `pull` and `dependabot`.
-- Uses CodeRabbit's own quota comment to determine the next review window.
-- Adds a safety margin and checks quota again before triggering a review.
-- Prevents recent duplicate `@coderabbitai review` comments.
-- Handles review requests sequentially and waits for completion.
-- Supports separate monitors and settings for multiple repositories.
-- Shows unresolved CodeRabbit threads and optional Codex/Claude task progress.
-- Can optionally delegate unresolved feedback to a matching idle Codex or Claude
-  task (disabled, auto, Codex-only, or Claude-only).
+- Queues unreviewed PR heads per repository, with manual ordering and an option
+  to insert new items at the top (default) or bottom. Drafts, branches, and authors can be
+  excluded; `pull` and `dependabot` are excluded by default.
+- Uses CodeRabbit's quota response to time the next request, rechecks before
+  posting, and guards against duplicate `@coderabbitai review` comments.
+  Oversized PR heads are skipped rather than blocking the queue.
+- Shows pending and in-progress reviews separately from finished reviews,
+  approvals, unresolved feedback, and matching agent-task progress. Queue
+  order, the last status, and unexpired review windows survive an app restart.
+- Runs separate monitors for separate repositories. The GUI can start and stop
+  them; the tray shows the next window and can show or hide the window.
+- Can delegate unresolved feedback to an idle Codex or Claude task, including
+  tasks on an SSH host selected from your SSH config. Codex sessions started by
+  the CLI or T3 Code are supported. You can delegate one PR or all reachable,
+  idle tasks from the finished-reviews table.
+- Lets each repository choose a delegation prompt: the full review workflow,
+  “resolve review and stop,” continued babysitting, or a custom template with
+  PR and review-thread placeholders.
+- Offers optional approval actions: guarded merges after CodeRabbit approval,
+  or an agent-led merge after a delegated fix. Choose whether that fix needs
+  another CodeRabbit review, needs none, or lets the agent decide. Merge commit,
+  squash, and rebase are supported; branch deletion and `--admin` are optional.
+  GitHub auto-merge is never enabled. Codex tasks can be archived after merge.
 - Retries transient GitHub failures and pauses near GitHub API quota limits.
-- Provides desktop notifications and a Plasma-compatible system-tray timer.
-- Optionally plays a sound (on by default) when a rate-limit window opens and a
-  new review can start.
-- Can place newly discovered PRs at the top (default) or bottom of the queue.
+  Desktop notifications are grouped by outcome; the review-available sound can
+  be changed, previewed, or disabled, with volume defaulting to 30%.
 
 ## Requirements
 
@@ -44,8 +52,10 @@ Required:
 Recommended:
 
 - `notify-send` from libnotify for desktop notifications
-- Codex CLI and Codex Desktop only when using Codex task integration
-- Claude Code / Claude Desktop only when using Claude session detection
+- Codex CLI for Codex delegation; Codex Desktop or T3 Code if they own your tasks
+- Claude Code for Claude delegation; Claude Desktop if it owns your tasks
+- Passwordless SSH and an installed queue on the chosen agent host only when
+  using remote task detection, delegation, or merging
 
 The GitHub token remains managed by `gh`; the tool does not read or store it.
 
@@ -64,6 +74,9 @@ The installer uses only user-owned locations:
 - runtime state: `${XDG_STATE_HOME:-~/.local/state}/coderabbit-review-queue`
 
 Make sure `~/.local/bin` is in the desktop session's `PATH`.
+The repository keeps executable sources in `src/`, icons and the desktop entry
+in `assets/`, and checks in `tests/`. Installation copies the runtime files into
+the same locations as earlier versions; existing settings need no migration.
 
 ## Uninstall
 
@@ -128,30 +141,42 @@ Repository discovery uses GitHub App installation information visible to the
 authenticated account. An `OWNER/REPOSITORY` value can also be entered
 manually.
 
-Automatic delegation is disabled by default. When enabled for a
-repository, choose Auto (Codex + Claude), Codex only, or Claude only. The tool
-only resumes a matching task when it appears idle and checks its state again
-immediately before dispatch. Auto prefers Codex when both are idle.
+Automatic delegation is disabled by default. For each repository, choose Auto
+(Codex + Claude), Codex only, or Claude only. A matching task must be idle;
+Auto prefers Codex when both are available. The **Agent host** dialog lists
+hosts from `~/.ssh/config`, or you can leave it on Local. The queue uses that
+host for task lookup, delegation, and `gh pr merge`.
+
+T3 Code delegations are sent through its running local server so turns also
+appear in the T3 app. If its CLI is not on `PATH`, set `T3CODE_CLI` on the
+agent host to the executable or its `bin.mjs` bundle.
+
+Automatic merging and task archiving are off by default. Configure them per
+repository in **Configure approval actions**. Before merging, the queue's
+merge guard checks the live PR head, CI, review states, and unresolved review
+threads, including feedback from other bots. If those checks fail, it does not
+merge. Archiving waits until a merge is confirmed and the matching Codex task
+is idle.
 
 ## Privacy
 
 The source contains no account identifiers, credentials, analytics, or
 telemetry.
 
-Network access goes through the authenticated `gh` CLI to GitHub. CodeRabbit is
-controlled through comments and statuses on GitHub. If Codex or Claude
-delegation is enabled, those CLIs perform their normal network activity.
+GitHub access goes through the authenticated `gh` CLI. CodeRabbit is controlled
+through comments and statuses on GitHub. Optional agent integration uses the
+selected host over SSH, the agent CLIs, or T3 Code's loopback server.
 
-For optional Codex and Claude integration, the tool scans local session metadata to
-match a PR branch or head commit to a task. It displays the latest task progress
-locally. Session contents are not copied into this repository or into the
-tool's state directory. Automatic delegation can resume Codex and/or Claude
-sessions depending on the selected mode.
+For optional Codex and Claude integration, the tool scans session metadata to
+match a PR branch or head commit to a task. Agent session files stay where their
+apps store them, but the queue's local status cache can include task titles and
+latest-progress snippets. Automatic delegation resumes sessions according to
+the selected mode.
 
 Runtime state can include:
 
 - repository names and queue order
-- PR numbers, commit hashes, and CodeRabbit review-thread IDs
+- PR metadata, commit hashes, review-thread IDs, and cached status text
 - quota reset timestamps and per-repository settings
 
 That state stays under the XDG state directory and should not be committed or
@@ -161,7 +186,7 @@ shared.
 
 - Review comments are posted only after an authenticated quota check.
 - A per-repository lock prevents duplicate monitor processes.
-- A shared organization lock serializes review dispatch across repositories.
+- Review dispatch and quota waits are independent per repository.
 - GitHub REST and GraphQL work pauses when either quota approaches its reserve.
 - Closing the GUI does not stop an already-running monitor.
 

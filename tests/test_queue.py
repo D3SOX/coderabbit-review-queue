@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / 'coderabbit-review-queue'
+SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):

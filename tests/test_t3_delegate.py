@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / 't3-delegate.py'
+SCRIPT = Path(__file__).resolve().parents[1] / 'src/t3-delegate.py'
 SPEC = importlib.util.spec_from_file_location('t3_delegate', SCRIPT)
 t3_delegate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(t3_delegate)

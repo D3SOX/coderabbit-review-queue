@@ -149,7 +149,8 @@ desktop_notify() {
   local urgency=${3:-normal}
   local with_sound=${4:-0}
   local app_icon
-  app_icon=$(dirname -- "${BASH_SOURCE[0]}")/coderabbit-logomark.svg
+  app_icon="$script_dir/coderabbit-logomark.svg"
+  [[ -f $app_icon ]] || app_icon="$script_dir/../assets/icons/coderabbit-logomark.svg"
   [[ -f $app_icon ]] || app_icon='system-software-update'
   local -a args=(
     --app-name='CodeRabbit Review Queue'

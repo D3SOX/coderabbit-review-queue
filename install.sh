@@ -3,6 +3,7 @@
 set -euo pipefail
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+icons_source_dir="$source_dir/assets/icons"
 data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
 bin_dir=${XDG_BIN_HOME:-"$HOME/.local/bin"}
 lib_dir="$data_home/coderabbit-review-queue"
@@ -32,28 +33,28 @@ fi
 
 install -d "$bin_dir" "$lib_dir" "$applications_dir"
 install -m 755 \
-  "$source_dir/coderabbit-review-queue" \
+  "$source_dir/src/coderabbit-review-queue" \
   "$lib_dir/coderabbit-review-queue"
 install -m 755 \
-  "$source_dir/coderabbit-review-queue-gui.py" \
+  "$source_dir/src/coderabbit-review-queue-gui.py" \
   "$lib_dir/coderabbit-review-queue-gui.py"
 install -m 755 \
-  "$source_dir/t3-delegate.py" \
+  "$source_dir/src/t3-delegate.py" \
   "$lib_dir/t3-delegate.py"
 install -m 644 \
-  "$source_dir/coderabbit-logomark.svg" \
+  "$icons_source_dir/coderabbit-logomark.svg" \
   "$lib_dir/coderabbit-logomark.svg"
-install -m 644 "$source_dir"/coderabbit-logomark-*.png "$lib_dir/"
+install -m 644 "$icons_source_dir"/coderabbit-logomark-*.png "$lib_dir/"
 for size in 16 22 24 32 48 64; do
   icon_dir="$icons_dir/${size}x${size}/apps"
   install -d "$icon_dir"
   install -m 644 \
-    "$source_dir/coderabbit-logomark-$size.png" \
+    "$icons_source_dir/coderabbit-logomark-$size.png" \
     "$icon_dir/coderabbit-review-queue.png"
 done
 install -d "$icons_dir/scalable/apps"
 install -m 644 \
-  "$source_dir/coderabbit-logomark.svg" \
+  "$icons_source_dir/coderabbit-logomark.svg" \
   "$icons_dir/scalable/apps/coderabbit-review-queue.svg"
 install -m 755 \
   "$source_dir/uninstall.sh" \
@@ -68,7 +69,7 @@ escaped_exec=${escaped_exec//\\/\\\\}
 escaped_exec=${escaped_exec//&/\\&}
 escaped_exec=${escaped_exec//|/\\|}
 sed "s|@EXEC@|$escaped_exec|" \
-  "$source_dir/coderabbit-review-queue.desktop.in" >"$desktop_tmp"
+  "$source_dir/assets/coderabbit-review-queue.desktop.in" >"$desktop_tmp"
 install -m 644 "$desktop_tmp" \
   "$applications_dir/coderabbit-review-queue.desktop"
 

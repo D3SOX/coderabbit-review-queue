@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 import importlib.util
 
 
-GUI_PATH = Path(__file__).resolve().parents[1] / "coderabbit-review-queue-gui.py"
+GUI_PATH = Path(__file__).resolve().parents[1] / "src/coderabbit-review-queue-gui.py"
 SPEC = importlib.util.spec_from_file_location("queue_gui", GUI_PATH)
 assert SPEC and SPEC.loader
 queue_gui = importlib.util.module_from_spec(SPEC)
@@ -21,6 +21,10 @@ SPEC.loader.exec_module(queue_gui)
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_source_checkout_finds_moved_app_icon(self):
+        self.assertTrue(queue_gui.APP_ICON_PATH.is_file())
+        self.assertFalse(queue_gui.app_icon().isNull())
+
     def test_delegated_review_mode_preserves_saved_choice(self):
         with tempfile.TemporaryDirectory() as directory:
             setting = Path(directory) / "merge-after-delegation"

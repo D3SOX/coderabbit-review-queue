@@ -15,6 +15,7 @@ rm -f \
   "$applications_dir/coderabbit-review-queue.desktop" \
   "$lib_dir/coderabbit-review-queue" \
   "$lib_dir/coderabbit-review-queue-gui.py" \
+  "$lib_dir/t3-delegate.py" \
   "$lib_dir/coderabbit-logomark.svg" \
   "$lib_dir/coderabbit-logomark-16.png" \
   "$lib_dir/coderabbit-logomark-22.png" \
