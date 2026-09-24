@@ -1219,12 +1219,58 @@ merge_pr_now 42 head squash 1
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('pr merge 42', result.stdout)
 
+    def test_admin_merge_accepts_prior_head_changes_requested_with_clear_checks(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[],"reviews":[{"author":{"login":"coderabbitai"},"state":"CHANGES_REQUESTED","commit":{"oid":"old-head"},"body":"Earlier feedback"}]}'
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  else
+    printf '%s\n' "$*"
+  fi
+}
+merge_pr_now 42 head squash 0 1
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('pr merge 42 --repo example/repo --squash --admin', result.stdout)
+
+    def test_admin_merge_accepts_resolved_current_head_changes_requested(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[],"reviews":[{"author":{"login":"coderabbitai"},"state":"CHANGES_REQUESTED","commit":{"oid":"head"},"body":"Actionable comments posted: 1"}]}'
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  else
+    printf '%s\n' "$*"
+  fi
+}
+merge_pr_now 42 head squash 0 1
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('pr merge 42 --repo example/repo --squash --admin', result.stdout)
+
+    def test_merge_without_admin_still_refuses_blocked_review(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[],"reviews":[{"author":{"login":"coderabbitai"},"state":"CHANGES_REQUESTED","commit":{"oid":"head"},"body":"Earlier feedback"}]}'
+  elif [[ $1 == pr && $2 == merge ]]; then
+    printf 'UNSAFE MERGE\n'
+  fi
+}
+merge_pr_now 42 head squash 0 0
+''')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('UNSAFE MERGE', result.stdout)
+
     def test_merge_refuses_pending_ci(self):
         result = self.run_shell(r'''
 gh() {
   printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""}]}'
 }
-merge_pr_now 42 head rebase 0
+merge_pr_now 42 head rebase 0 1
 ''')
         self.assertNotEqual(result.returncode, 0)
 
@@ -1237,7 +1283,7 @@ gh() {
     touch "$state_root/merged"
   fi
 }
-merge_pr_now 42 head squash 0
+merge_pr_now 42 head squash 0 1
 ''')
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -1252,7 +1298,7 @@ gh() {
     touch "$state_root/merged"
   fi
 }
-merge_pr_now 42 head squash 0
+merge_pr_now 42 head squash 0 1
 ''')
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -1436,6 +1482,7 @@ auto_merge_instruction 42
         self.assertIn('leave the PR open for the queue', result.stdout)
         self.assertIn('--merge-now 42', result.stdout)
         self.assertIn('Never trigger the review yourself', result.stdout)
+        self.assertIn('last CodeRabbit findings', result.stdout)
 
     def test_remote_delegation_accepts_agent_review_mode(self):
         result = self.run_shell(r'''

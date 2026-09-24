@@ -92,7 +92,7 @@ auto_merge_instruction() {
     return 0
   fi
   if [[ $review_mode == agent ]]; then
-    decision_text='After pushing the fix, decide whether another CodeRabbit review is worthwhile based on the changes and remaining risk. If it is, leave the PR open for the queue to request that review and stop; do not merge. Never trigger the review yourself. If it is not worthwhile, proceed with the guarded merge below. '
+    decision_text='After pushing the fix, explicitly decide whether another CodeRabbit review is worthwhile for the fixes to the last CodeRabbit findings. Judge what those findings asked for and how you addressed them, not the overall PR size or risk; report your decision and reason. If another review of those fixes is worthwhile, leave the PR open for the queue to request it and stop; do not merge. Never trigger the review yourself. Otherwise, proceed with the guarded merge below. '
   fi
   method=$(merge_method)
   if delete_branch_enabled; then

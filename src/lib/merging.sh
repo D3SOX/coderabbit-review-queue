@@ -38,11 +38,11 @@ merge_pr_now() {
   local pr=$1 expected_head=$2 method=$3 delete_branch=$4 bypass_approval=${5:-0} data
   data=$(gh pr view "$pr" --repo "$repo" \
     --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,reviews) || return 1
-  if ! jq -e --arg head "$expected_head" '
+  if ! jq -e --arg head "$expected_head" --argjson admin "$bypass_approval" '
     .state == "OPEN"
     and .headRefOid == $head
     and .mergeable == "MERGEABLE"
-    and .mergeStateStatus == "CLEAN"
+    and (.mergeStateStatus == "CLEAN" or ($admin == 1 and .mergeStateStatus == "BLOCKED"))
     and (.statusCheckRollup | type == "array")
     and (all(.statusCheckRollup[];
       if .__typename == "StatusContext" then .state == "SUCCESS"
@@ -51,7 +51,7 @@ merge_pr_now() {
     and (.reviews | type == "array")
     and ([.reviews[] | select(.commit.oid == $head and .state != "DISMISSED")]
       | group_by(.author.login)
-      | all(.[]; .[-1].state != "CHANGES_REQUESTED"))
+      | all(.[]; $admin == 1 or .[-1].state != "CHANGES_REQUESTED"))
     and (all(.reviews[];
       .author.login != "coderabbitai"
       or .commit.oid != $head
