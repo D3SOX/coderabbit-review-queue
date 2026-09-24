@@ -48,6 +48,7 @@ archive_after_merge_file=''
 archived_heads_file=''
 pending_archives_file=''
 monitor_state_file=''
+review_completion_file=''
 snapshot_cache_file=''
 snapshot_cache_lock_file=''
 quota_remaining=-1
@@ -370,6 +371,7 @@ configure_repo() {
   archived_heads_file="$state_root/$repo_key-archived-heads.tsv"
   pending_archives_file="$state_root/$repo_key-pending-archives.tsv"
   monitor_state_file="$state_root/$repo_key-monitor-state.tsv"
+  review_completion_file="$state_root/$repo_key-review-completion.tsv"
   snapshot_cache_file="$state_root/$repo_key-snapshot.json"
   snapshot_cache_lock_file="$state_root/$repo_key-snapshot.lock"
 }
@@ -420,6 +422,15 @@ write_monitor_state() {
   temporary=$(mktemp "$monitor_state_file.XXXXXX")
   printf '%s\t%s\t%s\t%s\n' "$phase" "$pr" "$title" "$expiry" >"$temporary"
   mv "$temporary" "$monitor_state_file"
+}
+
+write_review_completion() {
+  local pr=$1 head_sha=$2 title=$3 temporary
+  title=${title//$'\t'/ }
+  title=${title//$'\n'/ }
+  temporary=$(mktemp "$review_completion_file.XXXXXX")
+  printf '%s\t%s\t%s\n' "$pr" "$head_sha" "$title" >"$temporary"
+  mv "$temporary" "$review_completion_file"
 }
 
 ignore_drafts_enabled() {
@@ -748,11 +759,16 @@ approved_archive_rows() {
 active_review_rows() {
   local state
   state=$(eligible_state <<<"$1" | without_file_limit_skips)
-  local pr head_sha title now
+  local pr head_sha title now completed_pr='' completed_head=''
   local -A seen=()
 
-  while IFS=$'\t' read -r pr title; do
+  if [[ -s $review_completion_file ]]; then
+    IFS=$'\t' read -r completed_pr completed_head _ <"$review_completion_file"
+  fi
+
+  while IFS=$'\t' read -r pr title head_sha; do
     [[ -n ${pr:-} ]] || continue
+    [[ $pr != "$completed_pr" || $head_sha != "$completed_head" ]] || continue
     seen[$pr]=1
     printf '%s\t%s\n' "$pr" "$title"
   done < <(
@@ -797,9 +813,29 @@ active_review_rows() {
           )
         );
 
+      def is_review_complete:
+        . as $item
+        |
+        any(
+          .reviews.nodes[]?;
+          (.author.login // "") == "coderabbitai"
+          and (.commit.oid // "") == $item.headRefOid
+          and (
+            (.state // "") == "APPROVED"
+            or ((.body // "") | gsub("^\\s+|\\s+$"; "") | length) > 0
+          )
+        )
+        or any(
+          .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
+          (.context // "") == "CodeRabbit"
+          and (.creator.login // "") == "coderabbitai"
+          and (.state // "") == "SUCCESS"
+          and (.description // "") == "Review completed"
+        );
+
       .data.repository.pullRequests.nodes[]
-      | select(is_reviewing and (is_rate_limited | not))
-      | [.number, .title]
+      | select(is_reviewing and (is_rate_limited | not) and (is_review_complete | not))
+      | [.number, .title, .headRefOid]
       | @tsv
     ' <<<"$state"
   )
@@ -1413,6 +1449,7 @@ wait_for_review_completion() {
           )
         ' <<<"$reviews" >/dev/null; then
         write_monitor_state waiting '' '' 0
+        write_review_completion "$pr" "$head_sha" "$title"
         printf 'CodeRabbit finished PR #%s.\n' "$pr"
         approved=$(jq -r --arg since "$triggered_at" --arg head "$head_sha" '
           any(.[][];
@@ -2382,6 +2419,47 @@ resume_codex_via_daemon() {
   return 0
 }
 
+codex_session_originator() {
+  local session_file
+  session_file=$(codex_session_file "$1") || return 1
+  [[ -n $session_file ]] || return 1
+  head -n 1 "$session_file" | jq -r '.payload.originator // empty'
+}
+
+resume_codex_via_exec() {
+  local session_id=$1 client_pid pid_file log_path attempt
+  shift
+  pid_file="/tmp/coderabbit-review-queue-codex-$session_id-exec.pid"
+  log_path="/tmp/coderabbit-review-queue-codex-$session_id-exec.log"
+  rm -f -- "$pid_file"
+  setsid -f bash -c '
+    printf "%s\n" "$$" >"$1"
+    shift
+    "$@"
+  ' _ "$pid_file" codex "$@" </dev/null >"$log_path" 2>&1
+  for attempt in {1..20}; do
+    [[ -s $pid_file ]] && break
+    sleep 0.05
+  done
+  [[ -s $pid_file ]] || return 1
+  client_pid=$(<"$pid_file")
+  rm -f -- "$pid_file"
+  for attempt in {1..40}; do
+    if [[ $(codex_session_state "$session_id") == running ]]; then
+      return 0
+    fi
+    if ! kill -0 "$client_pid" 2>/dev/null || \
+      [[ $(ps -o stat= -p "$client_pid" 2>/dev/null) == Z* ]]; then
+      break
+    fi
+    sleep 0.5
+  done
+  [[ $(codex_session_state "$session_id") == running ]] && return 0
+  kill -- -"$client_pid" 2>/dev/null || true
+  printf 'Codex CLI did not start a new turn for task %s.\n' "$session_id" >&2
+  return 1
+}
+
 route_unresolved_review() {
   local pr=$1
   local branch_name=$2
@@ -2543,6 +2621,7 @@ resume_codex_session() {
   local -n thread_ids=$7
   local session_state resume_status metadata task_title task_model task_effort
   local task_sandbox_policy task_approval_mode
+  local originator
   local routing_lock_path routing_lock_fd
   local thread_id
   local -a codex_args
@@ -2590,10 +2669,16 @@ resume_codex_session() {
     return 1
   fi
   codex_args+=(resume --all "$session_id" "$prompt")
+  originator=$(codex_session_originator "$session_id" 2>/dev/null || true)
   if (
     cd "$session_cwd"
     [[ $(codex_session_state "$session_id") == idle ]] || exit 75
-    resume_codex_via_daemon "$session_id" "$prompt" || codex "${codex_args[@]}"
+    if [[ $originator == 'Codex Desktop' ]] && \
+      resume_codex_via_daemon "$session_id" "$prompt"; then
+      exit 0
+    fi
+    [[ $(codex_session_state "$session_id") != running ]] || exit 0
+    resume_codex_via_exec "$session_id" "${codex_args[@]}"
   ); then
     mark_pr_delegated "$pr"
     for thread_id in "${thread_ids[@]}"; do
@@ -3102,6 +3187,7 @@ process_pending_thread_archives() {
 show_status() {
   local snapshot_max_age=${1:-10}
   local state expiry now row pr branch_name head_sha title count task_progress review_mode
+  local completed_pr completed_head completed_title
   local finished=''
   local -a active=()
   local -a approved=()
@@ -3198,10 +3284,28 @@ show_status() {
   for row in "${approved[@]}"; do
     IFS=$'\t' read -r pr title <<<"$row"
     [[ -z ${unresolved_prs[$pr]:-} ]] || continue
+    unresolved_prs[$pr]=1
+    finished_prs[$pr]=1
     finished+=$'\n'"  #$pr $title"
     finished+=$'\n'"    Result: Approved"
     finished+=$'\n'"    Agent task: —"
   done
+
+  if [[ -s $review_completion_file ]]; then
+    IFS=$'\t' read -r completed_pr completed_head completed_title \
+      <"$review_completion_file"
+    if [[ $completed_pr =~ ^[0-9]+$ ]] && \
+      [[ -z ${finished_prs[$completed_pr]:-} ]] && \
+      jq -e --argjson pr "$completed_pr" --arg head "$completed_head" '
+        any(.data.repository.pullRequests.nodes[];
+          .number == $pr and .headRefOid == $head)
+      ' <<<"$state" >/dev/null; then
+      unresolved_prs[$completed_pr]=1
+      finished+=$'\n'"  #$completed_pr $completed_title"
+      finished+=$'\n'"    Result: Review completed; syncing details"
+      finished+=$'\n'"    Agent task: —"
+    fi
+  fi
 
   # Rebuild queue without unresolved PRs for display. load_stale_rows already
   # excludes them for the monitor; keep the same rule visible in --status.
@@ -3450,6 +3554,7 @@ monitor_snapshot() {
 
 main() {
   local action='run'
+  local completed_pr=''
   local selected_repo=''
   local delegate_pr=''
   local excluded_authors=''
@@ -3863,6 +3968,10 @@ while true; do
     continue
   fi
 
+  if [[ -s $review_completion_file ]]; then
+    IFS=$'\t' read -r completed_pr _ <"$review_completion_file"
+    [[ $completed_pr != "$pr" ]] || : >"$review_completion_file"
+  fi
   write_monitor_state triggering "$pr" "$title"
   printf 'Triggering PR #%s: %s\n' "$pr" "$title"
   desktop_notify \

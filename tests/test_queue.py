@@ -614,7 +614,7 @@ session=12345678-1234-1234-1234-123456789abc
 codex_session_state() { printf 'idle\n'; }
 codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
 resume_codex_via_daemon() { return 1; }
-codex() { printf 'codex args:'; printf ' <%s>' "$@"; printf '\n'; }
+resume_codex_via_exec() { printf 'codex args:'; shift; printf ' <%s>' "$@"; printf '\n'; }
 desktop_notify() { :; }
 threads=(thread-1)
 resume_codex_session 42 title head "$session" "$worktree" prompt threads
@@ -626,6 +626,58 @@ resume_codex_session 42 title head "$session" "$worktree" prompt threads
         self.assertNotIn('<--sandbox> <workspace-write>', result.stdout)
         self.assertIn('<exec>', result.stdout)
         self.assertIn('<resume> <--all>', result.stdout)
+
+    def test_codex_resume_returns_once_cli_turn_starts(self):
+        result = self.run_shell(r'''
+worktree="$state_root/worktree"
+mkdir -p "$worktree"
+git -C "$worktree" init -q
+session=12345678-1234-1234-1234-123456789abc
+codex_session_state() {
+  if [[ -f $state_root/started ]]; then printf 'running\n'; else printf 'idle\n'; fi
+}
+codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
+resume_codex_via_daemon() { return 1; }
+export TEST_STARTED="$state_root/started"
+codex() { touch "$TEST_STARTED"; sleep 2; }
+export -f codex
+desktop_notify() { :; }
+threads=(thread-1)
+started_at=$(date +%s%3N)
+resume_codex_session 42 title head "$session" "$worktree" prompt threads
+elapsed=$(( $(date +%s%3N) - started_at ))
+(( elapsed < 2200 )) || { printf 'Delegation blocked for %s ms\n' "$elapsed" >&2; exit 98; }
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_completed_status_is_not_still_active(self):
+        pr = self.pr(1535, description='Review completed')
+        pr['comments']['nodes'] = [{
+            'author': {'login': 'coderabbitai'},
+            'body': 'Currently processing new changes in this PR. This may take a few minutes, please wait',
+        }]
+        pr['reviews']['nodes'] = [{
+            'author': {'login': 'coderabbitai'}, 'body': 'Review finished',
+            'state': 'COMMENTED', 'commit': {'oid': 'head'},
+        }]
+        self.assertEqual(self.rows('active_review_rows "$(cat)"', [pr]), [])
+
+    def test_completion_marker_moves_stale_snapshot_to_finished(self):
+        pr = self.pr(1535, description='Review in progress')
+        pr['comments']['nodes'] = [{
+            'author': {'login': 'coderabbitai'},
+            'body': 'Currently processing new changes in this PR. This may take a few minutes, please wait',
+        }]
+        result = self.run_shell(r'''
+status_quota_available() { :; }
+snapshot() { cat; }
+write_review_completion 1535 head 'Finished PR'
+show_status 0
+''', {'data': {'repository': {'pullRequests': {'nodes': [pr]}}}})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('Active reviews:', result.stdout)
+        self.assertIn('Finished CodeRabbit reviews:\n  #1535 Finished PR', result.stdout)
+        self.assertIn('Review completed; syncing details', result.stdout)
 
     def test_manual_delegation_retries_previously_routed_threads(self):
         result = self.run_shell(r'''
@@ -665,6 +717,7 @@ git -C "$worktree" init -q
 session=12345678-1234-1234-1234-123456789abc
 codex_session_state() { printf 'idle\n'; }
 codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
+codex_session_originator() { printf 'Codex Desktop\n'; }
 resume_codex_via_daemon() { printf 'daemon resume <%s> <%s>\n' "$1" "$2"; }
 codex() { printf 'unexpected codex exec\n'; return 1; }
 desktop_notify() { :; }
@@ -880,7 +933,10 @@ gh() {
   fi
 }
 unresolved_coderabbit_rows() { :; }
-desktop_notify() { printf 'NOTIFY: %s | %s\n' "$1" "$2"; }
+desktop_notify() {
+  [[ -s $review_completion_file ]] || exit 97
+  printf 'NOTIFY: %s | %s\n' "$1" "$2"
+}
 sleep() { exit 99; }
 wait_for_review_completion 42 2026-09-23T07:43:46Z head title
 ''')

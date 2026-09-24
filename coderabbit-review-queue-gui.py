@@ -157,11 +157,13 @@ class QueueWindow(QMainWindow):
         self.displayed_repo = ""
         self.status_loading_repo = ""
         self.status_monitor_signature: tuple[int, int] | None = None
+        self.status_completion_signature: tuple[int, int, int] | None = None
         self.status_failures = 0
         self.status_manual = False
         self.review_requests_signature: (
             tuple[
                 str,
+                tuple[int, int, int] | None,
                 tuple[int, int, int] | None,
                 tuple[int, int, int] | None,
             ]
@@ -792,6 +794,7 @@ class QueueWindow(QMainWindow):
         for path in (
             self.review_requests_file(repo),
             self.monitor_state_file(repo),
+            self.review_completion_file(repo),
         ):
             try:
                 if path.stat().st_mtime > cache_mtime:
@@ -1546,6 +1549,45 @@ class QueueWindow(QMainWindow):
     def monitor_state_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-monitor-state.tsv"
 
+    def review_completion_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-review-completion.tsv"
+
+    def apply_recent_completion(self) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        marker = self.review_completion_file(repo)
+        try:
+            marker_time = marker.stat().st_mtime_ns
+            cache_time = self.status_cache_file(repo).stat().st_mtime_ns
+            number, _head, title = marker.read_text().strip().split("\t", 2)
+        except (OSError, ValueError):
+            return
+        if marker_time <= cache_time or not number.isdecimal():
+            return
+        if live_review_number(self.monitor_activity) == number:
+            return
+        self.active_reviews = [
+            row for row in self.active_reviews if row[0] != number
+        ]
+        for index in range(self.queue.topLevelItemCount() - 1, -1, -1):
+            item = self.queue.topLevelItem(index)
+            if item.data(0, Qt.UserRole) == number:
+                self.queue.takeTopLevelItem(index)
+        if not any(
+            self.tasks.topLevelItem(index).data(0, Qt.UserRole) == number
+            for index in range(self.tasks.topLevelItemCount())
+        ):
+            item = QTreeWidgetItem(
+                [f"#{number}", title, "Review completed; syncing details", "—", "—", "—"]
+            )
+            item.setData(0, Qt.UserRole, number)
+            item.setData(0, Qt.UserRole + 1, False)
+            item.setData(0, Qt.UserRole + 2, False)
+            self.tasks.addTopLevelItem(item)
+        self.update_queue_buttons()
+        self.update_delegate_button()
+
     def read_monitor_activity(self, repo: str) -> None:
         if self.monitor_pid(repo) is None:
             self.monitor_activity = None
@@ -1571,11 +1613,13 @@ class QueueWindow(QMainWindow):
             return
         self.read_monitor_activity(repo)
         self.apply_monitor_activity_to_queue()
+        self.apply_recent_completion()
         self.update_countdown_display()
         signature = (
             repo,
             file_signature(self.review_requests_file(repo)),
             file_signature(self.monitor_state_file(repo)),
+            file_signature(self.review_completion_file(repo)),
         )
         if self.review_requests_signature is None:
             self.review_requests_signature = signature
@@ -1609,6 +1653,7 @@ class QueueWindow(QMainWindow):
         self.statusBar().showMessage("Refreshing GitHub status…")
         self.status_repo = repo
         self.status_monitor_signature = file_signature(self.monitor_state_file(repo))
+        self.status_completion_signature = file_signature(self.review_completion_file(repo))
         self.status_process.setProgram(SCRIPT)
         status_action = "--status" if manual else "--cached-status"
         self.status_process.setArguments(["--repo", repo, status_action])
@@ -1632,6 +1677,8 @@ class QueueWindow(QMainWindow):
             return
         if self.status_monitor_signature != file_signature(
             self.monitor_state_file(self.status_repo)
+        ) or self.status_completion_signature != file_signature(
+            self.review_completion_file(self.status_repo)
         ):
             self.status_failures = 0
             self.refresh()

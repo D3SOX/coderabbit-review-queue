@@ -119,7 +119,9 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.status_repo = "new/repo"
         window.displayed_repo = "old/repo"
         window.status_monitor_signature = None
+        window.status_completion_signature = None
         window.monitor_state_file.return_value = Path("/nonexistent-monitor-state")
+        window.review_completion_file.return_value = Path("/nonexistent-completion")
         window.selected_repo.return_value = "new/repo"
         window.status_process.readAllStandardOutput.return_value = (
             b"Repository: new/repo\nQueued PRs:\n  #2 new PR\n"
@@ -154,7 +156,9 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.displayed_repo = "old/repo"
         window.selected_repo.return_value = "old/repo"
         window.status_monitor_signature = None
+        window.status_completion_signature = None
         window.monitor_state_file.return_value = Path("/nonexistent-monitor-state")
+        window.review_completion_file.return_value = Path("/nonexistent-completion")
         window.status_process.readAllStandardOutput.return_value = (
             b"Repository: old/repo\nQueued PRs:\n  #42 old PR\n"
         )
@@ -477,10 +481,12 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             window.selected_repo.return_value = "example/repo"
             window.review_requests_file.return_value = request_file
             window.monitor_state_file.return_value = Path(directory) / "monitor.tsv"
+            window.review_completion_file.return_value = Path(directory) / "completion.tsv"
             window.monitor_pid.return_value = None
             window.review_requests_signature = (
                 "example/repo",
                 queue_gui.file_signature(request_file),
+                None,
                 None,
             )
             window.status_process.state.return_value = QProcess.NotRunning
@@ -491,8 +497,35 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             window.refresh.assert_called_once_with()
             self.assertEqual(
                 window.review_requests_signature,
-                ("example/repo", queue_gui.file_signature(request_file), None),
+                ("example/repo", queue_gui.file_signature(request_file), None, None),
             )
+
+    def test_completion_marker_moves_stale_active_row_immediately(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "status.txt"
+            cache.write_text("stale status")
+            marker = root / "completion.tsv"
+            marker.write_text("1535\thead\tFinished PR\n")
+            window = Mock()
+            window.queue = queue_gui.QTreeWidget()
+            window.tasks = queue_gui.QTreeWidget()
+            window.queue.addTopLevelItem(
+                queue_gui.QTreeWidgetItem(["#1535", "Finished PR", "In progress"])
+            )
+            window.queue.topLevelItem(0).setData(0, Qt.UserRole, "1535")
+            window.active_reviews = [("1535", "Finished PR")]
+            window.selected_repo.return_value = "example/repo"
+            window.review_completion_file.return_value = marker
+            window.status_cache_file.return_value = cache
+
+            queue_gui.QueueWindow.apply_recent_completion(window)
+
+            self.assertEqual(window.queue.topLevelItemCount(), 0)
+            self.assertEqual(window.tasks.topLevelItemCount(), 1)
+            self.assertEqual(window.tasks.topLevelItem(0).text(2), "Review completed; syncing details")
+            self.assertEqual(window.active_reviews, [])
 
     def test_status_refresh_records_monitor_state_version(self):
         with tempfile.TemporaryDirectory() as directory:
