@@ -543,6 +543,46 @@ matching_codex_session target-branch "$head"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('12345678-1234-1234-1234-123456789abc', result.stdout)
 
+    def test_codex_match_finds_cli_sessions(self):
+        for originator in ('codex-tui', 'codex_exec'):
+            with self.subTest(originator=originator):
+                result = self.run_shell(r'''
+codex_sessions_root="$state_root/sessions"
+worktree="$state_root/worktree"
+mkdir -p "$codex_sessions_root" "$worktree"
+git -C "$worktree" init -q
+git -C "$worktree" remote add origin git@github.com:example/repo.git
+git -C "$worktree" config user.email test@example.com
+git -C "$worktree" config user.name Test
+git -C "$worktree" config commit.gpgSign false
+touch "$worktree/file"
+git -C "$worktree" add file
+git -C "$worktree" commit -qm initial
+git -C "$worktree" branch -M target-branch
+head=$(git -C "$worktree" rev-parse HEAD)
+session=12345678-1234-1234-1234-123456789abc
+printf '%s\n' "{\"timestamp\":\"2026-09-24T12:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"originator\":\"''' + originator + r'''\",\"thread_source\":\"user\",\"id\":\"$session\",\"cwd\":\"$worktree\",\"git\":{\"repository_url\":\"git@github.com:example/repo.git\",\"branch\":\"target-branch\"}}}" >"$codex_sessions_root/rollout-test-$session.jsonl"
+matching_codex_session target-branch "$head"
+''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('12345678-1234-1234-1234-123456789abc', result.stdout)
+
+    def test_codex_exec_metadata_reads_rollout_without_state_database(self):
+        result = self.run_shell(r'''
+codex_sessions_root="$state_root/sessions"
+codex_state_db="$state_root/missing.sqlite"
+mkdir -p "$codex_sessions_root"
+session=12345678-1234-1234-1234-123456789abc
+printf '%s\n' \
+  '{"type":"session_meta","payload":{"originator":"codex_exec","id":"12345678-1234-1234-1234-123456789abc"}}' \
+  '{"type":"turn_context","payload":{"model":"gpt-5.6-terra","effort":"low","sandbox_policy":{"type":"workspace-write","network_access":false},"approval_policy":"never"}}' \
+  >"$codex_sessions_root/rollout-test-$session.jsonl"
+codex_thread_metadata "$session"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('gpt-5.6-terra\tlow\t', result.stdout)
+        self.assertIn('"type":"workspace-write"', result.stdout)
+
     def test_codex_progress_reads_current_agent_message_events(self):
         result = self.run_shell(r'''
 codex_sessions_root="$state_root/sessions"
