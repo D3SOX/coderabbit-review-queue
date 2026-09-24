@@ -74,9 +74,11 @@ The installer uses only user-owned locations:
 - runtime state: `${XDG_STATE_HOME:-~/.local/state}/coderabbit-review-queue`
 
 Make sure `~/.local/bin` is in the desktop session's `PATH`.
-The repository keeps executable sources in `src/`, icons and the desktop entry
-in `assets/`, and checks in `tests/`. Installation copies the runtime files into
-the same locations as earlier versions; existing settings need no migration.
+The repository keeps the CLI entry point and GUI in `src/`, Bash functions in
+`src/lib/`, and GUI helpers in `src/queue_gui_*.py`. Icons and the desktop entry
+are in `assets/`, and checks are in `tests/`. Installation copies the runtime
+files into the same locations as earlier versions; existing settings need no
+migration.
 
 ## Uninstall
 

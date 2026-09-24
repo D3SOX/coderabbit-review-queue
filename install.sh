@@ -31,13 +31,15 @@ if ! python3 -c 'import PySide6' >/dev/null 2>&1; then
   exit 1
 fi
 
-install -d "$bin_dir" "$lib_dir" "$applications_dir"
+install -d "$bin_dir" "$lib_dir" "$lib_dir/lib" "$applications_dir"
 install -m 755 \
   "$source_dir/src/coderabbit-review-queue" \
   "$lib_dir/coderabbit-review-queue"
+install -m 644 "$source_dir"/src/lib/*.sh "$lib_dir/lib/"
 install -m 755 \
   "$source_dir/src/coderabbit-review-queue-gui.py" \
   "$lib_dir/coderabbit-review-queue-gui.py"
+install -m 644 "$source_dir"/src/queue_gui_*.py "$lib_dir/"
 install -m 755 \
   "$source_dir/src/t3-delegate.py" \
   "$lib_dir/t3-delegate.py"

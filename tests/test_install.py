@@ -24,6 +24,8 @@ class InstalledIconTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             app_dir = data_dir / 'coderabbit-review-queue'
             for filename in ('coderabbit-review-queue', 'coderabbit-review-queue-gui.py',
+                             'queue_gui_common.py', 'queue_gui_settings.py',
+                             'queue_gui_status.py', 'lib/queue-state.sh',
                              't3-delegate.py', 'coderabbit-logomark.svg'):
                 with self.subTest(runtime_file=filename):
                     self.assertTrue((app_dir / filename).is_file())
@@ -42,6 +44,7 @@ class InstalledIconTests(unittest.TestCase):
             )
             self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
             self.assertFalse((app_dir / 't3-delegate.py').exists())
+            self.assertFalse((app_dir / 'lib').exists())
 
 
 if __name__ == '__main__':

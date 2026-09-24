@@ -15,6 +15,9 @@ rm -f \
   "$applications_dir/coderabbit-review-queue.desktop" \
   "$lib_dir/coderabbit-review-queue" \
   "$lib_dir/coderabbit-review-queue-gui.py" \
+  "$lib_dir/queue_gui_common.py" \
+  "$lib_dir/queue_gui_settings.py" \
+  "$lib_dir/queue_gui_status.py" \
   "$lib_dir/t3-delegate.py" \
   "$lib_dir/coderabbit-logomark.svg" \
   "$lib_dir/coderabbit-logomark-16.png" \
@@ -24,6 +27,10 @@ rm -f \
   "$lib_dir/coderabbit-logomark-48.png" \
   "$lib_dir/coderabbit-logomark-64.png" \
   "$lib_dir/uninstall.sh"
+rm -f "$lib_dir"/lib/*.sh
+rmdir "$lib_dir/lib" 2>/dev/null || true
+rm -f "$lib_dir"/__pycache__/queue_gui_{common,settings,status}.*.pyc
+rmdir "$lib_dir/__pycache__" 2>/dev/null || true
 for size in 16 22 24 32 48 64; do
   rm -f "$icons_dir/${size}x${size}/apps/coderabbit-review-queue.png"
 done
