@@ -1607,7 +1607,7 @@ matching_codex_session() {
         (.payload.git.repository_url // "") as $url
         | select(
           .type == "session_meta"
-          and .payload.originator == "Codex Desktop"
+          and (.payload.originator | IN("Codex Desktop", "t3code_desktop"))
           and (.payload.thread_source // "") != "subagent"
           and (
             ($url | endswith("github.com:" + $repo + ".git"))
@@ -2250,7 +2250,7 @@ database, repo, branch, head = sys.argv[1:]
 with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
     rows = connection.execute(
         """SELECT id, git_branch, git_sha FROM threads
-        WHERE originator = 'Codex Desktop'
+        WHERE originator IN ('Codex Desktop', 't3code_desktop')
           AND (git_origin_url LIKE ? OR git_origin_url LIKE ?)
           AND (git_branch = ? OR git_sha = ?)""",
         (f"%github.com:{repo}.git", f"%github.com/{repo}.git", branch, head),
@@ -2275,7 +2275,7 @@ PY
     [[ -f $file ]] || continue
     session_id=$(head -n 1 "$file" 2>/dev/null | jq -r --arg repo "$repo" '
       select(.type == "session_meta"
-        and .payload.originator == "Codex Desktop"
+        and (.payload.originator | IN("Codex Desktop", "t3code_desktop"))
         and (.payload.thread_source // "") != "subagent"
         and ((.payload.git.repository_url // "")
           | endswith("github.com:" + $repo + ".git")

@@ -521,6 +521,28 @@ matching_codex_session target-branch "$head"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('12345678-1234-1234-1234-123456789abc', result.stdout)
 
+    def test_codex_match_finds_t3code_worktree_session(self):
+        result = self.run_shell(r'''
+codex_sessions_root="$state_root/sessions"
+worktree="$state_root/.t3/worktrees/OpenTubeX/t3code-12345678"
+mkdir -p "$codex_sessions_root" "$worktree"
+git -C "$worktree" init -q
+git -C "$worktree" remote add origin git@github.com:example/repo.git
+git -C "$worktree" config user.email test@example.com
+git -C "$worktree" config user.name Test
+git -C "$worktree" config commit.gpgSign false
+touch "$worktree/file"
+git -C "$worktree" add file
+git -C "$worktree" commit -qm initial
+git -C "$worktree" branch -M target-branch
+head=$(git -C "$worktree" rev-parse HEAD)
+session=12345678-1234-1234-1234-123456789abc
+printf '%s\n' "{\"timestamp\":\"2026-09-24T12:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"originator\":\"t3code_desktop\",\"id\":\"$session\",\"cwd\":\"$worktree\",\"git\":{\"repository_url\":\"git@github.com:example/repo.git\",\"branch\":\"t3code/12345678\"}}}" >"$codex_sessions_root/rollout-test-$session.jsonl"
+matching_codex_session target-branch "$head"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('12345678-1234-1234-1234-123456789abc', result.stdout)
+
     def test_codex_progress_reads_current_agent_message_events(self):
         result = self.run_shell(r'''
 codex_sessions_root="$state_root/sessions"
