@@ -37,6 +37,9 @@ install -m 755 \
 install -m 755 \
   "$source_dir/coderabbit-review-queue-gui.py" \
   "$lib_dir/coderabbit-review-queue-gui.py"
+install -m 755 \
+  "$source_dir/t3-delegate.py" \
+  "$lib_dir/t3-delegate.py"
 install -m 644 \
   "$source_dir/coderabbit-logomark.svg" \
   "$lib_dir/coderabbit-logomark.svg"

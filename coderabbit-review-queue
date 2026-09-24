@@ -2426,6 +2426,11 @@ codex_session_originator() {
   head -n 1 "$session_file" | jq -r '.payload.originator // empty'
 }
 
+resume_codex_via_t3() {
+  local session_id=$1 prompt=$2
+  printf '%s' "$prompt" | python3 "$script_dir/t3-delegate.py" "$session_id"
+}
+
 resume_codex_via_exec() {
   local session_id=$1 client_pid pid_file log_path attempt
   shift
@@ -2673,6 +2678,10 @@ resume_codex_session() {
   if (
     cd "$session_cwd"
     [[ $(codex_session_state "$session_id") == idle ]] || exit 75
+    if [[ $originator == 't3code_desktop' ]]; then
+      resume_codex_via_t3 "$session_id" "$prompt"
+      exit $?
+    fi
     if [[ $originator == 'Codex Desktop' ]] && \
       resume_codex_via_daemon "$session_id" "$prompt"; then
       exit 0

@@ -728,6 +728,25 @@ resume_codex_session 42 title head "$session" "$worktree" prompt threads
         self.assertIn('daemon resume <12345678-1234-1234-1234-123456789abc> <prompt>', result.stdout)
         self.assertNotIn('unexpected codex exec', result.stdout)
 
+    def test_t3_resume_dispatches_through_t3_not_detached_codex(self):
+        result = self.run_shell(r'''
+worktree="$state_root/worktree"
+mkdir -p "$worktree"
+git -C "$worktree" init -q
+session=12345678-1234-1234-1234-123456789abc
+codex_session_state() { printf 'idle\n'; }
+codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
+codex_session_originator() { printf 't3code_desktop\n'; }
+resume_codex_via_t3() { printf 't3 resume <%s> <%s>\n' "$1" "$2"; }
+resume_codex_via_exec() { printf 'unexpected detached codex\n'; return 1; }
+desktop_notify() { :; }
+threads=(thread-1)
+resume_codex_session 42 title head "$session" "$worktree" prompt threads
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('t3 resume <12345678-1234-1234-1234-123456789abc> <prompt>', result.stdout)
+        self.assertNotIn('unexpected detached codex', result.stdout)
+
     def test_completed_delegation_leaves_merge_to_agent(self):
         result = self.run_shell(r'''
 worktree="$state_root/worktree"
