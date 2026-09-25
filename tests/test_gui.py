@@ -18,6 +18,7 @@ SPEC = importlib.util.spec_from_file_location("queue_gui", GUI_PATH)
 assert SPEC and SPEC.loader
 queue_gui = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(queue_gui)
+import queue_gui_settings
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
@@ -593,6 +594,74 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual(placement_row.indexOf(window.requeued_items_at_top), 1)
         window.close()
         app.processEvents()
+
+    def test_monitor_options_share_one_row_in_keyboard_order(self):
+        app = QApplication.instance() or QApplication([])
+        with patch.object(queue_gui.QueueWindow, "load_cached_repos", return_value=True):
+            window = queue_gui.QueueWindow()
+        layout = window.centralWidget().layout()
+        rows = [layout.itemAt(i).layout() for i in range(layout.count())]
+        options_row = next(
+            row for row in rows
+            if row is not None and row.indexOf(window.stop_when_empty) >= 0
+        )
+        for index, widget in enumerate((
+            window.stop_when_empty,
+            window.ignore_drafts,
+            window.notify_sound,
+        )):
+            self.assertEqual(options_row.indexOf(widget), index)
+        self.assertEqual(options_row.indexOf(window.notify_sound_button), 4)
+        window.show()
+        app.processEvents()
+        button_right = window.notify_sound_button.mapTo(
+            window.centralWidget(), window.notify_sound_button.rect().topRight()
+        ).x()
+        self.assertGreaterEqual(button_right, window.centralWidget().width() - 20)
+        window.close()
+        app.processEvents()
+
+    def test_excluded_branches_and_authors_share_one_row(self):
+        app = QApplication.instance() or QApplication([])
+        with patch.object(queue_gui.QueueWindow, "load_cached_repos", return_value=True):
+            window = queue_gui.QueueWindow()
+        layout = window.centralWidget().layout()
+        rows = [layout.itemAt(i).layout() for i in range(layout.count())]
+        excluded_row = next(
+            row for row in rows
+            if row is not None and row.indexOf(window.excluded_branches) >= 0
+        )
+        self.assertEqual(excluded_row.indexOf(window.excluded_branches), 1)
+        self.assertEqual(excluded_row.indexOf(window.excluded_authors), 3)
+        window.show()
+        app.processEvents()
+        self.assertGreater(window.excluded_branches.width(), 150)
+        self.assertGreater(window.excluded_authors.width(), 150)
+        window.close()
+        app.processEvents()
+
+    def test_configure_sound_follows_saved_and_live_sound_toggle(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            queue_gui.QueueWindow, "load_cached_repos", return_value=True
+        ), patch.object(queue_gui_settings, "STATE_ROOT", Path(directory)):
+            window = queue_gui.QueueWindow()
+            window.selected_repo = lambda: "example/repo"
+            window.notify_sound_file = lambda repo: Path(directory) / "sound-enabled"
+            window.show_transient_status = Mock()
+            window.notify_sound_file("example/repo").write_text("0\n")
+            window.load_notify_sound("example/repo")
+            self.assertFalse(window.notify_sound_button.isEnabled())
+
+            window.notify_sound.setChecked(True)
+            self.assertTrue(window.notify_sound_button.isEnabled())
+            self.assertEqual(window.notify_sound_file("example/repo").read_text(), "1\n")
+            window.notify_sound.setChecked(False)
+            self.assertFalse(window.notify_sound_button.isEnabled())
+            window.load_notify_sound("")
+            self.assertFalse(window.notify_sound_button.isEnabled())
+            window.close()
+            app.processEvents()
 
     def test_move_buttons_start_disabled_without_selection(self):
         app = QApplication.instance() or QApplication([])

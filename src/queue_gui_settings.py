@@ -664,9 +664,11 @@ class SettingsMixin:
         else:
             self.notify_sound.setChecked(True)
         self.notify_sound.blockSignals(False)
+        self.notify_sound_button.setEnabled(bool(repo) and self.notify_sound.isChecked())
 
     def notify_sound_changed(self, enabled: bool) -> None:
         repo = self.selected_repo()
+        self.notify_sound_button.setEnabled(bool(repo) and enabled)
         if not repo:
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
