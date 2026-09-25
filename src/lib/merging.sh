@@ -44,10 +44,17 @@ merge_pr_now() {
     and .mergeable == "MERGEABLE"
     and (.mergeStateStatus == "CLEAN" or ($admin == 1 and .mergeStateStatus == "BLOCKED"))
     and (.statusCheckRollup | type == "array")
-    and (all(.statusCheckRollup[];
-      if .__typename == "StatusContext" then .state == "SUCCESS"
-      else .status == "COMPLETED"
-        and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED", "CANCELLED")) end))
+    and ([.statusCheckRollup[]
+      | {key: [.__typename, (.workflowName // ""), (.name // .context // "")],
+         started: (.startedAt // .createdAt // .updatedAt // .completedAt // ""),
+         check: .}]
+      | sort_by(.started)
+      | group_by(.key)
+      | map(last.check)
+      | all(.[];
+          if .__typename == "StatusContext" then .state == "SUCCESS"
+          else .status == "COMPLETED"
+            and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED", "CANCELLED")) end))
     and (.reviews | type == "array")
     and ([.reviews[] | select(.commit.oid == $head and .state != "DISMISSED")]
       | group_by(.author.login)

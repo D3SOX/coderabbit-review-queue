@@ -1267,6 +1267,50 @@ merge_pr_now 42 head squash 0 1
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('pr merge 42 --repo example/repo --squash --admin', result.stdout)
 
+    def test_admin_merge_ignores_superseded_failed_check_attempt(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","name":"e2e","workflowName":"E2E Tests","startedAt":"2026-09-25T06:58:14Z","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"e2e","workflowName":"E2E Tests","startedAt":"2026-09-25T07:01:37Z","status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[{"author":{"login":"coderabbitai"},"state":"CHANGES_REQUESTED","commit":{"oid":"old-head"},"body":"Earlier feedback"}]}'
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  else
+    printf '%s\n' "$*"
+  fi
+}
+merge_pr_now 42 head squash 0 1
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('pr merge 42 --repo example/repo --squash --admin', result.stdout)
+
+    def test_admin_merge_refuses_newer_pending_check_attempt(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","name":"e2e","workflowName":"E2E Tests","startedAt":"2026-09-25T06:58:14Z","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"e2e","workflowName":"E2E Tests","startedAt":"2026-09-25T07:01:37Z","status":"IN_PROGRESS","conclusion":null}],"reviews":[]}'
+  elif [[ $1 == pr && $2 == merge ]]; then
+    printf 'UNSAFE MERGE\n'
+  fi
+}
+merge_pr_now 42 head squash 0 1
+''')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('UNSAFE MERGE', result.stdout)
+
+    def test_admin_merge_keeps_checks_from_different_workflows_separate(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","name":"e2e","workflowName":"Required E2E","startedAt":"2026-09-25T06:58:14Z","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"e2e","workflowName":"Optional E2E","startedAt":"2026-09-25T07:01:37Z","status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[]}'
+  elif [[ $1 == pr && $2 == merge ]]; then
+    printf 'UNSAFE MERGE\n'
+  fi
+}
+merge_pr_now 42 head squash 0 1
+''')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('UNSAFE MERGE', result.stdout)
+
     def test_merge_without_admin_still_refuses_blocked_review(self):
         result = self.run_shell(r'''
 gh() {
