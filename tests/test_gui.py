@@ -21,6 +21,25 @@ SPEC.loader.exec_module(queue_gui)
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_requeue_setting_inherits_old_choice_once_then_stays_independent(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            setting = Path(directory) / "requeued-items-at-top"
+            window = Mock()
+            window.new_items_at_top = queue_gui.QCheckBox()
+            window.new_items_at_top.setChecked(False)
+            window.requeued_items_at_top = queue_gui.QCheckBox()
+            window.requeued_items_at_top_file.return_value = setting
+
+            queue_gui.QueueWindow.load_requeued_items_at_top(window, "example/repo")
+            self.assertFalse(window.requeued_items_at_top.isChecked())
+            self.assertEqual(setting.read_text(), "0\n")
+
+            window.new_items_at_top.setChecked(True)
+            queue_gui.QueueWindow.load_requeued_items_at_top(window, "example/repo")
+            self.assertFalse(window.requeued_items_at_top.isChecked())
+            app.processEvents()
+
     def test_source_checkout_finds_moved_app_icon(self):
         self.assertTrue(queue_gui.APP_ICON_PATH.is_file())
         self.assertFalse(queue_gui.app_icon().isNull())
@@ -557,6 +576,21 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             window = queue_gui.QueueWindow()
         self.assertEqual(window.table_splitter.orientation(), Qt.Vertical)
         self.assertEqual(window.table_splitter.count(), 2)
+        window.close()
+        app.processEvents()
+
+    def test_queue_placement_settings_are_side_by_side(self):
+        app = QApplication.instance() or QApplication([])
+        with patch.object(queue_gui.QueueWindow, "load_cached_repos", return_value=True):
+            window = queue_gui.QueueWindow()
+        layout = window.centralWidget().layout()
+        rows = [layout.itemAt(i).layout() for i in range(layout.count())]
+        placement_row = next(
+            row for row in rows
+            if row is not None and row.indexOf(window.new_items_at_top) >= 0
+        )
+        self.assertEqual(placement_row.indexOf(window.new_items_at_top), 0)
+        self.assertEqual(placement_row.indexOf(window.requeued_items_at_top), 1)
         window.close()
         app.processEvents()
 

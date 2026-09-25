@@ -248,6 +248,20 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         )
         self.new_items_at_top.setChecked(True)
         self.new_items_at_top.toggled.connect(self.new_items_at_top_changed)
+        self.requeued_items_at_top = QCheckBox("Requeue reviewed PRs at the top")
+        self.requeued_items_at_top.setToolTip(
+            "Per repository. Controls where a PR returns after its review; "
+            "newly discovered PRs use the setting beside it."
+        )
+        self.requeued_items_at_top.setChecked(True)
+        self.requeued_items_at_top.toggled.connect(
+            self.requeued_items_at_top_changed
+        )
+        queue_placement_row = QHBoxLayout()
+        queue_placement_row.setSpacing(12)
+        queue_placement_row.addWidget(self.new_items_at_top)
+        queue_placement_row.addWidget(self.requeued_items_at_top)
+        queue_placement_row.addStretch()
 
         self.monitor_label = QLabel()
         self.timer_label = QLabel("Next review: —")
@@ -362,7 +376,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         layout.addLayout(excluded_row)
         layout.addLayout(authors_row)
         layout.addLayout(notify_sound_row)
-        layout.addWidget(self.new_items_at_top)
+        layout.addLayout(queue_placement_row)
         layout.addLayout(header_buttons)
         layout.addWidget(self.table_splitter, 1)
 
@@ -682,6 +696,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.load_notify_sound(repo)
         self.notify_sound_button.setEnabled(bool(repo))
         self.load_new_items_at_top(repo)
+        self.load_requeued_items_at_top(repo)
         cache_is_fresh = self.load_cached_status(repo)
         self.waiting_for_review_window = False
         self.update_monitor_state()

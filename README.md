@@ -13,9 +13,10 @@ requests.
 
 ## Features
 
-- Queues unreviewed PR heads per repository, with manual ordering and an option
-  to insert new items at the top (default) or bottom. Drafts, branches, and authors can be
-  excluded; `pull` and `dependabot` are excluded by default.
+- Queues unreviewed PR heads per repository, with manual ordering and separate
+  top/bottom placement options for newly discovered and requeued PRs (both
+  default to the top). Drafts, branches, and authors can be excluded; `pull`
+  and `dependabot` are excluded by default.
 - Uses CodeRabbit's quota response to time the next request, rechecks before
   posting, and guards against duplicate `@coderabbitai review` comments.
   Oversized PR heads are skipped rather than blocking the queue.

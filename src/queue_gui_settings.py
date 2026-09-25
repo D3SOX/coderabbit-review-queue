@@ -711,3 +711,42 @@ class SettingsMixin:
             else "New queue items are added at the bottom"
         )
         self.refresh(manual=True)
+
+    def requeued_items_at_top_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-requeued-items-at-top"
+
+    def load_requeued_items_at_top(self, repo: str) -> None:
+        self.requeued_items_at_top.blockSignals(True)
+        self.requeued_items_at_top.setEnabled(bool(repo))
+        enabled = self.new_items_at_top.isChecked()
+        if repo:
+            target = self.requeued_items_at_top_file(repo)
+            try:
+                enabled = target.read_text().strip() != "0"
+            except FileNotFoundError:
+                try:
+                    with target.open("x") as setting:
+                        setting.write("1\n" if enabled else "0\n")
+                except FileExistsError:
+                    enabled = target.read_text().strip() != "0"
+                except OSError:
+                    pass
+            except OSError:
+                pass
+        self.requeued_items_at_top.setChecked(enabled)
+        self.requeued_items_at_top.blockSignals(False)
+
+    def requeued_items_at_top_changed(self, enabled: bool) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = self.requeued_items_at_top_file(repo)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text("1\n" if enabled else "0\n")
+        os.replace(temporary, target)
+        self.show_transient_status(
+            "Reviewed PRs return to the top" if enabled
+            else "Reviewed PRs return to the bottom"
+        )
+        self.refresh(manual=True)

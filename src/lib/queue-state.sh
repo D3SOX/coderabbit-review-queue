@@ -140,6 +140,7 @@ configure_repo() {
   notify_sound_path_file="$state_root/$repo_key-notify-sound-path"
   notify_sound_volume_file="$state_root/$repo_key-notify-sound-volume"
   new_items_at_top_file="$state_root/$repo_key-new-items-at-top"
+  requeued_items_at_top_file="$state_root/$repo_key-requeued-items-at-top"
   agent_host_file="$state_root/$repo_key-agent-host"
   delegated_prs_file="$state_root/$repo_key-delegated-prs.txt"
   delegation_prompt_mode_file="$state_root/$repo_key-delegation-prompt-mode"
@@ -231,6 +232,15 @@ new_items_at_top_enabled() {
     [[ $(head -n 1 "$new_items_at_top_file") != 0 ]]
   else
     return 0
+  fi
+}
+
+requeued_items_at_top_enabled() {
+  if [[ -f $requeued_items_at_top_file ]]; then
+    [[ $(head -n 1 "$requeued_items_at_top_file") != 0 ]]
+  else
+    # Retain the existing queue placement until the new setting is saved.
+    new_items_at_top_enabled
   fi
 }
 
@@ -797,11 +807,11 @@ record_review_request() {
     >>"$review_requests_file"
 
   # Keep an active review pinned visually at the top. Its saved position after
-  # the review follows the same top/bottom preference as every other new row.
+  # the review uses the requeue preference, independently of newly found PRs.
   if (( requested_at > 0 )); then
     exec {order_lock_fd}>"$order_lock_file"
     flock -x "$order_lock_fd"
-    if new_items_at_top_enabled; then
+    if requeued_items_at_top_enabled; then
       awk -v pr="$pr" 'BEGIN { print pr } $0 != pr { print }' \
         "$queue_order_file" 2>/dev/null >"$queue_order_file.tmp.$$" ||
         printf '%s\n' "$pr" >"$queue_order_file.tmp.$$"

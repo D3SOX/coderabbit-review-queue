@@ -204,6 +204,22 @@ cat "$queue_order_file"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines(), ['2', '4', '9'])
 
+    def test_requeued_pr_placement_is_independent_of_new_pr_placement(self):
+        for new_at_top, requeued_at_top, expected in (
+            ("0", "1", ["2", "4", "9"]),
+            ("1", "0", ["4", "9", "2"]),
+        ):
+            with self.subTest(new_at_top=new_at_top, requeued_at_top=requeued_at_top):
+                result = self.run_shell(f'''
+printf '%s\\n' {new_at_top} >"$new_items_at_top_file"
+printf '%s\\n' {requeued_at_top} >"$requeued_items_at_top_file"
+printf '%s\\n' 4 2 9 >"$queue_order_file"
+record_review_request 2 head-2 123
+cat "$queue_order_file"
+''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.splitlines(), expected)
+
     def test_monitor_order_update_does_not_overwrite_concurrent_gui_order(self):
         with tempfile.TemporaryDirectory() as state:
             state_root = Path(state) / 'coderabbit-review-queue'
