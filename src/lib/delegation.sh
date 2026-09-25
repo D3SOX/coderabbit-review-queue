@@ -100,7 +100,7 @@ auto_merge_instruction() {
     delete_text=' Delete the branch after merging.'
   fi
   merge_admin_enabled && admin=1
-  printf '\n\n%sAfter the task work is complete, wait for CI and every review bot to finish and resolve all review threads. Use the queue merge guard on this agent host: `~/.local/bin/coderabbit-review-queue --repo %s --merge-now %s "$(gh pr view %s --repo %s --json headRefOid --jq .headRefOid)" %s %s %s --local-agents`. The command uses the selected merge method without GitHub auto-merge and checks the live head, reviews, checks, and threads before merging.%s If it refuses, stop and report the blocker.\n' \
+  printf '\n\n%sAfter the task work is complete, wait for CI and every review bot to finish. Before invoking the merge guard, fetch all unresolved review threads, including non-CodeRabbit bots. Verify each finding; fix valid ones or explain and resolve dismissals according to repository rules. Do not merge while any thread remains unresolved; report its author and path if it cannot be addressed. Use the queue merge guard on this agent host: `~/.local/bin/coderabbit-review-queue --repo %s --merge-now %s "$(gh pr view %s --repo %s --json headRefOid --jq .headRefOid)" %s %s %s --local-agents`. The command uses the selected merge method without GitHub auto-merge and checks the live head, reviews, checks, and threads before merging.%s If it refuses, stop and report the blocker.\n' \
     "$decision_text" "$repo" "$pr" "$pr" "$repo" "$method" "$delete_branch" "$admin" "$delete_text"
 }
 
@@ -112,7 +112,7 @@ Threads that triggered this delegation: {threads}
 
 Follow repository instructions and existing task context.
 
-1. Use gh to fetch the live PR and unresolved CodeRabbit threads; the list above is a snapshot. Stop if the PR is closed or merged. Ignore non-CodeRabbit feedback.
+1. Use gh to fetch the live PR and unresolved CodeRabbit threads; the list above is a snapshot. Stop if the PR is closed or merged. Prioritize CodeRabbit feedback; if auto-merge is enabled, also follow the merge instructions for other bots' unresolved threads.
 2. Confirm the PR branch and inspect the working tree. Preserve unrelated work. Verify every finding against current code, including outdated findings, and make the smallest necessary fixes.
 3. Validate changes and recheck feedback before pushing. Bundle related fixes, commit only this task's changes using repository signing conventions, and push to the PR branch. If signing times out, stop and ask the user to say continue.
 4. Reply with the fix and validation or a concrete dismissal reason, using repository attribution rules. Resolve fixes after pushing and dismissals after explaining. Leave uncertain or blocked findings open.

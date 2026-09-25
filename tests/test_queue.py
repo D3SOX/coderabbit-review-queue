@@ -1353,7 +1353,7 @@ gh() {
   if [[ $1 == pr && $2 == view ]]; then
     printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviews":[]}'
   elif [[ $1 == api && $2 == graphql ]]; then
-    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":false}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread-1","isResolved":false,"path":"e2e/tests/offline/android-native-screen.spec.mjs","comments":{"nodes":[{"author":{"login":"revixappdev"}}]}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
   elif [[ $1 == pr && $2 == merge ]]; then
     touch "$state_root/merged"
   fi
@@ -1361,6 +1361,16 @@ gh() {
 merge_pr_now 42 head squash 0 1
 ''')
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('revixappdev', result.stderr)
+        self.assertIn('e2e/tests/offline/android-native-screen.spec.mjs', result.stderr)
+
+    def test_merge_refuses_unavailable_review_thread_status(self):
+        result = self.run_shell(r'''
+gh() { printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":null}}}}'; }
+merge_review_threads_clear 42
+''')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('review thread status is unavailable', result.stderr)
 
     def test_merge_runs_on_configured_agent_host(self):
         result = self.run_shell(r'''
@@ -1637,6 +1647,17 @@ auto_merge_instruction
         self.assertIn(' rebase 1 1 --local-agents', result.stdout)
         self.assertIn('wait for CI', result.stdout)
         self.assertIn('every review bot to finish', result.stdout)
+
+    def test_auto_merge_prompt_covers_other_bots_unresolved_threads(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$auto_merge_file"
+render_delegation_prompt 42 Title thread-1
+auto_merge_instruction 42
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('Ignore non-CodeRabbit feedback', result.stdout)
+        self.assertIn('including non-CodeRabbit bots', result.stdout)
+        self.assertIn('Before invoking the merge guard', result.stdout)
 
     def test_post_delegation_merge_does_not_use_admin_by_default(self):
         result = self.run_shell(r'''

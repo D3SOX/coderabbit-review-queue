@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 merge_review_threads_clear() {
-  local pr=$1 cursor='' page has_next query
+  local pr=$1 cursor='' page has_next query unresolved author path thread_id
   local -a args
   read -r -d '' query <<'GRAPHQL' || true
 query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
   repository(owner:$owner,name:$name) {
     pullRequest(number:$number) {
       reviewThreads(first:100,after:$cursor) {
-        nodes { isResolved }
+        nodes {
+          id
+          isResolved
+          path
+          comments(first:1) { nodes { author { login } } }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -18,13 +23,31 @@ GRAPHQL
   while true; do
     args=(api graphql -f query="$query" -F owner="$owner" -F name="$name" -F number="$pr")
     [[ -z $cursor ]] || args+=(-F cursor="$cursor")
-    page=$(gh "${args[@]}") || return 1
+    if ! page=$(gh "${args[@]}"); then
+      printf 'PR #%s review thread status is unavailable.\n' "$pr" >&2
+      return 1
+    fi
     if ! jq -e '
       (.data.repository.pullRequest.reviewThreads.nodes | type == "array")
       and (.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage | type == "boolean")
-      and (all(.data.repository.pullRequest.reviewThreads.nodes[]; .isResolved == true))
+      and (all(.data.repository.pullRequest.reviewThreads.nodes[];
+        (.isResolved | type) == "boolean"))
     ' <<<"$page" >/dev/null; then
-      printf 'PR #%s has unresolved review threads or their status is unavailable.\n' "$pr" >&2
+      printf 'PR #%s review thread status is unavailable.\n' "$pr" >&2
+      return 1
+    fi
+    unresolved=$(jq -r '
+      .data.repository.pullRequest.reviewThreads.nodes[]
+      | select(.isResolved == false)
+      | [(.comments.nodes[0].author.login // "unknown author"),
+         (.path // "unknown path"), (.id // "unknown thread")]
+      | @tsv
+    ' <<<"$page")
+    if [[ -n $unresolved ]]; then
+      while IFS=$'\t' read -r author path thread_id; do
+        printf 'PR #%s has an unresolved review thread from %s at %s (%s).\n' \
+          "$pr" "$author" "$path" "$thread_id" >&2
+      done <<<"$unresolved"
       return 1
     fi
     has_next=$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$page")

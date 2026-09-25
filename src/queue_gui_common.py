@@ -30,7 +30,7 @@ Threads that triggered this delegation: {threads}
 
 Follow repository instructions and existing task context.
 
-1. Use gh to fetch the live PR and unresolved CodeRabbit threads; the list above is a snapshot. Stop if the PR is closed or merged. Ignore non-CodeRabbit feedback.
+1. Use gh to fetch the live PR and unresolved CodeRabbit threads; the list above is a snapshot. Stop if the PR is closed or merged. Prioritize CodeRabbit feedback; if auto-merge is enabled, also follow the merge instructions for other bots' unresolved threads.
 2. Confirm the PR branch and inspect the working tree. Preserve unrelated work. Verify every finding against current code, including outdated findings, and make the smallest necessary fixes.
 3. Validate changes and recheck feedback before pushing. Bundle related fixes, commit only this task's changes using repository signing conventions, and push to the PR branch. If signing times out, stop and ask the user to say continue.
 4. Reply with the fix and validation or a concrete dismissal reason, using repository attribution rules. Resolve fixes after pushing and dismissals after explaining. Leave uncertain or blocked findings open.
