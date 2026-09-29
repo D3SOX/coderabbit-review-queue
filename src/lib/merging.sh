@@ -58,10 +58,11 @@ GRAPHQL
 }
 
 merge_pr_now() {
-  local pr=$1 expected_head=$2 method=$3 delete_branch=$4 bypass_approval=${5:-0} data
-  data=$(gh pr view "$pr" --repo "$repo" \
-    --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,reviews) || return 1
-  if ! jq -e --arg head "$expected_head" --argjson admin "$bypass_approval" '
+  local pr=$1 expected_head=$2 method=$3 delete_branch=$4 bypass_approval=${5:-0} data attempt
+  for attempt in 1 2 3; do
+    data=$(gh pr view "$pr" --repo "$repo" \
+      --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,reviews) || return 1
+    if jq -e --arg head "$expected_head" --argjson admin "$bypass_approval" '
     .state == "OPEN"
     and .headRefOid == $head
     and .mergeable == "MERGEABLE"
@@ -88,9 +89,40 @@ merge_pr_now() {
       or .state == "DISMISSED"
       or ((.body // "") | test("Nitpick comments \\([1-9][0-9]*\\)"; "i") | not)))
   ' <<<"$data" >/dev/null; then
+      break
+    fi
+    # The PR rollup can lag behind `gh pr checks` just after CI finishes.
+    # Retry only pending states; never bypass a failed check or review guard.
+    if (( attempt < 3 )) && jq -e '
+      .mergeable == "UNKNOWN" or .mergeStateStatus == "UNKNOWN"
+      or ([.statusCheckRollup[]?
+        | {key: [.__typename, (.workflowName // ""), (.name // .context // "")],
+           started: (.startedAt // .createdAt // .updatedAt // .completedAt // ""),
+           check: .}]
+        | sort_by(.started) | group_by(.key) | map(last.check)
+        | any(.[]; if .__typename == "StatusContext" then .state == "PENDING"
+                   else .status != "COMPLETED" end))
+    ' <<<"$data" >/dev/null; then
+      sleep 3
+      continue
+    fi
     printf 'PR #%s is not ready to merge: head, checks, or reviews are pending.\n' "$pr" >&2
+    jq -c --arg head "$expected_head" '
+      {headMatches: (.headRefOid == $head), state, mergeable, mergeStateStatus,
+       pendingChecks: [.statusCheckRollup[]? | select(
+         if .__typename == "StatusContext" then .state == "PENDING"
+         else .status != "COMPLETED" end) | (.name // .context // "unknown")],
+       failedChecks: [.statusCheckRollup[]? | select(
+         if .__typename == "StatusContext" then .state == "FAILURE"
+         else .status == "COMPLETED" and
+           ((.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED", "CANCELLED")) | not) end)
+         | (.name // .context // "unknown")],
+       currentHeadChangeRequests: [.reviews[]? | select(
+         .commit.oid == $head and .state == "CHANGES_REQUESTED")
+         | .author.login]}
+    ' <<<"$data" >&2
     return 1
-  fi
+  done
   merge_review_threads_clear "$pr" || return 1
   local -a args=(pr merge "$pr" --repo "$repo" "--$method")
   [[ $delete_branch == 1 ]] && args+=(--delete-branch)

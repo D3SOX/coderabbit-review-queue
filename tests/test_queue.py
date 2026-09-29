@@ -559,6 +559,38 @@ matching_codex_session target-branch "$head"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('12345678-1234-1234-1234-123456789abc', result.stdout)
 
+    def test_codex_match_uses_recent_task_database_before_rollout_scan(self):
+        result = self.run_shell(r'''
+codex_sessions_root="$state_root/sessions"
+codex_state_db="$state_root/state.sqlite"
+worktree="$state_root/worktree"
+mkdir -p "$codex_sessions_root" "$worktree"
+git -C "$worktree" init -q
+git -C "$worktree" remote add origin git@github.com:example/repo.git
+git -C "$worktree" config user.email test@example.com
+git -C "$worktree" config user.name Test
+git -C "$worktree" config commit.gpgSign false
+touch "$worktree/file"
+git -C "$worktree" add file
+git -C "$worktree" commit -qm initial
+git -C "$worktree" branch -M target-branch
+head=$(git -C "$worktree" rev-parse HEAD)
+session=12345678-1234-1234-1234-123456789abc
+python3 - "$codex_state_db" "$worktree" "$session" <<'PY'
+import sqlite3
+import sys
+db, cwd, session = sys.argv[1:]
+with sqlite3.connect(db) as connection:
+    connection.execute('CREATE TABLE threads (id TEXT, cwd TEXT, git_origin_url TEXT, git_branch TEXT, git_sha TEXT, originator TEXT, updated_at INTEGER)')
+    connection.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (session, cwd, 'git@github.com:example/repo.git', 't3code/original', 'old-head', 't3code_desktop', 1))
+PY
+rg() { return 1; }
+matching_codex_session target-branch "$head"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('12345678-1234-1234-1234-123456789abc', result.stdout)
+
     def test_codex_match_finds_cli_sessions(self):
         for originator in ('codex-tui', 'codex_exec'):
             with self.subTest(originator=originator):
@@ -1283,8 +1315,31 @@ merge_pr_now 42 head squash 0 1
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('pr merge 42 --repo example/repo --squash --admin', result.stdout)
 
+    def test_merge_rechecks_transient_pending_rollup_before_refusing(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    if [[ ! -f $state_root/viewed ]]; then
+      touch "$state_root/viewed"
+      printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","name":"e2e","workflowName":"E2E Tests","status":"IN_PROGRESS","conclusion":null}],"reviews":[{"author":{"login":"coderabbitai"},"state":"CHANGES_REQUESTED","commit":{"oid":"old-head"},"body":"Earlier feedback"}]}'
+    else
+      printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","name":"e2e","workflowName":"E2E Tests","status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[{"author":{"login":"coderabbitai"},"state":"CHANGES_REQUESTED","commit":{"oid":"old-head"},"body":"Earlier feedback"}]}'
+    fi
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  else
+    printf '%s\n' "$*"
+  fi
+}
+sleep() { :; }
+merge_pr_now 42 head squash 0 1
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('pr merge 42 --repo example/repo --squash --admin', result.stdout)
+
     def test_admin_merge_refuses_newer_pending_check_attempt(self):
         result = self.run_shell(r'''
+sleep() { :; }
 gh() {
   if [[ $1 == pr && $2 == view ]]; then
     printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","name":"e2e","workflowName":"E2E Tests","startedAt":"2026-09-25T06:58:14Z","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"e2e","workflowName":"E2E Tests","startedAt":"2026-09-25T07:01:37Z","status":"IN_PROGRESS","conclusion":null}],"reviews":[]}'
@@ -1327,6 +1382,7 @@ merge_pr_now 42 head squash 0 0
 
     def test_merge_refuses_pending_ci(self):
         result = self.run_shell(r'''
+sleep() { :; }
 gh() {
   printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""}]}'
 }
@@ -1336,6 +1392,7 @@ merge_pr_now 42 head rebase 0 1
 
     def test_merge_refuses_pending_review_bot_check_even_with_clean_merge_state(self):
         result = self.run_shell(r'''
+sleep() { :; }
 gh() {
   if [[ $1 == pr && $2 == view ]]; then
     printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","name":"Sourcery review","status":"IN_PROGRESS","conclusion":null}],"reviews":[]}'
@@ -1346,6 +1403,7 @@ gh() {
 merge_pr_now 42 head squash 0 1
 ''')
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"pendingChecks":["Sourcery review"]', result.stderr)
 
     def test_merge_refuses_unresolved_review_thread(self):
         result = self.run_shell(r'''

@@ -16,6 +16,62 @@ matching_codex_session() {
   local -A metadata_head_timestamps=()
   local -A unique_sessions=()
 
+  # The rollout scan below can take longer than the remote status timeout once
+  # many tasks exist. Use the recent task index first, checking each recorded
+  # worktree's *current* branch/head (the stored values may predate a push).
+  if [[ -f $codex_state_db ]]; then
+    local indexed_match
+    indexed_match=$(python3 - "$codex_state_db" "$repo" "$branch_name" "$head_sha" <<'PY'
+import sqlite3
+import subprocess
+import sys
+
+database, repo, branch, head = sys.argv[1:]
+
+def git(cwd, *args):
+    result = subprocess.run(['git', '-C', cwd, *args], capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else ''
+
+try:
+    with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as connection:
+        rows = connection.execute('''
+            SELECT id, cwd, git_branch, git_sha FROM threads
+            WHERE originator IN ('Codex Desktop', 't3code_desktop', 'codex-tui', 'codex_exec')
+              AND (git_origin_url LIKE ? OR git_origin_url LIKE ?)
+            ORDER BY updated_at DESC LIMIT 100
+        ''', (f'%github.com:{repo}.git', f'%github.com/{repo}.git')).fetchall()
+except sqlite3.Error:
+    sys.exit(0)
+
+matches = [[], [], [], []]
+seen = set()
+for session_id, cwd, stored_branch, stored_head in rows:
+    if cwd in seen:
+        continue
+    seen.add(cwd)
+    origin = git(cwd, 'remote', 'get-url', 'origin')
+    if not origin.endswith((f'github.com:{repo}.git', f'github.com/{repo}.git', f'github.com/{repo}')):
+        continue
+    live_branch = git(cwd, 'branch', '--show-current')
+    live_head = git(cwd, 'rev-parse', 'HEAD')
+    for index, matched in enumerate((live_branch == branch, live_head == head,
+                                     stored_branch == branch, stored_head == head)):
+        if matched:
+            matches[index].append((session_id, cwd))
+for group in matches:
+    if len(group) == 1:
+        print(*group[0], sep='\t')
+        break
+    if group:
+        break
+PY
+    )
+    if [[ -n $indexed_match ]]; then
+      printf '%s\n' "$indexed_match"
+      return 0
+    fi
+  fi
+
   while IFS= read -r file; do
     [[ -n ${file:-} ]] || continue
     meta=$(head -n 1 "$file")
