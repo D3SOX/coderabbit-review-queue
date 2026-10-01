@@ -94,7 +94,7 @@ merge_pr_now() {
     # The PR rollup can lag behind `gh pr checks` just after CI finishes.
     # Retry only pending states; never bypass a failed check or review guard.
     if (( attempt < 3 )) && jq -e '
-      .mergeable == "UNKNOWN" or .mergeStateStatus == "UNKNOWN"
+      .mergeable == "UNKNOWN" or (.mergeStateStatus | IN("UNKNOWN", "UNSTABLE"))
       or ([.statusCheckRollup[]?
         | {key: [.__typename, (.workflowName // ""), (.name // .context // "")],
            started: (.startedAt // .createdAt // .updatedAt // .completedAt // ""),
@@ -175,13 +175,16 @@ process_thread_archives_async() {
 }
 
 process_approval_actions_async() {
-  local state=$1
+  local state=${1:-}
   (
     trap - EXIT
     [[ -z ${monitor_lock_fd:-} ]] || exec {monitor_lock_fd}>&-
     [[ -z ${dispatch_lock_fd:-} ]] || exec {dispatch_lock_fd}>&-
     exec {approval_scan_fd}>"$state_root/$repo_key-approval-actions.lock"
     flock -n "$approval_scan_fd" || exit 0
+    # Quota waits have no current snapshot. Fetch inside the locked worker so
+    # slow GitHub/agent lookups cannot block the review timer or overlap scans.
+    [[ -n $state ]] || state=$(monitor_snapshot) || exit 1
     # Capture the task before a merge can delete its branch. Lookup and merge
     # run independently of both the review queue and older archive attempts.
     queue_approved_thread_archives "$state"

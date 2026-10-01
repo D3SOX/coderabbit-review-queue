@@ -1260,6 +1260,67 @@ merge_pr_now 42 head squash 1
         self.assertIn('pr merge 42 --repo example/repo --squash --delete-branch', result.stdout)
         self.assertNotIn('--auto', result.stdout)
 
+    def test_merge_retries_transient_unstable_rollup(self):
+        result = self.run_shell(r'''
+sleep() { touch "$state_root/retried"; }
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    status=UNSTABLE
+    [[ ! -f $state_root/retried ]] || status=CLEAN
+    printf '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"%s","statusCheckRollup":[],"reviews":[]}\n' "$status"
+  elif [[ $1 == api ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}'
+  else
+    printf '%s\n' "$*"
+  fi
+}
+merge_pr_now 42 head squash 1 1
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('pr merge 42', result.stdout)
+
+    def test_quota_wait_rechecks_approval_actions_independently(self):
+        result = self.run_shell(r'''
+clock=100
+date() { if [[ $* == '-u +%s' ]]; then echo "$clock"; else command date "$@"; fi; }
+sleep() { clock=$((clock + $1)); }
+desktop_notify() { :; }
+auto_merge_enabled() { return 0; }
+merge_after_approval_enabled() { return 0; }
+process_approval_actions_async() { echo "approval retry at $clock"; }
+wait_until 230 quiet
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('approval retry at 160', result.stdout)
+        self.assertIn('approval retry at 220', result.stdout)
+
+    def test_merge_never_accepts_persistent_unstable_rollup(self):
+        result = self.run_shell(r'''
+sleep() { :; }
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"UNSTABLE","statusCheckRollup":[],"reviews":[]}'
+  else
+    echo 'unexpected merge' >&2
+    return 99
+  fi
+}
+merge_pr_now 42 head squash 1 1
+''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('unexpected merge', result.stderr)
+
+    def test_quota_approval_worker_fetches_fresh_snapshot(self):
+        result = self.run_shell(r'''
+monitor_snapshot() { echo 'fresh snapshot'; }
+queue_approved_thread_archives() { [[ $1 == 'fresh snapshot' ]] || exit 98; }
+merge_approved_reviews() { [[ $1 == 'fresh snapshot' ]] || exit 99; echo 'fresh merge check'; }
+process_approval_actions_async
+wait
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('fresh merge check', result.stdout)
+
     def test_merge_accepts_clean_pr_with_cancelled_nonblocking_check(self):
         result = self.run_shell(r'''
 gh() {

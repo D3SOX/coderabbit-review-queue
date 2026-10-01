@@ -3,7 +3,7 @@
 wait_until() {
   local expiry=$1
   local notification_mode=${2:-notify}
-  local now delay wake announced=0
+  local now delay wake interval announced=0
 
   now=$(date -u +%s)
   (( expiry > now )) || return 0
@@ -19,7 +19,16 @@ wait_until() {
       'CodeRabbit queue waiting' \
       "Next review window opens $wake."
   fi
-  sleep "$delay"
+  while (( delay > 0 )); do
+    interval=$delay
+    (( interval <= 60 )) || interval=60
+    sleep "$interval"
+    now=$(date -u +%s)
+    delay=$((expiry - now))
+    if (( delay > 0 )) && auto_merge_enabled && merge_after_approval_enabled; then
+      process_approval_actions_async
+    fi
+  done
   # Ding when a real rate-limit wait ends (slot opens), not when a review finishes.
   if (( announced == 1 )) && notify_sound_enabled; then
     play_notification_sound || true
