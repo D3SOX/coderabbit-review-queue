@@ -83,9 +83,18 @@ merge_admin_enabled() {
   [[ -f $merge_admin_file ]] && [[ $(head -n 1 "$merge_admin_file") == 1 ]]
 }
 
+resolve_merge_conflicts_enabled() {
+  if [[ -n $resolve_merge_conflicts_override ]]; then
+    [[ $resolve_merge_conflicts_override == 1 ]]
+    return
+  fi
+  [[ ! -f $resolve_merge_conflicts_file ]] ||
+    [[ $(head -n 1 "$resolve_merge_conflicts_file") != 0 ]]
+}
+
 auto_merge_instruction() {
   auto_merge_enabled || return 0
-  local pr=${1:-PR} method review_mode decision_text='' delete_text=' Keep the branch after merging.' delete_branch=0 admin=0
+  local pr=${1:-PR} method review_mode decision_text='' delete_text=' Keep the branch after merging.' delete_branch=0 admin=0 refusal_text='If it refuses, stop and report the blocker.'
   review_mode=$(merge_after_delegation_mode)
   if [[ $review_mode == 0 ]]; then
     printf '\n\nDo not merge this PR after this pass. Let the queue request another CodeRabbit review; auto-merge requires CodeRabbit approval of the updated head.\n'
@@ -100,8 +109,12 @@ auto_merge_instruction() {
     delete_text=' Delete the branch after merging.'
   fi
   merge_admin_enabled && admin=1
-  printf '\n\n%sAfter the task work is complete, wait for CI and every review bot to finish. Before invoking the merge guard, fetch all unresolved review threads, including non-CodeRabbit bots. Verify each finding; fix valid ones or explain and resolve dismissals according to repository rules. Do not merge while any thread remains unresolved; report its author and path if it cannot be addressed. Use the queue merge guard on this agent host: `~/.local/bin/coderabbit-review-queue --repo %s --merge-now %s "$(gh pr view %s --repo %s --json headRefOid --jq .headRefOid)" %s %s %s --local-agents`. The command uses the selected merge method without GitHub auto-merge and checks the live head, reviews, checks, and threads before merging.%s If it refuses, stop and report the blocker.\n' \
-    "$decision_text" "$repo" "$pr" "$pr" "$repo" "$method" "$delete_branch" "$admin" "$delete_text"
+  if resolve_merge_conflicts_enabled; then
+    refusal_text='If it refuses because of conflicts, follow the conflict-resolution instructions above and retry the guard. For other blockers, stop and report them.'
+    printf '\n\nIf the merge guard reports merge conflicts, fetch the current base, resolve the conflicts while preserving unrelated work, validate and push the resolution, wait for CI and review bots, and run the same guard again with the new live head SHA. Do not bypass the guard or trigger CodeRabbit yourself. For other blockers, stop and report them.\n'
+  fi
+  printf '\n\n%sAfter the task work is complete, wait for CI and every review bot to finish. Before invoking the merge guard, fetch all unresolved review threads, including non-CodeRabbit bots. Verify each finding; fix valid ones or explain and resolve dismissals according to repository rules. Do not merge while any thread remains unresolved; report its author and path if it cannot be addressed. Use the queue merge guard on this agent host: `~/.local/bin/coderabbit-review-queue --repo %s --merge-now %s "$(gh pr view %s --repo %s --json headRefOid --jq .headRefOid)" %s %s %s --local-agents`. The command uses the selected merge method without GitHub auto-merge and checks the live head, reviews, checks, and threads before merging.%s %s\n' \
+    "$decision_text" "$repo" "$pr" "$pr" "$repo" "$method" "$delete_branch" "$admin" "$delete_text" "$refusal_text"
 }
 
 default_delegation_prompt() {
@@ -593,17 +606,19 @@ route_unresolved_review() {
 
   host=$(agent_host 2>/dev/null || true)
   if [[ -n $host ]]; then
-    local merge_enabled=0 merge_delete=0 merge_after_delegation merge_admin=0
+    local merge_enabled=0 merge_delete=0 merge_after_delegation merge_admin=0 resolve_conflicts=0
     auto_merge_enabled && merge_enabled=1
     delete_branch_enabled && merge_delete=1
     merge_after_delegation=$(merge_after_delegation_mode)
     merge_admin_enabled && merge_admin=1
+    resolve_merge_conflicts_enabled && resolve_conflicts=1
     if remote_output=$(remote_agent_command \
       --delegate "$pr" --agent-mode "$mode" --local-agents \
       --delegation-prompt-mode "$(delegation_prompt_mode)" \
       --delegation-prompt-template "$(delegation_prompt_template)" \
       --auto-merge-setting "$merge_enabled" "$(merge_method)" "$merge_delete" \
-      "$merge_after_delegation" "$merge_admin"); then
+      "$merge_after_delegation" "$merge_admin" \
+      --resolve-merge-conflicts-setting "$resolve_conflicts"); then
       printf '%s\n' "$remote_output"
       if [[ $remote_output == *"Routing unresolved CodeRabbit review"* ]]; then
         mark_pr_delegated "$pr"
@@ -702,6 +717,7 @@ resume_codex_session() {
   local session_cwd=$5
   local prompt=$6
   local -n thread_ids=$7
+  local routing_reason=${8:-unresolved CodeRabbit review}
   local session_state resume_status metadata task_title task_model task_effort
   local task_sandbox_policy task_approval_mode
   local originator
@@ -734,8 +750,8 @@ resume_codex_session() {
     return 0
   fi
 
-  printf 'Routing unresolved CodeRabbit review on PR #%s to Codex task %s.\n' \
-    "$pr" "$session_id"
+  printf 'Routing %s on PR #%s to Codex task %s.\n' \
+    "$routing_reason" "$pr" "$session_id"
   metadata=$(codex_thread_metadata "$session_id" 2>/dev/null || true)
   IFS=$'\t' read -r task_title task_model task_effort task_sandbox_policy \
     task_approval_mode <<<"$metadata"
@@ -774,7 +790,7 @@ resume_codex_session() {
     done
     desktop_notify \
       'CodeRabbit review routed' \
-      "PR #$pr — $title"$'\n'"Sent unresolved feedback to its Codex task."
+      "PR #$pr — $title"$'\n'"Sent $routing_reason to its Codex task."
   else
     resume_status=$?
     if (( resume_status == 75 )); then

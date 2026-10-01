@@ -151,6 +151,7 @@ configure_repo() {
   merge_after_delegation_file="$state_root/$repo_key-merge-after-delegation"
   merge_after_approval_file="$state_root/$repo_key-merge-after-approval"
   merge_admin_file="$state_root/$repo_key-merge-admin"
+  resolve_merge_conflicts_file="$state_root/$repo_key-resolve-merge-conflicts"
   archive_after_merge_file="$state_root/$repo_key-archive-after-merge"
   archived_heads_file="$state_root/$repo_key-archived-heads.tsv"
   pending_archives_file="$state_root/$repo_key-pending-archives.tsv"

@@ -11,6 +11,96 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_conflicting_approved_merge_requests_agent_repair(self):
+        result = self.run_shell(r'''
+gh() { printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","statusCheckRollup":[],"reviews":[]}'; }
+agent_host() { :; }
+resolve_merge_conflicts() { echo "repair $*"; }
+route_merge_pr 42 head
+''')
+        self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
+        self.assertIn('repair 42 head squash 1 0', result.stdout)
+
+    def test_remote_conflict_repair_cli_dispatches_selected_merge_options(self):
+        result = self.run_shell(r'''
+resolve_merge_conflicts() { echo "repair $*"; }
+main --repo example/repo --resolve-merge-conflicts 42 head rebase 0 1 --local-agents
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('repair 42 head rebase 0 1', result.stdout)
+
+    def test_conflict_repair_respects_disabled_setting_and_remote_host(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                result = self.run_shell(r'''
+agent_host() { echo desktop; }
+remote_agent_command() {
+  if [[ $1 == --merge-now ]]; then return 42; fi
+  echo "remote repair $*"
+}
+''' + ('' if enabled else 'printf "0\\n" >"$resolve_merge_conflicts_file"\n') + r'''
+route_merge_pr 42 head
+''')
+                self.assertEqual(result.returncode, 42, result.stderr)
+                self.assertEqual('remote repair' in result.stdout, enabled)
+                if enabled:
+                    self.assertIn('--resolve-merge-conflicts 42 head squash 1 0 --local-agents', result.stdout)
+
+    def test_conflict_repair_only_routes_idle_matching_task_once_per_head_and_base(self):
+        result = self.run_shell(r'''
+gh() { printf '%s\n' '{"state":"OPEN","headRefOid":"head","baseRefOid":"base","headRefName":"branch","title":"Title","mergeable":"CONFLICTING"}'; }
+matching_codex_session() { printf 'session\t/worktree\n'; }
+codex_session_state() { echo idle; }
+resume_codex_session() {
+  local -n ids=$7
+  echo "repair prompt: $6"
+  printf '%s\n' "${ids[@]}" >>"$routed_threads_file"
+}
+resolve_merge_conflicts 42 head rebase 0 1
+resolve_merge_conflicts 42 head rebase 0 1
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count('repair prompt:'), 1)
+        self.assertIn('--merge-now 42 "$(gh pr view 42', result.stdout)
+        self.assertIn('rebase 0 1 --local-agents', result.stdout)
+
+    def test_conflict_repair_rejects_changed_head_closed_pr_and_running_task(self):
+        for change in ('"headRefOid":"other"', '"state":"MERGED"', '"mergeable":"MERGEABLE"', 'running'):
+            with self.subTest(change=change):
+                data = {'state': 'OPEN', 'headRefOid': 'head', 'baseRefOid': 'base',
+                        'headRefName': 'branch', 'title': 'Title', 'mergeable': 'CONFLICTING'}
+                if change != 'running':
+                    key, value = change.replace('"', '').split(':')
+                    data[key] = value
+                result = self.run_shell(f'''
+gh() {{ printf '%s\\n' '{json.dumps(data)}'; }}
+matching_codex_session() {{ printf 'session\\t/worktree\\n'; }}
+codex_session_state() {{ echo {'running' if change == 'running' else 'idle'}; }}
+resume_codex_session() {{ echo 'unexpected resume'; }}
+resolve_merge_conflicts 42 head squash 1 1
+''')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('unexpected resume', result.stdout)
+
+    def test_conflict_handoff_does_not_report_pr_merged(self):
+        result = self.run_shell(r'''
+auto_merge_enabled() { return 0; }
+merge_after_approval_enabled() { return 0; }
+approved_merge_rows() { printf '42\thead\tTitle\n'; }
+route_merge_pr() { return 42; }
+desktop_notify() { echo 'unexpected merged notification'; }
+merge_approved_reviews '{}'
+''')
+        self.assertNotIn('unexpected merged notification', result.stdout)
+
+    def test_agent_merge_prompt_respects_conflict_repair_setting(self):
+        for enabled in (False, True):
+            result = self.run_shell(r'''
+auto_merge_enabled() { return 0; }
+''' + ('' if enabled else 'printf "0\\n" >"$resolve_merge_conflicts_file"\n') + '\nauto_merge_instruction 42')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual('resolve the conflicts' in result.stdout, enabled)
+
     def run_shell(self, body, data=None):
         with tempfile.TemporaryDirectory() as state:
             return subprocess.run(

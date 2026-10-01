@@ -62,6 +62,13 @@ merge_pr_now() {
   for attempt in 1 2 3; do
     data=$(gh pr view "$pr" --repo "$repo" \
       --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,reviews) || return 1
+    if jq -e --arg head "$expected_head" '
+      .state == "OPEN" and .headRefOid == $head
+      and (.mergeable == "CONFLICTING" or .mergeStateStatus == "DIRTY")
+    ' <<<"$data" >/dev/null; then
+      printf 'PR #%s has merge conflicts; merge guard refused.\n' "$pr" >&2
+      return 42
+    fi
     if jq -e --arg head "$expected_head" --argjson admin "$bypass_approval" '
     .state == "OPEN"
     and .headRefOid == $head
@@ -131,17 +138,57 @@ merge_pr_now() {
 }
 
 route_merge_pr() {
-  local pr=$1 head_sha=$2 method delete_branch=0 merge_admin=0 host
+  local pr=$1 head_sha=$2 method delete_branch=0 merge_admin=0 host status=0
   method=$(merge_method)
   delete_branch_enabled && delete_branch=1
   merge_admin_enabled && merge_admin=1
   host=$(agent_host 2>/dev/null || true)
   if [[ -n $host ]]; then
     remote_agent_command --merge-now "$pr" "$head_sha" "$method" "$delete_branch" \
-      "$merge_admin" --local-agents
+      "$merge_admin" --local-agents || status=$?
   else
-    merge_pr_now "$pr" "$head_sha" "$method" "$delete_branch" "$merge_admin"
+    merge_pr_now "$pr" "$head_sha" "$method" "$delete_branch" "$merge_admin" || status=$?
   fi
+  if (( status == 42 )) && resolve_merge_conflicts_enabled; then
+    if [[ -n $host ]]; then
+      remote_agent_command --resolve-merge-conflicts "$pr" "$head_sha" "$method" \
+        "$delete_branch" "$merge_admin" --local-agents || true
+    else
+      resolve_merge_conflicts "$pr" "$head_sha" "$method" "$delete_branch" "$merge_admin" || true
+    fi
+  fi
+  return "$status"
+}
+
+resolve_merge_conflicts() {
+  local pr=$1 expected_head=$2 method=$3 delete_branch=$4 admin=$5
+  local data branch title head base match session_id session_cwd token prompt
+  data=$(gh pr view "$pr" --repo "$repo" \
+    --json state,headRefOid,baseRefOid,headRefName,title,mergeable,mergeStateStatus) || return 1
+  jq -e --arg head "$expected_head" '
+    .state == "OPEN" and .headRefOid == $head
+    and (.mergeable == "CONFLICTING" or .mergeStateStatus == "DIRTY")
+  ' <<<"$data" >/dev/null || return 1
+  IFS=$'\t' read -r branch title head base < <(
+    jq -r '[.headRefName,.title,.headRefOid,.baseRefOid] | @tsv' <<<"$data")
+  [[ -n $base && $base != null ]] || return 1
+  token="merge-conflict:$pr:$head:$base"
+  if [[ -f $routed_threads_file ]] && rg -qxF "$token" "$routed_threads_file"; then
+    return 0
+  fi
+  match=$(matching_codex_session "$branch" "$head") || {
+    printf 'No matching Codex task for conflict repair on PR #%s; retrying later.\n' "$pr" >&2
+    return 1
+  }
+  IFS=$'\t' read -r session_id session_cwd <<<"$match"
+  if [[ $(codex_session_state "$session_id") != idle ]]; then
+    printf 'Matching Codex task for PR #%s is not verifiably idle; deferring conflict repair.\n' "$pr"
+    return 1
+  fi
+  prompt="PR #$pr ($title), https://github.com/$repo/pull/$pr, could not merge because it has merge conflicts. Fetch the current PR and base branch. Stop if closed or merged. Resolve the conflicts in the PR branch, preserve unrelated work, validate and push the resolution. Wait for CI and all review bots to finish and resolve all actionable review threads. Do not trigger CodeRabbit yourself. Then rerun the merge guard on this host with the new live head SHA:"
+  prompt+=" \`~/.local/bin/coderabbit-review-queue --repo $repo --merge-now $pr \"\$(gh pr view $pr --repo $repo --json headRefOid --jq .headRefOid)\" $method $delete_branch $admin --local-agents\`. Never bypass the guard; report any remaining blocker."
+  local -a conflict_ids=("$token")
+  resume_codex_session "$pr" "$title" "$head" "$session_id" "$session_cwd" "$prompt" conflict_ids 'merge conflict resolution'
 }
 
 merge_approved_reviews() {

@@ -45,6 +45,7 @@ delete_branch_file=''
 merge_after_delegation_file=''
 merge_after_approval_file=''
 merge_admin_file=''
+resolve_merge_conflicts_file=''
 archive_after_merge_file=''
 archived_heads_file=''
 pending_archives_file=''
@@ -77,6 +78,7 @@ merge_method_override=''
 delete_branch_override=''
 merge_after_delegation_override=''
 merge_admin_override=''
+resolve_merge_conflicts_override=''
 empty_announced=0
 declare -A attempted_route_threads=()
 declare -A completed_review_heads=()
@@ -216,20 +218,25 @@ main() {
         force_local_agents=1
         shift
         ;;
-      --merge-now)
+      --merge-now|--resolve-merge-conflicts)
         (( $# >= 6 )) && [[ $2 =~ ^[0-9]+$ ]] \
           && [[ $4 =~ ^(merge|squash|rebase)$ ]] && [[ $5 =~ ^[01]$ ]] \
           && [[ $6 =~ ^[01]$ ]] || {
           printf '%s\n' '--merge-now requires PR, head SHA, method, delete flag, and admin flag.' >&2
           return 2
         }
-        action='merge-now'
+        action=${1#--}
         merge_pr=$2
         merge_head=$3
         merge_method_arg=$4
         merge_delete=$5
         merge_admin_arg=$6
         shift 6
+        ;;
+      --resolve-merge-conflicts-setting)
+        (( $# >= 2 )) && [[ $2 =~ ^[01]$ ]] || return 2
+        resolve_merge_conflicts_override=$2
+        shift 2
         ;;
       --delegation-prompt-mode)
         (( $# >= 2 )) && [[ $2 =~ ^(default|short|babysit|custom)$ ]] || {
@@ -315,6 +322,10 @@ main() {
   fi
   if [[ $action == merge-now ]]; then
     merge_pr_now "$merge_pr" "$merge_head" "$merge_method_arg" "$merge_delete" "$merge_admin_arg"
+    return $?
+  fi
+  if [[ $action == resolve-merge-conflicts ]]; then
+    resolve_merge_conflicts "$merge_pr" "$merge_head" "$merge_method_arg" "$merge_delete" "$merge_admin_arg"
     return $?
   fi
 

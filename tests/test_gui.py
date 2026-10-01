@@ -74,7 +74,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             for name in (
                 "auto_merge_file", "merge_method_file", "delete_branch_file",
                 "merge_after_delegation_file", "merge_after_approval_file",
-                "merge_admin_file", "archive_after_merge_file",
+                "merge_admin_file", "archive_after_merge_file", "resolve_merge_conflicts_file",
             ):
                 setattr(window, name, lambda repo, name=name: Path(directory) / name)
             window.post_delegation_review_mode = lambda repo: (
@@ -82,6 +82,19 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             )
 
             def choose_agent(dialog):
+                conflict_box = next(
+                    box for box in dialog.findChildren(queue_gui.QCheckBox)
+                    if 'resolve merge conflicts' in box.text()
+                )
+                self.assertTrue(conflict_box.isChecked())
+                self.assertFalse(conflict_box.isEnabled())
+                enabled_box = next(
+                    box for box in dialog.findChildren(queue_gui.QCheckBox)
+                    if box.text() == 'Automatically merge pull requests'
+                )
+                enabled_box.setChecked(True)
+                self.assertTrue(conflict_box.isEnabled())
+                conflict_box.setChecked(False)
                 review_select = next(
                     combo for combo in dialog.findChildren(queue_gui.QComboBox)
                     if combo.findData("agent") >= 0
@@ -96,6 +109,9 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             self.assertEqual(
                 (Path(directory) / "merge_after_delegation_file").read_text(),
                 "agent\n",
+            )
+            self.assertEqual(
+                (Path(directory) / "resolve_merge_conflicts_file").read_text(), "0\n"
             )
             app.processEvents()
 

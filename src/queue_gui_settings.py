@@ -53,6 +53,9 @@ class SettingsMixin:
     def merge_admin_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-merge-admin"
 
+    def resolve_merge_conflicts_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-resolve-merge-conflicts"
+
     def archive_after_merge_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-archive-after-merge"
 
@@ -86,6 +89,10 @@ class SettingsMixin:
         except OSError:
             merge_admin = False
         try:
+            resolve_conflicts = self.resolve_merge_conflicts_file(repo).read_text().strip() != "0"
+        except OSError:
+            resolve_conflicts = True
+        try:
             archive_after_merge = (
                 self.archive_after_merge_file(repo).read_text().strip() == "1"
             )
@@ -118,6 +125,9 @@ class SettingsMixin:
         approval_box.setChecked(merge_after_approval)
         admin_box = QCheckBox("Use --admin to bypass branch protection")
         admin_box.setChecked(merge_admin)
+        conflicts_box = QCheckBox("Ask the agent to resolve merge conflicts and retry the merge guard")
+        conflicts_box.setChecked(resolve_conflicts)
+        conflicts_box.setToolTip("Resumes the matching idle Codex task on the selected agent host. CI and review guards still apply.")
         explanation = QLabel(
             "The agent-decision option lets the agent request another review by "
             "leaving the PR open for the queue, or merge without one when it judges "
@@ -139,6 +149,7 @@ class SettingsMixin:
             review_select.setEnabled(active)
             approval_box.setEnabled(active)
             admin_box.setEnabled(active)
+            conflicts_box.setEnabled(active)
 
         enabled_box.toggled.connect(lambda _checked: update_controls())
         update_controls()
@@ -157,6 +168,7 @@ class SettingsMixin:
         layout.addWidget(method_select)
         layout.addWidget(delete_box)
         layout.addWidget(admin_box)
+        layout.addWidget(conflicts_box)
         layout.addWidget(explanation)
         layout.addWidget(buttons)
         if dialog.exec() != QDialog.Accepted:
@@ -178,6 +190,10 @@ class SettingsMixin:
             (
                 self.merge_admin_file(repo),
                 "1\n" if admin_box.isChecked() else "0\n",
+            ),
+            (
+                self.resolve_merge_conflicts_file(repo),
+                "1\n" if conflicts_box.isChecked() else "0\n",
             ),
             (
                 self.archive_after_merge_file(repo),
