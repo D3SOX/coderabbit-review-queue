@@ -161,14 +161,42 @@ archive_after_merge_enabled() {
     [[ $(head -n 1 "$archive_after_merge_file") == 1 ]]
 }
 
+process_thread_archives_async() {
+  local state=$1
+  archive_after_merge_enabled || return 0
+  (
+    trap - EXIT
+    [[ -z ${monitor_lock_fd:-} ]] || exec {monitor_lock_fd}>&-
+    [[ -z ${dispatch_lock_fd:-} ]] || exec {dispatch_lock_fd}>&-
+    exec {archive_scan_fd}>"$pending_archives_file.scan.lock"
+    flock -n "$archive_scan_fd" || exit 0
+    process_pending_thread_archives "$state"
+  ) &
+}
+
+process_approval_actions_async() {
+  local state=$1
+  (
+    trap - EXIT
+    [[ -z ${monitor_lock_fd:-} ]] || exec {monitor_lock_fd}>&-
+    [[ -z ${dispatch_lock_fd:-} ]] || exec {dispatch_lock_fd}>&-
+    exec {approval_scan_fd}>"$state_root/$repo_key-approval-actions.lock"
+    flock -n "$approval_scan_fd" || exit 0
+    # Capture the task before a merge can delete its branch. Lookup and merge
+    # run independently of both the review queue and older archive attempts.
+    queue_approved_thread_archives "$state"
+    merge_approved_reviews "$state"
+  ) &
+}
+
 route_archive_codex_thread() {
   local branch_name=$1 head_sha=$2 session_id=${3:-} host
   host=$(agent_host 2>/dev/null || true)
   if [[ -n $host ]]; then
     if [[ -n $session_id ]]; then
-      remote_agent_command --archive-session "$session_id" --local-agents
+      remote_command_timeout=60 remote_agent_command --archive-session "$session_id" --local-agents
     else
-      remote_agent_command --archive-task "$branch_name" "$head_sha" --local-agents
+      remote_command_timeout=60 remote_agent_command --archive-task "$branch_name" "$head_sha" --local-agents
     fi
   else
     if [[ -n $session_id ]]; then
@@ -239,11 +267,14 @@ queue_approved_thread_archives() {
 
 process_pending_thread_archives() {
   local state=$1 pr branch_name head_sha title session_id marker data pr_state current_head
-  local temporary archive_lock_fd
+  local temporary archive_lock_fd scanned reconciled
   archive_after_merge_enabled || return 0
   [[ -s $pending_archives_file ]] || return 0
   exec {archive_lock_fd}>"$pending_archives_file.lock"
   flock "$archive_lock_fd"
+  scanned=$(mktemp "$pending_archives_file.XXXXXX")
+  cp "$pending_archives_file" "$scanned"
+  exec {archive_lock_fd}>&-
   temporary=$(mktemp "$pending_archives_file.XXXXXX")
   while IFS=$'\t' read -r pr branch_name head_sha title session_id; do
     [[ -n ${pr:-} ]] || continue
@@ -281,7 +312,18 @@ process_pending_thread_archives() {
       printf '%s\t%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" "$session_id" \
         >>"$temporary"
     fi
-  done <"$pending_archives_file"
-  mv "$temporary" "$pending_archives_file"
+  done <"$scanned"
+  # Remote lookup must not hold the file lock: delegation can enqueue another
+  # archive while this scan runs. Reconcile with the latest file under lock.
+  exec {archive_lock_fd}>"$pending_archives_file.lock"
+  flock "$archive_lock_fd"
+  reconciled=$(mktemp "$pending_archives_file.XXXXXX")
+  awk -F '\t' '
+    FILENAME == ARGV[1] { scanned[$1 FS $3]=1; next }
+    FILENAME == ARGV[2] { retained[$1 FS $3]=1; next }
+    !(($1 FS $3) in scanned) || (($1 FS $3) in retained)
+  ' "$scanned" "$temporary" "$pending_archives_file" >"$reconciled"
+  mv "$reconciled" "$pending_archives_file"
   exec {archive_lock_fd}>&-
+  rm -f "$scanned" "$temporary"
 }

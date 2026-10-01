@@ -385,7 +385,8 @@ database, repo, branch, head = sys.argv[1:]
 with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
     rows = connection.execute(
         """SELECT id, git_branch, git_sha FROM threads
-        WHERE originator IN ('Codex Desktop', 't3code_desktop', 'codex-tui', 'codex_exec')
+        WHERE originator IN ('Codex Desktop', 't3code_desktop', 'T3 Code', 'codex-tui', 'codex_exec')
+          AND (thread_source IS NULL OR thread_source != 'subagent')
           AND (git_origin_url LIKE ? OR git_origin_url LIKE ?)
           AND (git_branch = ? OR git_sha = ?)""",
         (f"%github.com:{repo}.git", f"%github.com/{repo}.git", branch, head),
@@ -410,7 +411,7 @@ PY
     [[ -f $file ]] || continue
     session_id=$(head -n 1 "$file" 2>/dev/null | jq -r --arg repo "$repo" '
       select(.type == "session_meta"
-        and (.payload.originator | IN("Codex Desktop", "t3code_desktop", "codex-tui", "codex_exec"))
+        and (.payload.originator | IN("Codex Desktop", "t3code_desktop", "T3 Code", "codex-tui", "codex_exec"))
         and (.payload.thread_source // "") != "subagent"
         and ((.payload.git.repository_url // "")
           | endswith("github.com:" + $repo + ".git")
@@ -755,7 +756,7 @@ resume_codex_session() {
   if (
     cd "$session_cwd"
     [[ $(codex_session_state "$session_id") == idle ]] || exit 75
-    if [[ $originator == 't3code_desktop' ]]; then
+    if [[ $originator == 't3code_desktop' || $originator == 'T3 Code' ]]; then
       resume_codex_via_t3 "$session_id" "$prompt"
       exit $?
     fi

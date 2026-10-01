@@ -154,6 +154,10 @@ agent_task_progress() {
     --task-progress "$branch_name" "$head_sha" 2>/dev/null); then
     printf '%s\n' "$output"
   else
-    printf 'Remote agent host unavailable (%s)\n' "$host"
+    case $? in
+      124) printf 'Remote agent status timed out (%s)\n' "$host" ;;
+      255) printf 'Remote agent host unavailable (%s)\n' "$host" ;;
+      *) printf 'Remote agent status query failed (%s)\n' "$host" ;;
+    esac
   fi
 }

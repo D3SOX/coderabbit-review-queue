@@ -365,9 +365,8 @@ main() {
   # it once before a cached quota window can put the monitor to sleep.
   state=$(monitor_snapshot)
   route_all_unresolved_async "$state"
-  queue_approved_thread_archives "$state"
-  merge_approved_reviews "$state"
-  process_pending_thread_archives "$state"
+  process_approval_actions_async "$state"
+  process_thread_archives_async "$state"
 
   quota_expiry=$(shared_expiry)
   now=$(date -u +%s)
@@ -380,9 +379,8 @@ while true; do
   agent_review_decision_cache=()
   state=$(monitor_snapshot)
   route_all_unresolved_async "$state"
-  queue_approved_thread_archives "$state"
-  merge_approved_reviews "$state"
-  process_pending_thread_archives "$state"
+  process_approval_actions_async "$state"
+  process_thread_archives_async "$state"
   load_stale_rows "$state" 1
 
   if (( ${#stale[@]} == 0 )); then
@@ -574,9 +572,8 @@ while true; do
   release_dispatch
 
   state=$(monitor_snapshot)
-  queue_approved_thread_archives "$state"
-  merge_approved_reviews "$state"
-  process_pending_thread_archives "$state"
+  process_approval_actions_async "$state"
+  process_thread_archives_async "$state"
   route_all_unresolved_async "$state"
   load_stale_rows "$state" 1
   if (( ${#stale[@]} == 0 )); then

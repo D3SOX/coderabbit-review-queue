@@ -18,7 +18,7 @@ class QueueTests(unittest.TestCase):
                  'test', str(SCRIPT)],
                 input=json.dumps(data) if data is not None else '',
                 text=True, capture_output=True, timeout=5,
-                env={**os.environ, 'XDG_STATE_HOME': state},
+                env={**os.environ, 'XDG_STATE_HOME': state, 'CODEX_HOME': f'{state}/codex'},
             )
 
     def test_dispatch_and_quota_are_isolated_between_repositories_of_same_owner(self):
@@ -359,12 +359,7 @@ monitor_snapshot() {
     printf 'initial snapshot\n'
   fi
 }
-route_all_unresolved() {
-  if [[ -f $state_root/completed && ! -f $state_root/merged ]]; then
-    echo 'Processed unresolved reviews before approved merge' >&2
-    exit 98
-  fi
-}
+route_all_unresolved() { :; }
 load_stale_rows() {
   if [[ -f $state_root/completed ]]; then
     stale=()
@@ -382,7 +377,7 @@ merge_approved_reviews() {
 latest_expiry() { echo 0; }
 shared_expiry() { echo 0; }
 remember_shared_expiry() { :; }
-wait_until() { :; }
+wait_until() { wait; }
 query_quota() { quota_remaining=1; }
 recent_review_request_expiry() { echo 0; }
 desktop_notify() { :; }
@@ -390,6 +385,10 @@ gh() { :; }
 wait_for_acceptance() { :; }
 wait_for_review_completion() { touch "$state_root/completed"; }
 route_unresolved_review() { :; }
+wait_on_empty_queue() {
+  timeout 1 bash -c 'until [[ -f $1 ]]; do sleep 0.01; done' test "$state_root/merged"
+  exit $?
+}
 main --repo example/repo
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -404,7 +403,7 @@ shared_expiry() { echo 9999999999; }
 monitor_snapshot() { printf 'approved snapshot\n'; }
 route_all_unresolved_async() { :; }
 wait_until() {
-  [[ -f $state_root/merged ]] || exit 99
+  timeout 1 bash -c 'until [[ -f $1 ]]; do sleep 0.01; done' test "$state_root/merged"
   exit 0
 }
 merge_approved_reviews() {
@@ -417,19 +416,12 @@ main --repo example/repo
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Merged before quota wait', result.stdout)
 
-    def test_monitor_records_archive_target_before_merging(self):
+    def test_approval_actions_record_archive_target_before_merging(self):
         result = self.run_shell(r'''
-claim_monitor() { :; }
-cleanup_monitor() { :; }
-write_monitor_state() { :; }
-shared_expiry() { echo 9999999999; }
-monitor_snapshot() { printf '{}\n'; }
-route_all_unresolved_async() { :; }
 queue_approved_thread_archives() { touch "$state_root/archive-target-recorded"; }
 merge_approved_reviews() { [[ -f $state_root/archive-target-recorded ]] || exit 99; }
-process_pending_thread_archives() { :; }
-wait_until() { exit 0; }
-main --repo example/repo
+process_approval_actions_async '{}'
+wait $!
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -477,6 +469,21 @@ codex_session_state "$session"
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, 'running\n')
+
+    def test_remote_progress_distinguishes_timeout_from_connection_failure(self):
+        result = self.run_shell(r'''
+printf 'desktop\n' >"$agent_host_file"
+remote_agent_command() { return "$remote_status"; }
+for remote_status in 124 255 1; do
+  agent_task_progress feature head
+done
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            'Remote agent status timed out (desktop)',
+            'Remote agent host unavailable (desktop)',
+            'Remote agent status query failed (desktop)',
+        ])
 
     def test_codex_state_uses_current_continuation_rollout(self):
         result = self.run_shell(r'''
@@ -581,9 +588,11 @@ import sqlite3
 import sys
 db, cwd, session = sys.argv[1:]
 with sqlite3.connect(db) as connection:
-    connection.execute('CREATE TABLE threads (id TEXT, cwd TEXT, git_origin_url TEXT, git_branch TEXT, git_sha TEXT, originator TEXT, updated_at INTEGER)')
-    connection.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?)',
-        (session, cwd, 'git@github.com:example/repo.git', 't3code/original', 'old-head', 't3code_desktop', 1))
+    connection.execute('CREATE TABLE threads (id TEXT, cwd TEXT, git_origin_url TEXT, git_branch TEXT, git_sha TEXT, originator TEXT, updated_at INTEGER, thread_source TEXT)')
+    connection.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        (session, cwd, 'git@github.com:example/repo.git', 't3code/original', 'old-head', 'T3 Code', 1, 'user'))
+    connection.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        ('subagent', cwd, 'git@github.com:example/repo.git', 'target-branch', 'old-head', 'T3 Code', 2, 'subagent'))
 PY
 rg() { return 1; }
 matching_codex_session target-branch "$head"
@@ -784,7 +793,7 @@ git -C "$worktree" init -q
 session=12345678-1234-1234-1234-123456789abc
 codex_session_state() { printf 'idle\n'; }
 codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
-codex_session_originator() { printf 't3code_desktop\n'; }
+codex_session_originator() { printf 'T3 Code\n'; }
 resume_codex_via_t3() { printf 't3 resume <%s> <%s>\n' "$1" "$2"; }
 resume_codex_via_exec() { printf 'unexpected detached codex\n'; return 1; }
 desktop_notify() { :; }
@@ -1448,11 +1457,12 @@ route_merge_pr 42 head
     def test_archive_runs_on_configured_agent_host(self):
         result = self.run_shell(r'''
 printf '%s\n' desktop >"$agent_host_file"
-ssh() { printf '%s\n' "$*"; }
+remote_agent_command() { printf '%s %s %s\n' "$(agent_host)" "$remote_command_timeout" "$*"; }
 route_archive_codex_thread feature head
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('desktop', result.stdout)
+        self.assertIn('60', result.stdout)
         self.assertIn('--archive-task feature head --local-agents', result.stdout)
 
     def test_archive_waits_for_matching_codex_task_to_be_idle(self):
@@ -1500,8 +1510,8 @@ codex_state_db="$state_root/state.sqlite"
 python3 - "$codex_state_db" <<'PY'
 import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as db:
-    db.execute('CREATE TABLE threads (id TEXT, originator TEXT, git_origin_url TEXT, git_branch TEXT, git_sha TEXT)')
-    db.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?)',
+    db.execute('CREATE TABLE threads (id TEXT, originator TEXT, git_origin_url TEXT, git_branch TEXT, git_sha TEXT, thread_source TEXT)')
+    db.execute('INSERT INTO threads (id, originator, git_origin_url, git_branch, git_sha) VALUES (?, ?, ?, ?, ?)',
                ('session-1', 'Codex Desktop', 'git@github.com:example/repo.git', 'feature', 'old-head'))
 PY
 matching_codex_session() { return 1; }
@@ -1519,8 +1529,8 @@ mkdir -p "$codex_sessions_root" "$codex_home/archived_sessions"
 python3 - "$codex_state_db" <<'PY'
 import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as db:
-    db.execute('CREATE TABLE threads (id TEXT, originator TEXT, git_origin_url TEXT, git_branch TEXT, git_sha TEXT)')
-    db.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?)',
+    db.execute('CREATE TABLE threads (id TEXT, originator TEXT, git_origin_url TEXT, git_branch TEXT, git_sha TEXT, thread_source TEXT)')
+    db.execute('INSERT INTO threads (id, originator, git_origin_url, git_branch, git_sha) VALUES (?, ?, ?, ?, ?)',
                ('session-1', 'Codex Desktop', 'git@github.com:example/repo.git', 'later-branch', 'later-head'))
 PY
 printf '%s\n' \
@@ -1547,6 +1557,27 @@ cat "$pending_archives_file"
         self.assertIn('42\tfeature\thead\tTitle', result.stdout)
         self.assertIn('session-1', result.stdout)
 
+    def test_monitor_reaches_queue_while_archive_host_is_slow(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$archive_after_merge_file"
+claim_monitor() { :; }
+cleanup_monitor() { :; }
+monitor_snapshot() { printf '{}\n'; }
+route_all_unresolved_async() { :; }
+merge_approved_reviews() { :; }
+shared_expiry() { echo 0; }
+archive_gate() {
+  timeout 1 bash -c 'until [[ -f $1 ]]; do sleep 0.01; done' test "$state_root/queue-reached"
+}
+queue_approved_thread_archives() { :; }
+process_pending_thread_archives() { archive_gate; printf 'Archive completed after queue progressed\n'; }
+load_stale_rows() { touch "$state_root/queue-reached"; stale=(); }
+wait_on_empty_queue() { return 1; }
+main --repo example/repo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Archive completed after queue progressed', result.stdout)
+
     def test_merged_pr_uses_saved_session_after_branch_disappears(self):
         result = self.run_shell(r'''
 printf '1\n' >"$archive_after_merge_file"
@@ -1558,6 +1589,43 @@ cat "$state_root/target"
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines()[-1], 'session-1')
+
+    def test_archive_scan_preserves_entries_queued_during_remote_lookup(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$archive_after_merge_file"
+printf '42\tfeature\thead\tTitle\tsession-1\n' >"$pending_archives_file"
+gh() { printf '{"state":"MERGED","headRefOid":"head"}\n'; }
+route_archive_codex_thread() {
+  queue_pending_archive 43 next-feature next-head 'Next PR' session-2
+}
+process_pending_thread_archives '{}'
+cat "$pending_archives_file"
+cat "$archived_heads_file"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('43\tnext-feature\tnext-head\tNext PR\tsession-2', result.stdout)
+        self.assertNotIn('42\tfeature\thead', result.stdout)
+        self.assertIn('42\thead', result.stdout)
+
+    def test_archive_background_workers_do_not_overlap(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$archive_after_merge_file"
+process_pending_thread_archives() {
+  touch "$state_root/archive-started"
+  timeout 1 bash -c 'until [[ -f $1 ]]; do sleep 0.01; done' test "$state_root/archive-release"
+  printf 'called\n' >>"$state_root/archive-calls"
+}
+process_thread_archives_async '{}'
+timeout 1 bash -c 'until [[ -f $1 ]]; do sleep 0.01; done' test "$state_root/archive-started"
+process_thread_archives_async '{}'
+second_worker=$!
+wait "$second_worker"
+touch "$state_root/archive-release"
+wait
+cat "$state_root/archive-calls"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), 'called')
 
     def test_merged_head_is_archived_only_once(self):
         result = self.run_shell(r'''
@@ -1635,6 +1703,10 @@ task_state='Remote agent host unavailable (desktop)'
 agent_review_decision_cache=()
 load_stale_rows "$state" 1
 printf 'unavailable=%s deferred=%s\n' "${#stale[@]}" "$deferred_review_count"
+task_state='Remote agent status timed out (desktop)'
+agent_review_decision_cache=()
+load_stale_rows "$state" 1
+printf 'timeout=%s deferred=%s\n' "${#stale[@]}" "$deferred_review_count"
 task_state='Codex Idle'
 agent_review_decision_cache=()
 load_stale_rows "$state" 1
@@ -1643,6 +1715,7 @@ printf 'idle=%s deferred=%s\n' "${#stale[@]}" "$deferred_review_count"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('running=0 deferred=1', result.stdout)
         self.assertIn('unavailable=0 deferred=1', result.stdout)
+        self.assertIn('timeout=0 deferred=1', result.stdout)
         self.assertIn('idle=1 deferred=0', result.stdout)
 
     def test_required_follow_up_review_waits_for_running_agent(self):

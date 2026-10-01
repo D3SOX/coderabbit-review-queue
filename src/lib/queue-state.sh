@@ -465,7 +465,8 @@ agent_review_decision_pending() {
     agent_review_decision_cache[$key]=$(agent_task_progress "$branch_name" "$head_sha")
   fi
   progress=${agent_review_decision_cache[$key]}
-  [[ $progress == *Running* || $progress == 'Remote agent host unavailable'* ]]
+  [[ $progress == *Running* || $progress == 'Remote agent host unavailable'* ||
+    $progress == 'Remote agent status '* ]]
 }
 
 mark_head_verified() {

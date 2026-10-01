@@ -36,7 +36,8 @@ try:
     with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as connection:
         rows = connection.execute('''
             SELECT id, cwd, git_branch, git_sha FROM threads
-            WHERE originator IN ('Codex Desktop', 't3code_desktop', 'codex-tui', 'codex_exec')
+            WHERE originator IN ('Codex Desktop', 't3code_desktop', 'T3 Code', 'codex-tui', 'codex_exec')
+              AND (thread_source IS NULL OR thread_source != 'subagent')
               AND (git_origin_url LIKE ? OR git_origin_url LIKE ?)
             ORDER BY updated_at DESC LIMIT 100
         ''', (f'%github.com:{repo}.git', f'%github.com/{repo}.git')).fetchall()
@@ -81,7 +82,7 @@ PY
         (.payload.git.repository_url // "") as $url
         | select(
           .type == "session_meta"
-          and (.payload.originator | IN("Codex Desktop", "t3code_desktop", "codex-tui", "codex_exec"))
+          and (.payload.originator | IN("Codex Desktop", "t3code_desktop", "T3 Code", "codex-tui", "codex_exec"))
           and (.payload.thread_source // "") != "subagent"
           and (
             ($url | endswith("github.com:" + $repo + ".git"))
