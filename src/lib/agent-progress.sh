@@ -17,7 +17,7 @@ codex_task_progress() {
   local branch_name=$1
   local head_sha=$2
   local match session_id session_cwd session_file state message metadata task_title
-  local task_model task_effort
+  local task_model task_effort t3_title
 
   if ! match=$(matching_codex_session "$branch_name" "$head_sha"); then
     printf 'No matching task\n'
@@ -62,6 +62,8 @@ codex_task_progress() {
   )
   metadata=$(codex_thread_metadata "$session_id" 2>/dev/null || true)
   IFS=$'\t' read -r task_title task_model task_effort <<<"$metadata"
+  t3_title=$(python3 "$script_dir/t3-delegate.py" --title "$session_id" 2>/dev/null || true)
+  [[ -z $t3_title ]] || task_title=$t3_title
   [[ -n $task_title ]] || task_title='—'
   printf '%s\t%s\t%s\n' "$state" "$task_title" "$message"
 }

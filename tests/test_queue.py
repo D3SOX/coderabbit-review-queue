@@ -752,6 +752,30 @@ codex_task_progress branch head
             'Running\tReview task\tlatest progress\n',
         )
 
+    def test_codex_progress_uses_t3_display_title(self):
+        result = self.run_shell(r'''
+export T3CODE_HOME="$state_root/t3"
+mkdir -p "$T3CODE_HOME/userdata"
+python3 - "$T3CODE_HOME/userdata/state.sqlite" <<'PY'
+import sqlite3
+import sys
+with sqlite3.connect(sys.argv[1]) as c:
+    c.execute('CREATE TABLE projection_threads (thread_id TEXT, title TEXT, deleted_at TEXT)')
+    c.execute('CREATE TABLE provider_session_runtime (thread_id TEXT, provider_name TEXT, resume_cursor_json TEXT)')
+    c.execute("INSERT INTO projection_threads VALUES ('t3-thread', 'Smooth Android PiP Resize and Restore', NULL)")
+    c.execute('INSERT INTO provider_session_runtime VALUES (?, ?, ?)', ('t3-thread', 'codex', '{"threadId":"session"}'))
+PY
+file="$state_root/rollout.jsonl"
+printf '%s\n' '{"type":"event_msg","payload":{"type":"agent_message","message":"working"}}' >"$file"
+matching_codex_session() { printf 'session\t/worktree\n'; }
+codex_session_file() { echo "$file"; }
+codex_session_state() { echo running; }
+codex_thread_metadata() { printf '[File: recording.mp4]\tmodel\thigh\n'; }
+codex_task_progress branch head
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, 'Running\tSmooth Android PiP Resize and Restore\tworking\n')
+
     def test_codex_resume_preserves_task_model_and_reasoning(self):
         result = self.run_shell(r'''
 worktree="$state_root/worktree"

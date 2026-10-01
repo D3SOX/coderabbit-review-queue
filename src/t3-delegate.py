@@ -18,6 +18,24 @@ def t3_home():
     return Path(os.environ.get('T3CODE_HOME', Path.home() / '.t3')) / 'userdata'
 
 
+def thread_title(session_id):
+    database = t3_home() / 'state.sqlite'
+    if not database.is_file():
+        return ''
+    with sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=1) as connection:
+        rows = connection.execute('''
+            SELECT t.title
+            FROM provider_session_runtime r
+            JOIN projection_threads t ON t.thread_id = r.thread_id
+            WHERE r.provider_name = 'codex'
+              AND json_extract(r.resume_cursor_json, '$.threadId') = ?
+              AND t.deleted_at IS NULL
+        ''', (session_id,)).fetchall()
+    if len(rows) != 1:
+        return ''
+    return ' '.join((rows[0][0] or '').split())
+
+
 def t3_cli():
     configured = os.environ.get('T3CODE_CLI')
     if configured:
@@ -104,7 +122,10 @@ def send_turn(session_id, prompt):
 
 if __name__ == '__main__':
     try:
-        send_turn(sys.argv[1], sys.stdin.read())
-    except (IndexError, OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        if sys.argv[1] == '--title':
+            print(thread_title(sys.argv[2]))
+        else:
+            send_turn(sys.argv[1], sys.stdin.read())
+    except (IndexError, OSError, ValueError, RuntimeError, sqlite3.Error, subprocess.SubprocessError) as error:
         print(f'T3 delegation failed: {error}', file=sys.stderr)
         sys.exit(1)
