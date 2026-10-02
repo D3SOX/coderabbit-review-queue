@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, QLocale, QProcess, Qt
+from PySide6.QtCore import QDate, QDateTime, QItemSelectionModel, QLocale, QProcess, Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMessageBox, QTreeWidget, QTreeWidgetItem
 
@@ -403,6 +403,7 @@ class StatusMixin:
     def populate_queue(self, status: str) -> None:
         scroll_position = self.queue.verticalScrollBar().value()
         current_item = self.queue.currentItem()
+        selected_numbers = {item.data(0, Qt.UserRole) for item in self.queue.selectedItems()}
         selected_number = (
             current_item.data(0, Qt.UserRole) if current_item is not None else None
         )
@@ -481,9 +482,14 @@ class StatusMixin:
             item.setData(0, Qt.UserRole + 1, review_status)
             self.queue.addTopLevelItem(item)
             if number == selected_number:
-                self.queue.setCurrentItem(item)
+                self.queue.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
+            item.setSelected(number in selected_numbers)
         if display_rows and self.queue.currentItem() is None:
-            self.queue.setCurrentItem(self.queue.topLevelItem(0))
+            selected_items = self.queue.selectedItems()
+            if selected_items:
+                self.queue.setCurrentItem(selected_items[0], 0, QItemSelectionModel.NoUpdate)
+            else:
+                self.queue.setCurrentItem(self.queue.topLevelItem(0))
         self.apply_monitor_activity_to_queue()
         self.queue.verticalScrollBar().setValue(scroll_position)
         self.update_queue_buttons()
@@ -521,6 +527,7 @@ class StatusMixin:
                     self.tasks.takeTopLevelItem(index)
                     self.update_delegate_button()
         selected = self.queue.currentItem()
+        selected_numbers = {item.data(0, Qt.UserRole) for item in self.queue.selectedItems()}
         selected_number = selected.data(0, Qt.UserRole) if selected else None
         base_status = "Queued"
         for index in range(self.queue.topLevelItemCount()):
@@ -539,20 +546,28 @@ class StatusMixin:
         live_item.setData(0, Qt.UserRole + 2, base_status)
         self.queue.insertTopLevelItem(0, live_item)
         if selected_number == number:
-            self.queue.setCurrentItem(live_item)
+            self.queue.setCurrentItem(live_item, 0, QItemSelectionModel.NoUpdate)
+        live_item.setSelected(number in selected_numbers)
 
     def update_queue_buttons(self) -> None:
-        item = self.queue.currentItem()
-        row = self.selected_row()
-        movable = (
-            item is not None
-            and item.data(0, Qt.UserRole + 1) == "Queued"
-            and self.queue.topLevelItemCount() > 1
-        )
-        self.up_button.setEnabled(movable and row > 0)
-        self.down_button.setEnabled(
-            movable and 0 <= row < self.queue.topLevelItemCount() - 1
-        )
+        self.up_button.setEnabled(bool(self.queue_move_rows(-1)))
+        self.down_button.setEnabled(bool(self.queue_move_rows(1)))
+
+    def queue_move_rows(self, offset: int) -> list[int]:
+        selected = self.queue.selectedItems()
+        if offset not in {-1, 1} or not selected or any(
+            item.data(0, Qt.UserRole + 1) != "Queued" for item in selected
+        ):
+            return []
+        rows = sorted(self.queue.indexOfTopLevelItem(item) for item in selected)
+        if not any(
+            0 <= row + offset < self.queue.topLevelItemCount()
+            and not self.queue.topLevelItem(row + offset).isSelected()
+            and self.queue.topLevelItem(row + offset).data(0, Qt.UserRole + 1) == "Queued"
+            for row in rows
+        ):
+            return []
+        return rows
 
     def splitter_sizes_file(self) -> Path:
         return STATE_ROOT / "table-splitter-sizes"
@@ -643,27 +658,25 @@ class StatusMixin:
                 self.tasks.setCurrentItem(item)
         self.update_delegate_button()
 
-    def selected_row(self) -> int:
-        item = self.queue.currentItem()
-        return self.queue.indexOfTopLevelItem(item) if item else -1
-
     def move_selected(self, offset: int) -> None:
-        row = self.selected_row()
-        target = row + offset
-        if row < 0 or target < 0 or target >= self.queue.topLevelItemCount():
+        rows = self.queue_move_rows(offset)
+        if not rows:
             return
-        item = self.queue.topLevelItem(row)
-        other = self.queue.topLevelItem(target)
-        if (
-            item is None
-            or other is None
-            or item.data(0, Qt.UserRole + 1) != "Queued"
-            or other.data(0, Qt.UserRole + 1) != "Queued"
-        ):
-            return
-        item = self.queue.takeTopLevelItem(row)
-        self.queue.insertTopLevelItem(target, item)
-        self.queue.setCurrentItem(item)
+        current_item = self.queue.currentItem()
+        scroll_position = self.queue.verticalScrollBar().value()
+        for row in rows if offset < 0 else reversed(rows):
+            target = row + offset
+            if not 0 <= target < self.queue.topLevelItemCount():
+                continue
+            other = self.queue.topLevelItem(target)
+            if other.isSelected() or other.data(0, Qt.UserRole + 1) != "Queued":
+                continue
+            item = self.queue.takeTopLevelItem(row)
+            self.queue.insertTopLevelItem(target, item)
+            item.setSelected(True)
+        if current_item is not None:
+            self.queue.setCurrentItem(current_item, 0, QItemSelectionModel.NoUpdate)
+        self.queue.verticalScrollBar().setValue(scroll_position)
         self.save_order()
         self.update_queue_buttons()
 

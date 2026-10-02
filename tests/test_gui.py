@@ -22,6 +22,85 @@ import queue_gui_settings
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_move_multiple_prs_preserves_order_and_selection(self):
+        app = QApplication.instance() or QApplication([])
+        for selected, offset, expected in (
+            ([1, 2], -1, [1, 2, 0, 3, 4]),
+            ([1, 2], 1, [0, 3, 1, 2, 4]),
+            ([1, 3], -1, [1, 0, 3, 2, 4]),
+            ([1, 3], 1, [0, 2, 1, 4, 3]),
+            ([0, 3], -1, [0, 1, 3, 2, 4]),
+            ([1, 4], 1, [0, 2, 1, 3, 4]),
+        ):
+            with self.subTest(selected=selected, offset=offset):
+                window = Mock()
+                window.queue = queue_gui.QTreeWidget()
+                window.queue.setSelectionMode(queue_gui.QTreeWidget.ExtendedSelection)
+                for number in range(5):
+                    item = queue_gui.QTreeWidgetItem([f"#{number}", "Title", "Queued"])
+                    item.setData(0, Qt.UserRole, str(number))
+                    item.setData(0, Qt.UserRole + 1, "Queued")
+                    window.queue.addTopLevelItem(item)
+                window.queue.setCurrentItem(window.queue.topLevelItem(selected[0]))
+                for index in selected:
+                    window.queue.topLevelItem(index).setSelected(True)
+                window.queue_move_rows = lambda direction: queue_gui.QueueWindow.queue_move_rows(window, direction)
+                queue_gui.QueueWindow.move_selected(window, offset)
+                self.assertEqual(
+                    [int(window.queue.topLevelItem(i).data(0, Qt.UserRole)) for i in range(5)],
+                    expected,
+                )
+                self.assertEqual(
+                    {int(item.data(0, Qt.UserRole)) for item in window.queue.selectedItems()},
+                    set(selected),
+                )
+                self.assertEqual(window.queue.currentItem().data(0, Qt.UserRole), str(selected[0]))
+                window.save_order.assert_called_once()
+        app.processEvents()
+
+    def test_multi_move_cannot_cross_active_review_or_move_mixed_selection(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.queue.setSelectionMode(queue_gui.QTreeWidget.ExtendedSelection)
+        for number, status in enumerate(("In progress", "Queued", "Queued")):
+            item = queue_gui.QTreeWidgetItem([str(number), "Title", status])
+            item.setData(0, Qt.UserRole + 1, status)
+            window.queue.addTopLevelItem(item)
+        window.queue.topLevelItem(1).setSelected(True)
+        window.queue.topLevelItem(2).setSelected(True)
+        window.queue_move_rows = lambda direction: queue_gui.QueueWindow.queue_move_rows(window, direction)
+        queue_gui.QueueWindow.update_queue_buttons(window)
+        window.up_button.setEnabled.assert_called_with(False)
+        window.down_button.setEnabled.assert_called_with(False)
+        queue_gui.QueueWindow.move_selected(window, -1)
+        window.save_order.assert_not_called()
+        window.queue.topLevelItem(0).setSelected(True)
+        self.assertEqual(window.queue_move_rows(1), [])
+        window.queue.clearSelection()
+        queue_gui.QueueWindow.update_queue_buttons(window)
+        window.up_button.setEnabled.assert_called_with(False)
+        app.processEvents()
+
+    def test_refresh_and_live_overlay_preserve_multiple_selected_prs(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.queue.setSelectionMode(queue_gui.QTreeWidget.ExtendedSelection)
+        window.tasks = queue_gui.QTreeWidget()
+        window.monitor_activity = None
+        window.selected_repo.return_value = ""
+        window.apply_monitor_activity_to_queue = lambda: queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        status = "Queued PRs:\n  #1 First\n  #2 Second\n  #3 Third\n"
+        queue_gui.QueueWindow.populate_queue(window, status)
+        window.queue.topLevelItem(2).setSelected(True)
+        queue_gui.QueueWindow.populate_queue(window, status)
+        self.assertEqual({item.data(0, Qt.UserRole) for item in window.queue.selectedItems()}, {"1", "3"})
+        window.monitor_activity = ("reviewing", "3", "Third", 0)
+        queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        self.assertEqual({item.data(0, Qt.UserRole) for item in window.queue.selectedItems()}, {"1", "3"})
+        app.processEvents()
+
     def test_requeue_setting_inherits_old_choice_once_then_stays_independent(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as directory:
