@@ -24,13 +24,17 @@ import queue_gui_settings
 class ReviewRequestRefreshTests(unittest.TestCase):
     def test_move_multiple_prs_preserves_order_and_selection(self):
         app = QApplication.instance() or QApplication([])
-        for selected, offset, expected in (
-            ([1, 2], -1, [1, 2, 0, 3, 4]),
-            ([1, 2], 1, [0, 3, 1, 2, 4]),
-            ([1, 3], -1, [1, 0, 3, 2, 4]),
-            ([1, 3], 1, [0, 2, 1, 4, 3]),
-            ([0, 3], -1, [0, 1, 3, 2, 4]),
-            ([1, 4], 1, [0, 2, 1, 3, 4]),
+        for selected, offset, expected, to_edge in (
+            ([1, 2], -1, [1, 2, 0, 3, 4], False),
+            ([1, 2], 1, [0, 3, 1, 2, 4], False),
+            ([1, 3], -1, [1, 0, 3, 2, 4], False),
+            ([1, 3], 1, [0, 2, 1, 4, 3], False),
+            ([0, 3], -1, [0, 1, 3, 2, 4], False),
+            ([1, 4], 1, [0, 2, 1, 3, 4], False),
+            ([1, 3], -1, [1, 3, 0, 2, 4], True),
+            ([1, 3], 1, [0, 2, 4, 1, 3], True),
+            ([3], -1, [3, 0, 1, 2, 4], True),
+            ([1], 1, [0, 2, 3, 4, 1], True),
         ):
             with self.subTest(selected=selected, offset=offset):
                 window = Mock()
@@ -45,7 +49,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 for index in selected:
                     window.queue.topLevelItem(index).setSelected(True)
                 window.queue_move_rows = lambda direction: queue_gui.QueueWindow.queue_move_rows(window, direction)
-                queue_gui.QueueWindow.move_selected(window, offset)
+                queue_gui.QueueWindow.move_selected(window, offset, to_edge=to_edge)
                 self.assertEqual(
                     [int(window.queue.topLevelItem(i).data(0, Qt.UserRole)) for i in range(5)],
                     expected,
@@ -73,7 +77,9 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         queue_gui.QueueWindow.update_queue_buttons(window)
         window.up_button.setEnabled.assert_called_with(False)
         window.down_button.setEnabled.assert_called_with(False)
-        queue_gui.QueueWindow.move_selected(window, -1)
+        window.top_button.setEnabled.assert_called_with(False)
+        window.bottom_button.setEnabled.assert_called_with(False)
+        queue_gui.QueueWindow.move_selected(window, -1, to_edge=True)
         window.save_order.assert_not_called()
         window.queue.topLevelItem(0).setSelected(True)
         self.assertEqual(window.queue_move_rows(1), [])

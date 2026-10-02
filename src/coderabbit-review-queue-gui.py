@@ -322,15 +322,23 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
 
         self.up_button = QPushButton(QIcon.fromTheme("go-up"), "Move up")
         self.down_button = QPushButton(QIcon.fromTheme("go-down"), "Move down")
+        self.top_button = QPushButton(QIcon.fromTheme("go-top"), "Move to top")
+        self.bottom_button = QPushButton(QIcon.fromTheme("go-bottom"), "Move to bottom")
         self.up_button.setEnabled(False)
         self.down_button.setEnabled(False)
+        self.top_button.setEnabled(False)
+        self.bottom_button.setEnabled(False)
         self.up_button.clicked.connect(lambda: self.move_selected(-1))
         self.down_button.clicked.connect(lambda: self.move_selected(1))
+        self.top_button.clicked.connect(lambda: self.move_selected(-1, to_edge=True))
+        self.bottom_button.clicked.connect(lambda: self.move_selected(1, to_edge=True))
 
         queue_buttons = QHBoxLayout()
         queue_buttons.addStretch()
+        queue_buttons.addWidget(self.top_button)
         queue_buttons.addWidget(self.up_button)
         queue_buttons.addWidget(self.down_button)
+        queue_buttons.addWidget(self.bottom_button)
 
         self.delegate_button = QPushButton(
             QIcon.fromTheme("system-run"),

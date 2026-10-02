@@ -550,8 +550,12 @@ class StatusMixin:
         live_item.setSelected(number in selected_numbers)
 
     def update_queue_buttons(self) -> None:
-        self.up_button.setEnabled(bool(self.queue_move_rows(-1)))
-        self.down_button.setEnabled(bool(self.queue_move_rows(1)))
+        can_move_up = bool(self.queue_move_rows(-1))
+        can_move_down = bool(self.queue_move_rows(1))
+        self.up_button.setEnabled(can_move_up)
+        self.top_button.setEnabled(can_move_up)
+        self.down_button.setEnabled(can_move_down)
+        self.bottom_button.setEnabled(can_move_down)
 
     def queue_move_rows(self, offset: int) -> list[int]:
         selected = self.queue.selectedItems()
@@ -658,22 +662,26 @@ class StatusMixin:
                 self.tasks.setCurrentItem(item)
         self.update_delegate_button()
 
-    def move_selected(self, offset: int) -> None:
+    def move_selected(self, offset: int, *, to_edge: bool = False) -> None:
         rows = self.queue_move_rows(offset)
         if not rows:
             return
         current_item = self.queue.currentItem()
         scroll_position = self.queue.verticalScrollBar().value()
-        for row in rows if offset < 0 else reversed(rows):
-            target = row + offset
-            if not 0 <= target < self.queue.topLevelItemCount():
-                continue
-            other = self.queue.topLevelItem(target)
-            if other.isSelected() or other.data(0, Qt.UserRole + 1) != "Queued":
-                continue
-            item = self.queue.takeTopLevelItem(row)
-            self.queue.insertTopLevelItem(target, item)
-            item.setSelected(True)
+        while rows:
+            for row in rows if offset < 0 else reversed(rows):
+                target = row + offset
+                if not 0 <= target < self.queue.topLevelItemCount():
+                    continue
+                other = self.queue.topLevelItem(target)
+                if other.isSelected() or other.data(0, Qt.UserRole + 1) != "Queued":
+                    continue
+                item = self.queue.takeTopLevelItem(row)
+                self.queue.insertTopLevelItem(target, item)
+                item.setSelected(True)
+            if not to_edge:
+                break
+            rows = self.queue_move_rows(offset)
         if current_item is not None:
             self.queue.setCurrentItem(current_item, 0, QItemSelectionModel.NoUpdate)
         self.queue.verticalScrollBar().setValue(scroll_position)
