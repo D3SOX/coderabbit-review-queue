@@ -718,6 +718,10 @@ class SettingsMixin:
         repo = self.selected_repo()
         if not repo:
             return
+        # Already-visible PRs are not new. Pin their current order before the
+        # placement change triggers a refresh, including rows not saved yet.
+        if self.queue.topLevelItemCount() > 0:
+            self.save_order()
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.new_items_at_top_file(repo)
         temporary = target.with_suffix(".tmp")
