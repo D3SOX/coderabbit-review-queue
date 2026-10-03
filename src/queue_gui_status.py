@@ -685,6 +685,20 @@ class StatusMixin:
         if current_item is not None:
             self.queue.setCurrentItem(current_item, 0, QItemSelectionModel.NoUpdate)
         self.queue.verticalScrollBar().setValue(scroll_position)
+        self.queue.doItemsLayout()
+        selected = sorted(self.queue.selectedItems(), key=self.queue.indexOfTopLevelItem)
+        first, last = selected[0], selected[-1]
+        selection_height = (
+            self.queue.visualItemRect(last).bottom()
+            - self.queue.visualItemRect(first).top() + 1
+        )
+        horizontal_position = self.queue.horizontalScrollBar().value()
+        # Reveal the whole selection if it fits; otherwise follow the edge
+        # moving in the requested direction. Refreshes still preserve scroll.
+        if selection_height <= self.queue.viewport().height():
+            self.queue.scrollToItem(last if offset < 0 else first)
+        self.queue.scrollToItem(first if offset < 0 else last)
+        self.queue.horizontalScrollBar().setValue(horizontal_position)
         self.save_order()
         self.update_queue_buttons()
 

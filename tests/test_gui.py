@@ -22,6 +22,38 @@ import queue_gui_settings
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_move_buttons_scroll_selected_prs_into_view(self):
+        app = QApplication.instance() or QApplication([])
+        for offset, to_edge, selected in (
+            (-1, True, [10, 11]), (1, True, [10, 11]),
+            (-1, False, [3, 25]), (1, False, [3, 25]),
+        ):
+            with self.subTest(offset=offset, to_edge=to_edge, selected=selected):
+                window = Mock()
+                window.queue = queue_gui.QTreeWidget()
+                window.queue.setSelectionMode(queue_gui.QTreeWidget.ExtendedSelection)
+                window.queue.resize(400, 120)
+                for number in range(30):
+                    item = queue_gui.QTreeWidgetItem([str(number)])
+                    item.setData(0, Qt.UserRole + 1, "Queued")
+                    window.queue.addTopLevelItem(item)
+                window.queue.show()
+                window.queue.setCurrentItem(window.queue.topLevelItem(selected[0]))
+                for row in selected:
+                    window.queue.topLevelItem(row).setSelected(True)
+                window.queue.verticalScrollBar().setValue(10)
+                app.processEvents()
+                window.queue_move_rows = lambda direction: queue_gui.QueueWindow.queue_move_rows(window, direction)
+                queue_gui.QueueWindow.move_selected(window, offset, to_edge=to_edge)
+                app.processEvents()
+                items = sorted(window.queue.selectedItems(), key=window.queue.indexOfTopLevelItem)
+                visible_items = items if to_edge else [items[0] if offset < 0 else items[-1]]
+                for item in visible_items:
+                    rect = window.queue.visualItemRect(item)
+                    self.assertGreaterEqual(rect.top(), 0)
+                    self.assertLess(rect.bottom(), window.queue.viewport().height())
+                window.queue.close()
+
     def test_move_multiple_prs_preserves_order_and_selection(self):
         app = QApplication.instance() or QApplication([])
         for selected, offset, expected, to_edge in (
