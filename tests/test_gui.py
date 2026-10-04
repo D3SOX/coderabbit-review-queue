@@ -23,6 +23,55 @@ import queue_gui_status
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_live_status_refresh_does_not_scroll_to_offscreen_selected_pr(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.tasks = queue_gui.QTreeWidget()
+        window.queue.resize(400, 120)
+        window.queue.show()
+        window.monitor_activity = ("reviewing", "0", "PR 0", 0)
+        window.finished_review_numbers = set()
+        window.approved_review_numbers = set()
+        for n in range(40):
+            item = queue_gui.QTreeWidgetItem([str(n), f"PR {n}", "Queued"])
+            item.setData(0, Qt.UserRole, str(n))
+            item.setData(0, Qt.UserRole + 1, "Queued")
+            window.queue.addTopLevelItem(item)
+        window.queue.setCurrentItem(window.queue.topLevelItem(0))
+        app.processEvents()
+        window.queue.verticalScrollBar().setValue(10)
+        app.processEvents()
+        queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        app.processEvents()
+        self.assertEqual(window.queue.verticalScrollBar().value(), 10)
+        window.queue.close()
+
+    def test_refresh_after_move_preserves_manually_scrolled_viewport(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.queue.setSelectionMode(queue_gui.QTreeWidget.ExtendedSelection)
+        window.queue.resize(400, 120)
+        window.queue.show()
+        window.monitor_activity = None
+        window.selected_repo.return_value = ""
+        window.apply_monitor_activity_to_queue = lambda: None
+        window.queue_move_rows = lambda direction: queue_gui.QueueWindow.queue_move_rows(window, direction)
+        status = "Queued PRs:\n" + "".join(f"  #{n} PR {n}\n" for n in range(40))
+        queue_gui.QueueWindow.populate_queue(window, status)
+        app.processEvents()
+        window.queue.setCurrentItem(window.queue.topLevelItem(20))
+        queue_gui.QueueWindow.move_selected(window, 1, to_edge=True)
+        app.processEvents()
+        window.queue.verticalScrollBar().setValue(10)
+        app.processEvents()
+        before = window.queue.verticalScrollBar().value()
+        queue_gui.QueueWindow.populate_queue(window, status)
+        app.processEvents()
+        self.assertEqual(window.queue.verticalScrollBar().value(), before)
+        window.queue.close()
+
     def test_changing_new_item_placement_preserves_existing_queue_order(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as directory:

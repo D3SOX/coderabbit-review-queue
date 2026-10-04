@@ -527,6 +527,8 @@ class StatusMixin:
                     self.tasks.takeTopLevelItem(index)
                     self.update_delegate_button()
         selected = self.queue.currentItem()
+        scroll_position = self.queue.verticalScrollBar().value()
+        horizontal_position = self.queue.horizontalScrollBar().value()
         selected_numbers = {item.data(0, Qt.UserRole) for item in self.queue.selectedItems()}
         selected_number = selected.data(0, Qt.UserRole) if selected else None
         base_status = "Queued"
@@ -548,6 +550,11 @@ class StatusMixin:
         if selected_number == number:
             self.queue.setCurrentItem(live_item, 0, QItemSelectionModel.NoUpdate)
         live_item.setSelected(number in selected_numbers)
+        # Restoring focus after replacing the live row makes Qt reveal it.
+        # This is a status update, not a user move: keep the viewport still.
+        self.queue.doItemsLayout()
+        self.queue.verticalScrollBar().setValue(scroll_position)
+        self.queue.horizontalScrollBar().setValue(horizontal_position)
 
     def update_queue_buttons(self) -> None:
         can_move_up = bool(self.queue_move_rows(-1))
