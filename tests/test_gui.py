@@ -23,6 +23,42 @@ import queue_gui_status
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_refresh_keeps_visible_pr_when_rows_above_change(self):
+        app = QApplication.instance() or QApplication([])
+        for table, pixel_scroll in (("queue", False), ("tasks", False), ("queue", True), ("tasks", True)):
+            with self.subTest(table=table, pixel_scroll=pixel_scroll):
+                window = Mock()
+                tree = queue_gui.QTreeWidget()
+                setattr(window, table, tree)
+                if pixel_scroll:
+                    tree.setVerticalScrollMode(queue_gui.QTreeWidget.ScrollPerPixel)
+                tree.resize(400, 120)
+                tree.show()
+                window.monitor_activity = None
+                window.selected_repo.return_value = ""
+                window.apply_monitor_activity_to_queue = lambda: None
+                def refresh(numbers):
+                    if table == "queue":
+                        status = "Queued PRs:\n" + "".join(f"  #{n} PR {n}\n" for n in numbers)
+                        queue_gui.QueueWindow.populate_queue(window, status)
+                    else:
+                        status = "Finished CodeRabbit reviews:\n" + "".join(
+                            f"  #{n} PR {n}\n    Result: Approved\n    Agent task: Codex Idle\tTask\tDone\n" for n in numbers)
+                        queue_gui.QueueWindow.populate_tasks(window, status)
+                    app.processEvents()
+                refresh(range(40))
+                tree.setCurrentItem(tree.topLevelItem(30))
+                tree.verticalScrollBar().setValue(143 if pixel_scroll else 10)
+                app.processEvents()
+                before = tree.itemAt(5, 0).data(0, Qt.UserRole)
+                before_top = tree.visualItemRect(tree.itemAt(5, 0)).top()
+                refresh(range(1, 40))
+                self.assertEqual(tree.itemAt(5, 0).data(0, Qt.UserRole), before)
+                self.assertEqual(tree.visualItemRect(tree.itemAt(5, 0)).top(), before_top)
+                refresh([99] + list(range(1, 40)))
+                self.assertEqual(tree.itemAt(5, 0).data(0, Qt.UserRole), before)
+                tree.close()
+
     def test_live_status_refresh_does_not_scroll_to_offscreen_selected_pr(self):
         app = QApplication.instance() or QApplication([])
         window = Mock()

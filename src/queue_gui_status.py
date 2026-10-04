@@ -3,6 +3,7 @@
 import fcntl
 import os
 import re
+from functools import wraps
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QDateTime, QItemSelectionModel, QLocale, QProcess, Qt
@@ -13,6 +14,41 @@ from queue_gui_common import (
     SCRIPT, STATE_ROOT, file_signature, live_review_number,
     process_is_running, status_belongs_to_repo,
 )
+
+
+def preserve_viewport(table_name):
+    """Keep refreshes anchored to content, not selection or a stale row index."""
+    def decorate(method):
+        @wraps(method)
+        def refresh(self, *args, **kwargs):
+            tree = getattr(self, table_name)
+            if not isinstance(tree, QTreeWidget):
+                return method(self, *args, **kwargs)
+            vertical = tree.verticalScrollBar().value()
+            horizontal = tree.horizontalScrollBar().value()
+            anchor = tree.itemAt(0, 0)
+            number = anchor.data(0, Qt.UserRole) if anchor else None
+            top = tree.visualItemRect(anchor).top() if anchor else 0
+            result = method(self, *args, **kwargs)
+            tree.doItemsLayout()
+            # At the top, keep the top so newly inserted entries remain visible.
+            if vertical and number is not None:
+                for index in range(tree.topLevelItemCount()):
+                    item = tree.topLevelItem(index)
+                    if item.data(0, Qt.UserRole) == number:
+                        tree.scrollToItem(item, QTreeWidget.PositionAtTop)
+                        if tree.verticalScrollMode() == QTreeWidget.ScrollPerPixel:
+                            tree.verticalScrollBar().setValue(
+                                tree.verticalScrollBar().value() - top)
+                        break
+                else:
+                    tree.verticalScrollBar().setValue(vertical)
+            else:
+                tree.verticalScrollBar().setValue(vertical)
+            tree.horizontalScrollBar().setValue(horizontal)
+            return result
+        return refresh
+    return decorate
 
 
 class StatusMixin:
@@ -400,8 +436,8 @@ class StatusMixin:
         self.timer_label.setText("Next review: " + detail)
         self.set_tray_countdown(compact, f"{repo}\nNext review: {detail}")
 
+    @preserve_viewport("queue")
     def populate_queue(self, status: str) -> None:
-        scroll_position = self.queue.verticalScrollBar().value()
         current_item = self.queue.currentItem()
         selected_numbers = {item.data(0, Qt.UserRole) for item in self.queue.selectedItems()}
         selected_number = (
@@ -491,9 +527,10 @@ class StatusMixin:
             else:
                 self.queue.setCurrentItem(self.queue.topLevelItem(0))
         self.apply_monitor_activity_to_queue()
-        self.queue.verticalScrollBar().setValue(scroll_position)
         self.update_queue_buttons()
 
+    @preserve_viewport("queue")
+    @preserve_viewport("tasks")
     def apply_monitor_activity_to_queue(self) -> None:
         if self.monitor_activity is None:
             return
@@ -527,8 +564,6 @@ class StatusMixin:
                     self.tasks.takeTopLevelItem(index)
                     self.update_delegate_button()
         selected = self.queue.currentItem()
-        scroll_position = self.queue.verticalScrollBar().value()
-        horizontal_position = self.queue.horizontalScrollBar().value()
         selected_numbers = {item.data(0, Qt.UserRole) for item in self.queue.selectedItems()}
         selected_number = selected.data(0, Qt.UserRole) if selected else None
         base_status = "Queued"
@@ -550,11 +585,6 @@ class StatusMixin:
         if selected_number == number:
             self.queue.setCurrentItem(live_item, 0, QItemSelectionModel.NoUpdate)
         live_item.setSelected(number in selected_numbers)
-        # Restoring focus after replacing the live row makes Qt reveal it.
-        # This is a status update, not a user move: keep the viewport still.
-        self.queue.doItemsLayout()
-        self.queue.verticalScrollBar().setValue(scroll_position)
-        self.queue.horizontalScrollBar().setValue(horizontal_position)
 
     def update_queue_buttons(self) -> None:
         can_move_up = bool(self.queue_move_rows(-1))
@@ -603,6 +633,7 @@ class StatusMixin:
         if len(values) == 2 and all(value > 0 for value in values):
             self.table_splitter.setSizes(values)
 
+    @preserve_viewport("tasks")
     def populate_tasks(self, status: str) -> None:
         current_item = self.tasks.currentItem()
         selected_number = (
