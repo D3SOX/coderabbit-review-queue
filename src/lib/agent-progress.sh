@@ -36,29 +36,35 @@ codex_task_progress() {
     *) state='Unknown' ;;
   esac
   message=$(
-    jq -R -s -r '
-      [
-        split("\n")[]
-        | fromjson?
-        | if .type == "event_msg" and .payload.type == "agent_message" then
-            .payload.message
-          elif .type == "event_msg"
-            and .payload.type == "item_completed"
-            and .payload.item.type == "AgentMessage" then
-            [
-              .payload.item.content[]?
-              | select(.type == "Text")
-              | .text
-            ]
-            | join("\n")
-          else
-            empty
-          end
-      ]
-      | last // ""
-      | gsub("[\\r\\n\\t]+"; " ")
-      | if length > 180 then .[0:177] + "..." else . end
-    ' "$session_file"
+    python3 - "$session_file" <<'PY'
+import json
+import re
+import sys
+
+message = ''
+with open(sys.argv[1]) as events:
+    for line in events:
+        if 'agent_message' not in line and 'item_completed' not in line:
+            continue
+        try:
+            event = json.loads(line)
+            payload = event.get('payload', {})
+            if event.get('type') != 'event_msg':
+                continue
+            if payload.get('type') == 'agent_message':
+                text = payload.get('message', '')
+            elif payload.get('type') == 'item_completed' and payload.get('item', {}).get('type') == 'AgentMessage':
+                text = '\n'.join(item.get('text', '') for item in payload['item'].get('content', [])
+                                 if item.get('type') == 'Text')
+            else:
+                continue
+            if isinstance(text, str):
+                message = text
+        except (ValueError, AttributeError, TypeError):
+            continue
+message = re.sub(r'[\r\n\t]+', ' ', message)
+print(message[:177] + '...' if len(message) > 180 else message)
+PY
   )
   metadata=$(codex_thread_metadata "$session_id" 2>/dev/null || true)
   IFS=$'\t' read -r task_title task_model task_effort <<<"$metadata"
@@ -125,15 +131,23 @@ claude_task_progress() {
 local_agent_task_progress() {
   local branch_name=$1
   local head_sha=$2
-  local codex_out claude_out
+  local codex_out claude_out mode
+  mode=${agent_mode_override:-$(auto_delegation_mode)}
 
   codex_out=$(codex_task_progress "$branch_name" "$head_sha")
-  claude_out=$(claude_task_progress "$branch_name" "$head_sha")
-
   if [[ $codex_out == Running* ]]; then
     printf 'Codex %s\n' "$codex_out"
     return 0
   fi
+  if [[ $mode == codex ]]; then
+    if [[ $codex_out == 'No matching task' ]]; then
+      printf '%s\n' "$codex_out"
+    else
+      printf 'Codex %s\n' "$codex_out"
+    fi
+    return 0
+  fi
+  claude_out=$(claude_task_progress "$branch_name" "$head_sha")
   if [[ $claude_out == Running* ]]; then
     printf 'Claude %s\n' "$claude_out"
     return 0
@@ -150,14 +164,16 @@ local_agent_task_progress() {
 }
 
 agent_task_progress() {
-  local branch_name=$1 head_sha=$2 host output
+  local branch_name=$1 head_sha=$2 host output mode
   host=$(agent_host 2>/dev/null || true)
   if [[ -z $host ]]; then
     local_agent_task_progress "$branch_name" "$head_sha"
     return
   fi
+  mode=${agent_mode_override:-$(auto_delegation_mode)}
+  [[ $mode != disabled ]] || mode=auto
   if output=$(remote_command_timeout=20 remote_agent_command \
-    --task-progress "$branch_name" "$head_sha" 2>/dev/null); then
+    --task-progress "$branch_name" "$head_sha" --agent-mode "$mode" 2>/dev/null); then
     printf '%s\n' "$output"
   else
     case $? in

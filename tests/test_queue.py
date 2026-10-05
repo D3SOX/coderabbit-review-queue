@@ -11,6 +11,55 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_remote_status_forwards_selected_agent_mode(self):
+        result = self.run_shell(r'''
+printf 'codex\n' >"$auto_delegate_file"
+agent_host() { echo desktop; }
+remote_agent_command() { printf '%s\n' "$*"; }
+agent_task_progress branch head
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('--agent-mode codex', result.stdout)
+
+    def test_codex_only_status_never_scans_claude_history(self):
+        result = self.run_shell(r'''
+printf 'codex\n' >"$auto_delegate_file"
+codex_task_progress() { printf 'Idle\tTask\tdone\n'; }
+claude_task_progress() { echo 'unexpected Claude scan' >&2; return 99; }
+local_agent_task_progress branch head
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'Codex Idle\tTask\tdone')
+        self.assertNotIn('unexpected Claude scan', result.stderr)
+
+    def test_running_codex_status_does_not_wait_for_claude_scan(self):
+        result = self.run_shell(r'''
+codex_task_progress() { printf 'Running\tTask\tworking\n'; }
+claude_task_progress() { echo 'unexpected Claude scan' >&2; return 99; }
+local_agent_task_progress branch head
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'Codex Running\tTask\tworking')
+
+    def test_status_timeout_does_not_claim_delegated_agent_completed(self):
+        result = self.run_shell(r'''
+printf '42\n' >"$delegated_prs_file"
+snapshot() { printf '{"data":{"repository":{"pullRequests":{"nodes":[{"number":42,"headRefName":"feature","headRefOid":"head","title":"fix review"}]}}}}'; }
+status_quota_available() { :; }
+load_stale_rows() { stale=(); }
+active_review_rows() { :; }
+approved_review_rows() { :; }
+reviewed_rows() { :; }
+unresolved_coderabbit_rows() { :; }
+agent_task_progress() { echo 'Remote agent status timed out (desktop)'; }
+latest_expiry() { echo 0; }
+shared_expiry() { echo 0; }
+show_status 60
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Agent completed review', result.stdout)
+        self.assertIn('Feedback resolved; agent status unknown', result.stdout)
+
     def test_migrated_t3_task_state_overrides_stale_native_rollout(self):
         result = self.run_shell(r'''
 python3() { [[ $1 == */t3-delegate.py && $2 == --state ]] && echo running; }
@@ -841,9 +890,11 @@ printf '%s\n' \
 matching_codex_session() { printf '%s\t%s\n' "$session" "$state_root/worktree"; }
 codex_session_state() { printf 'running\n'; }
 codex_thread_metadata() { printf 'Review task\tgpt-6\thigh\n'; }
+jq() { echo 'unexpected full transcript parse' >&2; return 99; }
 codex_task_progress branch head
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('unexpected full transcript parse', result.stderr)
         self.assertEqual(
             result.stdout,
             'Running\tReview task\tlatest progress\n',

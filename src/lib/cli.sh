@@ -89,9 +89,11 @@ show_status() {
       if (( count > 0 )); then
         finished+=$'\n'"    Result: $count unresolved"
       elif [[ $task_progress == *Running* ]]; then
-        finished+=$'\n'"    Result: Agent handling review"
-      else
+        finished+=$'\n'"    Result: Feedback resolved; agent running"
+      elif [[ $task_progress == *Idle* ]]; then
         finished+=$'\n'"    Result: Agent completed review"
+      else
+        finished+=$'\n'"    Result: Feedback resolved; agent status unknown"
       fi
       finished+=$'\n'"    Agent task: $task_progress"
     done <"$delegated_prs_file"
