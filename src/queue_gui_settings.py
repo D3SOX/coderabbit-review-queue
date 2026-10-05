@@ -28,6 +28,15 @@ class SettingsMixin:
     def delegation_prompt_template_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-delegation-prompt-template"
 
+    def steer_running_agents_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-steer-running-agents"
+
+    def steer_running_agents_enabled(self, repo: str) -> bool:
+        try:
+            return self.steer_running_agents_file(repo).read_text().strip() != "0"
+        except OSError:
+            return True
+
     def auto_merge_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-auto-merge"
 
@@ -224,6 +233,9 @@ class SettingsMixin:
         if not repo:
             return
         current_mode, custom_prompt = self.delegation_prompt_settings(repo)
+        steering = QCheckBox("Steer running agents")
+        steering.setChecked(self.steer_running_agents_enabled(repo))
+        steering.setToolTip("Supports T3 and Codex Desktop/CLI sessions with a reachable live app-server. Other running agents wait for idle. Off: wait for idle and recheck that the PR is open before delegating. Applies to manual and automatic delegation.")
         dialog = QDialog(self)
         dialog.setWindowTitle("Delegation prompt")
         dialog.resize(760, 620)
@@ -274,6 +286,7 @@ class SettingsMixin:
         layout = QVBoxLayout(dialog)
         layout.addWidget(mode_label)
         layout.addWidget(mode_select)
+        layout.addWidget(steering)
         layout.addWidget(prompt_editor, 1)
         layout.addWidget(placeholders)
         layout.addWidget(buttons)
@@ -296,12 +309,17 @@ class SettingsMixin:
         mode_temporary = mode_target.with_suffix(".tmp")
         mode_temporary.write_text(mode + "\n")
         os.replace(mode_temporary, mode_target)
+        steering_target = self.steer_running_agents_file(repo)
+        steering_temporary = steering_target.with_suffix(".tmp")
+        steering_temporary.write_text("1\n" if steering.isChecked() else "0\n")
+        os.replace(steering_temporary, steering_target)
         if mode == "custom":
             template_target = self.delegation_prompt_template_file(repo)
             template_temporary = template_target.with_suffix(".tmp")
             template_temporary.write_text(custom.rstrip() + "\n")
             os.replace(template_temporary, template_target)
-        self.show_transient_status("Delegation prompt saved")
+        self.update_delegate_button()
+        self.show_transient_status("Delegation settings saved")
 
     def load_agent_host(self, repo: str) -> None:
         host = ""

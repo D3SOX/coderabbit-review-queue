@@ -65,7 +65,7 @@ codex_task_progress() {
   t3_title=$(python3 "$script_dir/t3-delegate.py" --title "$session_id" 2>/dev/null || true)
   [[ -z $t3_title ]] || task_title=$t3_title
   if [[ $state == Running ]] &&
-    python3 "$script_dir/t3-delegate.py" --can-steer "$session_id" >/dev/null 2>&1; then
+    codex_can_steer "$session_id"; then
     state='Running (steerable)'
   fi
   [[ -n $task_title ]] || task_title='—'

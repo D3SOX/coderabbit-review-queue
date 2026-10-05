@@ -11,6 +11,63 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_native_codex_running_task_is_steerable(self):
+        result = self.run_shell(r'''
+python3() { [[ $1 == */codex-steer.py ]]; }
+codex_can_receive_review session running
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_native_codex_steering_does_not_resume_or_override_permissions(self):
+        result = self.run_shell(r'''
+worktree="$state_root/worktree"
+mkdir -p "$worktree"
+git -C "$worktree" init -q
+codex_session_state() { echo running; }
+codex_session_originator() { echo codex-tui; }
+python3() {
+  [[ $1 == */codex-steer.py ]] || return 1
+  [[ $2 == --can-steer ]] || echo 'native steer delivered'
+}
+codex_thread_metadata() { echo 'unexpected permissions'; return 1; }
+resume_codex_via_exec() { echo 'unexpected second agent'; return 1; }
+desktop_notify() { :; }
+threads=(finding)
+resume_codex_session 42 title head session "$worktree" prompt threads
+grep -qx finding "$routed_threads_file"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('native steer delivered', result.stdout)
+        self.assertNotIn('unexpected', result.stdout)
+
+    def test_disabled_steering_defers_running_task(self):
+        result = self.run_shell(r'''
+steer_running_agents_file="$state_root/steer-running-agents"
+printf '0\n' >"$steer_running_agents_file"
+python3() { return 0; }
+if codex_can_receive_review session running; then echo 'unexpected steering'; fi
+codex_can_receive_review session idle
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('unexpected steering', result.stdout)
+
+    def test_idle_only_delegation_skips_a_pr_that_closed_while_agent_worked(self):
+        result = self.run_shell(r'''
+printf '0\n' >"$steer_running_agents_file"
+worktree="$state_root/worktree"
+mkdir -p "$worktree"
+git -C "$worktree" init -q
+codex_session_state() { echo idle; }
+gh() { echo MERGED; }
+resume_codex_via_t3() { echo 'unexpected send'; }
+codex_thread_metadata() { echo 'unexpected resume'; }
+threads=(finding)
+resume_codex_session 42 title head session "$worktree" prompt threads
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('unexpected', result.stdout)
+        self.assertIn('no longer open', result.stdout)
+
     def test_conflicting_approved_merge_requests_agent_repair(self):
         result = self.run_shell(r'''
 gh() { printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","statusCheckRollup":[],"reviews":[]}'; }

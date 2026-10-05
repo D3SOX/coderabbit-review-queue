@@ -145,6 +145,7 @@ configure_repo() {
   delegated_prs_file="$state_root/$repo_key-delegated-prs.txt"
   delegation_prompt_mode_file="$state_root/$repo_key-delegation-prompt-mode"
   delegation_prompt_template_file="$state_root/$repo_key-delegation-prompt-template"
+  steer_running_agents_file="$state_root/$repo_key-steer-running-agents"
   auto_merge_file="$state_root/$repo_key-auto-merge"
   merge_method_file="$state_root/$repo_key-merge-method"
   delete_branch_file="$state_root/$repo_key-delete-branch"

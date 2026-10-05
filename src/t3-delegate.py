@@ -151,7 +151,7 @@ socket.onerror = () => { console.error('T3 WebSocket failed'); process.exit(1); 
         raise RuntimeError(result.stderr.strip() or 'T3 v2 message dispatch failed')
 
 
-def send_turn(session_id, prompt):
+def send_turn(session_id, prompt, *, steer=True):
     home = t3_home()
     database = t3_database()
     thread_id, runtime_mode, interaction_mode, model = matching_thread(
@@ -170,13 +170,25 @@ def send_turn(session_id, prompt):
     credential = json.loads(issue.stdout)
     try:
         if database.name == 'statev2.sqlite':
-            dispatch_v2(origin, credential['token'], {
+            if not steer:
+                with sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=5) as connection:
+                    active = connection.execute('''
+                        SELECT 1 FROM orchestration_v2_projection_runs
+                        WHERE thread_id = ? AND status IN
+                          ('queued', 'preparing', 'starting', 'running', 'waiting') LIMIT 1
+                    ''', (thread_id,)).fetchone()
+                if active:
+                    raise RuntimeError('T3 task is not idle; leaving feedback for retry')
+            command = {
                 'type': 'message.dispatch', 'commandId': str(uuid.uuid4()),
                 'threadId': thread_id, 'messageId': str(uuid.uuid4()),
                 'text': prompt, 'attachments': [],
                 'createdBy': 'user', 'creationSource': 'server',
-                'deliveryIntent': 'auto', 'dispatchMode': {'type': 'start_immediately'},
-            })
+                'dispatchMode': {'type': 'start_immediately'},
+            }
+            if steer:
+                command['deliveryIntent'] = 'auto'
+            dispatch_v2(origin, credential['token'], command)
             print(f'Sent review follow-up to T3 Code v2 thread {thread_id}.')
             return
         now = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
@@ -223,7 +235,7 @@ if __name__ == '__main__':
                 sys.exit(1)
             matching_thread(database, sys.argv[2])
         else:
-            send_turn(sys.argv[1], sys.stdin.read())
+            send_turn(sys.argv[1], sys.stdin.read(), steer='--wait-idle' not in sys.argv[2:])
     except (IndexError, OSError, ValueError, RuntimeError, sqlite3.Error, subprocess.SubprocessError) as error:
         print(f'T3 delegation failed: {error}', file=sys.stderr)
         sys.exit(1)

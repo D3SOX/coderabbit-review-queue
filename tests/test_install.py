@@ -26,7 +26,7 @@ class InstalledIconTests(unittest.TestCase):
             for filename in ('coderabbit-review-queue', 'coderabbit-review-queue-gui.py',
                              'queue_gui_common.py', 'queue_gui_settings.py',
                              'queue_gui_status.py', 'lib/queue-state.sh',
-                             't3-delegate.py', 'coderabbit-logomark.svg'):
+                             't3-delegate.py', 'codex-steer.py', 'coderabbit-logomark.svg'):
                 with self.subTest(runtime_file=filename):
                     self.assertTrue((app_dir / filename).is_file())
             for size in (16, 22, 24, 32, 48, 64):
@@ -44,6 +44,7 @@ class InstalledIconTests(unittest.TestCase):
             )
             self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
             self.assertFalse((app_dir / 't3-delegate.py').exists())
+            self.assertFalse((app_dir / 'codex-steer.py').exists())
             self.assertFalse((app_dir / 'lib').exists())
 
 

@@ -246,6 +246,11 @@ main() {
         delegation_prompt_mode_override=$2
         shift 2
         ;;
+      --steer-running-agents-setting)
+        (( $# >= 2 )) && [[ $2 =~ ^[01]$ ]] || return 2
+        steer_running_agents_override=$2
+        shift 2
+        ;;
       --delegation-prompt-template)
         (( $# >= 2 )) || {
           printf '%s\n' '--delegation-prompt-template requires text.' >&2

@@ -519,15 +519,30 @@ codex_session_originator() {
 
 resume_codex_via_t3() {
   local session_id=$1 prompt=$2
-  printf '%s' "$prompt" | python3 "$script_dir/t3-delegate.py" "$session_id"
+  local -a args=("$session_id")
+  steer_running_agents_enabled || args+=(--wait-idle)
+  printf '%s' "$prompt" | python3 "$script_dir/t3-delegate.py" "${args[@]}"
+}
+
+steer_running_agents_enabled() {
+  local enabled=${steer_running_agents_override:-1}
+  if [[ -z ${steer_running_agents_override:-} && -f $steer_running_agents_file ]]; then
+    enabled=$(head -n 1 "$steer_running_agents_file")
+  fi
+  [[ $enabled != 0 ]]
 }
 
 codex_can_receive_review() {
   local session_id=$1 state=$2
   [[ $state == idle ]] || {
-    [[ $state == running ]] &&
-      python3 "$script_dir/t3-delegate.py" --can-steer "$session_id" >/dev/null 2>&1
+    [[ $state == running ]] && steer_running_agents_enabled &&
+      codex_can_steer "$session_id"
   }
+}
+
+codex_can_steer() {
+  python3 "$script_dir/t3-delegate.py" --can-steer "$1" >/dev/null 2>&1 ||
+    python3 "$script_dir/codex-steer.py" --can-steer "$1" >/dev/null 2>&1
 }
 
 resume_codex_via_exec() {
@@ -624,6 +639,7 @@ route_unresolved_review() {
       --delegate "$pr" --agent-mode "$mode" --local-agents \
       --delegation-prompt-mode "$(delegation_prompt_mode)" \
       --delegation-prompt-template "$(delegation_prompt_template)" \
+      --steer-running-agents-setting "$(steer_running_agents_enabled && echo 1 || echo 0)" \
       --auto-merge-setting "$merge_enabled" "$(merge_method)" "$merge_delete" \
       "$merge_after_delegation" "$merge_admin" \
       --resolve-merge-conflicts-setting "$resolve_conflicts"); then
@@ -730,7 +746,7 @@ resume_codex_session() {
   local routing_reason=${8:-unresolved CodeRabbit review}
   local session_state resume_status metadata task_title task_model task_effort
   local task_sandbox_policy task_approval_mode
-  local originator is_t3=0
+  local originator is_t3=0 native_steering=0
   local routing_lock_path routing_lock_fd
   local thread_id
   local -a codex_args
@@ -760,6 +776,13 @@ resume_codex_session() {
     return 0
   fi
 
+  if ! steer_running_agents_enabled; then
+    if [[ $(gh pr view "$pr" --repo "$repo" --json state --jq .state) != OPEN ]]; then
+      printf 'PR #%s is no longer open; not delegating.\n' "$pr"
+      exec {routing_lock_fd}>&-
+      return 0
+    fi
+  fi
   printf 'Routing %s on PR #%s to Codex task %s.\n' \
     "$routing_reason" "$pr" "$session_id"
   originator=$(codex_session_originator "$session_id" 2>/dev/null || true)
@@ -767,7 +790,8 @@ resume_codex_session() {
     python3 "$script_dir/t3-delegate.py" --can-steer "$session_id" >/dev/null 2>&1; then
     is_t3=1
   fi
-  if (( is_t3 == 0 )); then
+  [[ $session_state != running ]] || native_steering=1
+  if (( is_t3 == 0 && native_steering == 0 )); then
     metadata=$(codex_thread_metadata "$session_id" 2>/dev/null || true)
     IFS=$'\t' read -r task_title task_model task_effort task_sandbox_policy \
       task_approval_mode <<<"$metadata"
@@ -789,6 +813,10 @@ resume_codex_session() {
     cd "$session_cwd"
     if (( is_t3 )); then
       resume_codex_via_t3 "$session_id" "$prompt"
+      exit $?
+    fi
+    if (( native_steering )); then
+      python3 "$script_dir/codex-steer.py" "$session_id" <<<"$prompt"
       exit $?
     fi
     [[ $(codex_session_state "$session_id") == idle ]] || exit 75

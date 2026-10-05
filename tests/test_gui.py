@@ -23,6 +23,36 @@ import queue_gui_status
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_delegation_dialog_saves_repository_steering_preference(self):
+        app = QApplication.instance() or QApplication([])
+        class SaveDialog(queue_gui_settings.QDialog):
+            def __init__(self, _parent):
+                super().__init__()
+
+            def exec(self):
+                steering = next(box for box in self.findChildren(queue_gui_settings.QCheckBox)
+                                if box.text() == "Steer running agents")
+                assert steering.isChecked()
+                steering.setChecked(False)
+                return SaveDialog.Accepted
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            window = Mock()
+            window.selected_repo.return_value = "example/repo"
+            window.delegation_prompt_settings.return_value = ("short", "")
+            window.delegation_prompt_mode_file.return_value = root / "prompt-mode"
+            window.steer_running_agents_file = lambda repo: root / (repo.replace('/', '__') + '-steer-running-agents')
+            window.steer_running_agents_enabled = lambda repo: queue_gui.QueueWindow.steer_running_agents_enabled(window, repo)
+            self.assertTrue(window.steer_running_agents_enabled("example/repo"))
+            with patch.object(queue_gui_settings, "STATE_ROOT", root), \
+                 patch.object(queue_gui_settings, "QDialog", SaveDialog):
+                queue_gui.QueueWindow.configure_delegation_prompt(window)
+            self.assertFalse(window.steer_running_agents_enabled("example/repo"))
+            self.assertTrue(window.steer_running_agents_enabled("other/repo"))
+            window.update_delegate_button.assert_called_once()
+        app.processEvents()
+
     def test_selected_running_t3_task_can_be_steered_but_not_bulk_delegated(self):
         app = QApplication.instance() or QApplication([])
         window = Mock()
@@ -39,7 +69,12 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             queue_gui.QueueWindow.update_delegate_button(window)
             self.assertEqual(window.delegate_button.isEnabled(), steerable)
             self.assertFalse(window.delegate_all_button.isEnabled())
-            self.assertEqual(window.delegate_button.text(), "Steer selected" if steerable else "Delegate selected")
+            self.assertEqual(window.delegate_button.text(), "Delegate / steer selected")
+            window.steer_running_agents_enabled.return_value = False
+            queue_gui.QueueWindow.update_delegate_button(window)
+            self.assertFalse(window.delegate_button.isEnabled())
+            self.assertEqual(window.delegate_button.text(), "Delegate selected")
+            window.steer_running_agents_enabled.return_value = True
         app.processEvents()
 
     def test_refresh_keeps_visible_pr_when_rows_above_change(self):

@@ -23,6 +23,7 @@ class T3DelegateTests(unittest.TestCase):
                    active_provider_thread_id TEXT, payload_json TEXT, deleted_at TEXT, archived_at TEXT);
                 CREATE TABLE orchestration_v2_projection_provider_threads
                   (provider_thread_id TEXT, thread_id TEXT, provider TEXT, payload_json TEXT);
+                CREATE TABLE orchestration_v2_projection_runs (thread_id TEXT, status TEXT);
                 INSERT INTO orchestration_v2_projection_threads VALUES
                   ('v2-thread', 'Review task', 'full-access', 'default', 'provider-thread',
                    '{"modelSelection":{"instanceId":"codex_second","model":"gpt-6-sol","options":[{"id":"reasoningEffort","value":"high"}]}}', NULL, NULL);
@@ -54,6 +55,21 @@ class T3DelegateTests(unittest.TestCase):
         # Omit overrides: v2 inherits model/options/permissions from the thread.
         self.assertNotIn('modelSelection', command)
         self.assertNotIn('runtimeMode', command)
+        self.assertIn('revoke', run.call_args.args[0])
+
+    def test_idle_only_dispatch_defers_if_task_became_busy_and_revokes_auth(self):
+        database = self.create_v2_database()
+        with sqlite3.connect(database) as connection:
+            connection.execute("INSERT INTO orchestration_v2_projection_runs VALUES ('v2-thread', 'running')")
+        credential = type('Result', (), {'stdout': json.dumps({
+            'token': 'secret', 'sessionId': 'auth-session'})})()
+        with patch.object(t3_delegate, 't3_home', return_value=self.home), \
+             patch.object(t3_delegate, 't3_cli', return_value=['t3']), \
+             patch.object(t3_delegate.subprocess, 'run', return_value=credential) as run, \
+             patch.object(t3_delegate, 'dispatch_v2') as dispatch:
+            with self.assertRaisesRegex(RuntimeError, 'not idle'):
+                t3_delegate.send_turn('codex-session', 'Resolve review', steer=False)
+        dispatch.assert_not_called()
         self.assertIn('revoke', run.call_args.args[0])
 
     def setUp(self):

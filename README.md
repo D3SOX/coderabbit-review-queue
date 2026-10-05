@@ -145,14 +145,20 @@ authenticated account. An `OWNER/REPOSITORY` value can also be entered
 manually.
 
 Automatic delegation is disabled by default. For each repository, choose Auto
-(Codex + Claude), Codex only, or Claude only. A matching task must be idle;
-Auto prefers Codex when both are available. The **Agent host** dialog lists
+(Codex + Claude), Codex only, or Claude only. Auto prefers Codex when both are
+available. The **Agent host** dialog lists
 hosts from `~/.ssh/config`, or you can leave it on Local. The queue uses that
 host for task lookup, delegation, and `gh pr merge`.
 
 T3 Code delegations are sent through its running local server so turns also
 appear in the T3 app. If its CLI is not on `PATH`, set `T3CODE_CLI` on the
 agent host to the executable or its `bin.mjs` bundle.
+
+**Delegation prompt** also contains **Steer running agents**, enabled by default.
+It delivers feedback into the active turn for T3 v2 and Codex Desktop/CLI tasks
+on a reachable shared app-server. Other tasks, including Claude, must be idle.
+Turn steering off to wait for idle; the queue rechecks that the PR is open before
+delegating. The button below finished reviews is **Delegate / steer selected**.
 
 Automatic merging and task archiving are off by default. Configure them per
 repository in **Configure approval actions**. Before merging, the queue's
