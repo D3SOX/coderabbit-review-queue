@@ -317,6 +317,14 @@ codex_session_state() {
   local session_id=$1
   local session_file state
 
+  # T3 migrations can detach the old native session. Its rollout no longer
+  # reflects the linked app thread, so prefer the owning server's run state.
+  if state=$(python3 "$script_dir/t3-delegate.py" --state "$session_id" 2>/dev/null); then
+    case $state in
+      idle | running) printf '%s\n' "$state"; return 0 ;;
+    esac
+  fi
+
   if ! session_file=$(codex_session_file "$session_id") || \
     [[ -z $session_file ]]; then
     printf 'unknown\n'

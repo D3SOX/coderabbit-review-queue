@@ -3,6 +3,8 @@
 
 import json
 import os
+import re
+from contextlib import closing
 from pathlib import Path
 import shutil
 import sqlite3
@@ -27,17 +29,25 @@ def thread_title(session_id):
     database = t3_database()
     if not database.is_file():
         return ''
-    with sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=1) as connection:
+    with closing(sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=1)) as connection:
         if database.name == 'statev2.sqlite':
             rows = connection.execute('''
                 SELECT t.title FROM orchestration_v2_projection_provider_threads p
                 JOIN orchestration_v2_projection_threads t ON t.thread_id = p.thread_id
-                WHERE p.provider = 'codex'
+                WHERE (p.provider = 'codex' OR json_extract(p.payload_json, '$.driver') = 'codex')
                   AND json_extract(p.payload_json, '$.nativeThreadRef.nativeId') = ?
                   AND t.active_provider_thread_id = p.provider_thread_id
                   AND t.deleted_at IS NULL
             ''', (session_id,)).fetchall()
-            return ' '.join((rows[0][0] or '').split()) if len(rows) == 1 else ''
+            if len(rows) == 1:
+                return ' '.join((rows[0][0] or '').split())
+            try:
+                thread_id = matching_thread(database, session_id)[0]
+            except RuntimeError:
+                return ''
+            title = connection.execute('SELECT title FROM orchestration_v2_projection_threads '
+                                       'WHERE thread_id = ?', (thread_id,)).fetchone()[0]
+            return ' '.join((title or '').split())
         rows = connection.execute('''
             SELECT t.title
             FROM provider_session_runtime r
@@ -76,19 +86,59 @@ def t3_cli():
     raise RuntimeError('T3 Code CLI not found; set T3CODE_CLI to its CLI bundle')
 
 
+def matching_worktree_thread(connection, session_id):
+    """Recover migrated T3 threads without trusting stale Codex branch metadata."""
+    codex_home = Path(os.environ.get('CODEX_HOME', Path.home() / '.codex'))
+    database = codex_home / 'state_5.sqlite'
+    if not database.is_file():
+        return []
+    with closing(sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=1)) as codex:
+        row = codex.execute('SELECT cwd FROM threads WHERE id = ? '
+                            'AND originator IN (\'T3 Code\', \'t3code_desktop\')',
+                            (session_id,)).fetchone()
+    if not row:
+        return []
+    cwd = row[0]
+    def git(*args):
+        result = subprocess.run(['git', '-C', cwd, *args], capture_output=True,
+                                text=True, timeout=3)
+        return result.stdout.strip() if result.returncode == 0 else ''
+    origin = git('remote', 'get-url', 'origin')
+    branch = git('branch', '--show-current')
+    repository = re.search(r'github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$', origin)
+    if not repository or not branch:
+        return []
+    return connection.execute('''
+        SELECT t.thread_id, t.runtime_mode, t.interaction_mode,
+               json_extract(t.payload_json, '$.modelSelection')
+        FROM orchestration_v2_projection_threads t
+        LEFT JOIN orchestration_v2_projection_provider_threads p
+          ON p.provider_thread_id = t.active_provider_thread_id
+        WHERE t.deleted_at IS NULL AND t.archived_at IS NULL
+          AND (json_extract(p.payload_json, '$.driver') = 'codex'
+               OR (t.active_provider_thread_id IS NULL AND t.default_provider = 'codex'))
+          AND json_extract(t.payload_json, '$.worktreePath') = ?
+          AND json_extract(t.payload_json, '$.branch') = ?
+          AND lower(json_extract(t.payload_json, '$.branchPullRequest.repository')) = ?
+          AND json_extract(t.payload_json, '$.branchPullRequest.number') > 0
+    ''', (cwd, branch, repository.group(1).lower())).fetchall()
+
+
 def matching_thread(database, session_id):
-    with sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=5) as connection:
+    with closing(sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=5)) as connection:
         if database.name == 'statev2.sqlite':
             rows = connection.execute('''
                 SELECT t.thread_id, t.runtime_mode, t.interaction_mode,
                        json_extract(t.payload_json, '$.modelSelection')
                 FROM orchestration_v2_projection_provider_threads p
                 JOIN orchestration_v2_projection_threads t ON t.thread_id = p.thread_id
-                WHERE p.provider = 'codex'
+                WHERE (p.provider = 'codex' OR json_extract(p.payload_json, '$.driver') = 'codex')
                   AND json_extract(p.payload_json, '$.nativeThreadRef.nativeId') = ?
                   AND t.active_provider_thread_id = p.provider_thread_id
                   AND t.deleted_at IS NULL AND t.archived_at IS NULL
             ''', (session_id,)).fetchall()
+            if not rows:
+                rows = matching_worktree_thread(connection, session_id)
             if len(rows) != 1:
                 raise RuntimeError(f'Expected one active T3 v2 thread; found {len(rows)}')
             thread_id, runtime_mode, interaction_mode, model_json = rows[0]
@@ -109,6 +159,20 @@ def matching_thread(database, session_id):
     if status not in ('ready', 'stopped'):
         raise RuntimeError(f'T3 thread {thread_id} is {status}; not sending another turn')
     return thread_id, runtime_mode, interaction_mode, json.loads(model_json)
+
+
+def thread_state(session_id):
+    database = t3_database()
+    if database.name != 'statev2.sqlite':
+        raise RuntimeError('T3 v2 task state unavailable')
+    thread_id = matching_thread(database, session_id)[0]
+    with closing(sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=1)) as connection:
+        active = connection.execute('''
+            SELECT 1 FROM orchestration_v2_projection_runs
+            WHERE thread_id = ? AND status IN
+              ('queued', 'preparing', 'starting', 'running', 'waiting') LIMIT 1
+        ''', (thread_id,)).fetchone()
+    return 'running' if active else 'idle'
 
 
 def dispatch_v2(origin, token, command, method='orchestration.dispatchCommand'):
@@ -229,6 +293,8 @@ if __name__ == '__main__':
     try:
         if sys.argv[1] == '--title':
             print(thread_title(sys.argv[2]))
+        elif sys.argv[1] == '--state':
+            print(thread_state(sys.argv[2]))
         elif sys.argv[1] == '--can-steer':
             database = t3_database()
             if database.name != 'statev2.sqlite':

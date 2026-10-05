@@ -11,6 +11,15 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_migrated_t3_task_state_overrides_stale_native_rollout(self):
+        result = self.run_shell(r'''
+python3() { [[ $1 == */t3-delegate.py && $2 == --state ]] && echo running; }
+codex_session_file() { echo 'unexpected stale native lookup'; return 1; }
+codex_session_state old-session
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'running')
+
     def test_native_codex_running_task_is_steerable(self):
         result = self.run_shell(r'''
 python3() { [[ $1 == */codex-steer.py ]]; }

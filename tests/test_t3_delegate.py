@@ -1,7 +1,9 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,6 +16,93 @@ SPEC.loader.exec_module(t3_delegate)
 
 
 class T3DelegateTests(unittest.TestCase):
+    def create_migrated_thread(self):
+        database = self.create_v2_database()
+        worktree = Path(self.temp.name) / 'worktree'
+        subprocess.run(['git', 'init', '-q', '--initial-branch=pr-branch', str(worktree)], check=True)
+        subprocess.run(['git', '-C', str(worktree), 'remote', 'add', 'origin',
+                        'git@github.com:Example/Repo.git'], check=True)
+        codex_home = Path(self.temp.name) / 'codex'
+        codex_home.mkdir()
+        with sqlite3.connect(codex_home / 'state_5.sqlite') as connection:
+            connection.execute('CREATE TABLE threads (id TEXT, cwd TEXT, originator TEXT)')
+            connection.execute('INSERT INTO threads VALUES (?,?,?)', ('old-session', str(worktree), 'T3 Code'))
+        payload = {'worktreePath': str(worktree), 'branch': 'pr-branch',
+                   'branchPullRequest': {'repository': 'example/repo', 'number': 42},
+                   'modelSelection': {'instanceId': 'codex', 'model': 'test-model'}}
+        with sqlite3.connect(database) as connection:
+            connection.execute('DELETE FROM orchestration_v2_projection_provider_threads')
+            connection.execute('UPDATE orchestration_v2_projection_threads SET '
+                               'active_provider_thread_id=NULL,default_provider=\'codex\',payload_json=?',
+                               (json.dumps(payload),))
+        return database, codex_home
+
+    def test_migrated_pr_thread_matches_old_session_by_verified_worktree(self):
+        database, codex_home = self.create_migrated_thread()
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}):
+            thread = t3_delegate.matching_thread(database, 'old-session')
+        self.assertEqual(thread[0], 'v2-thread')
+
+    def test_migrated_dispatch_reaches_app_thread_and_inherits_settings(self):
+        database, codex_home = self.create_migrated_thread()
+        real_run = subprocess.run
+        credential = type('Result', (), {'stdout': json.dumps({
+            'token': 'secret', 'sessionId': 'auth-session'})})()
+        def run(args, **kwargs):
+            return real_run(args, **kwargs) if args[0] == 'git' else credential
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}), \
+             patch.object(t3_delegate, 't3_home', return_value=self.home), \
+             patch.object(t3_delegate, 't3_cli', return_value=['t3']), \
+             patch.object(t3_delegate.subprocess, 'run', side_effect=run), \
+             patch.object(t3_delegate, 'dispatch_v2') as dispatch:
+            t3_delegate.send_turn('old-session', 'Resolve conflicts; rerun merge guard')
+            self.assertEqual(dispatch.call_args.args[2]['threadId'], 'v2-thread')
+            self.assertNotIn('modelSelection', dispatch.call_args.args[2])
+            with sqlite3.connect(database) as db:
+                db.execute("INSERT INTO orchestration_v2_projection_runs VALUES ('v2-thread','running')")
+            self.assertEqual(t3_delegate.thread_state('old-session'), 'running')
+            dispatch.reset_mock()
+            with self.assertRaisesRegex(RuntimeError, 'not idle'):
+                t3_delegate.send_turn('old-session', 'Duplicate repair', steer=False)
+            dispatch.assert_not_called()
+
+    def test_native_matching_accepts_named_codex_provider_instance(self):
+        database = self.create_v2_database()
+        with sqlite3.connect(database) as db:
+            db.execute('UPDATE orchestration_v2_projection_provider_threads '
+                       'SET provider=\'codex_second\',payload_json=?',
+                       (json.dumps({'driver': 'codex', 'nativeThreadRef': {'nativeId': 'codex-session'}}),))
+        self.assertEqual(t3_delegate.matching_thread(database, 'codex-session')[0], 'v2-thread')
+
+    def test_migrated_match_rejects_wrong_repo_branch_archive_and_duplicates(self):
+        database, codex_home = self.create_migrated_thread()
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}), sqlite3.connect(database) as db:
+            original = db.execute('SELECT payload_json FROM orchestration_v2_projection_threads').fetchone()[0]
+            for key, value in [('branch', 'other'), ('branchPullRequest', {'repository': 'other/repo'})]:
+                payload = json.loads(original)
+                payload[key] = value
+                db.execute('UPDATE orchestration_v2_projection_threads SET payload_json=?', (json.dumps(payload),))
+                db.commit()
+                with self.assertRaises(RuntimeError):
+                    t3_delegate.matching_thread(database, 'old-session')
+            db.execute('UPDATE orchestration_v2_projection_threads SET payload_json=?,archived_at=\'today\'', (original,))
+            db.commit()
+            with self.assertRaises(RuntimeError):
+                t3_delegate.matching_thread(database, 'old-session')
+            db.execute('UPDATE orchestration_v2_projection_threads SET archived_at=NULL')
+            db.execute('INSERT INTO orchestration_v2_projection_threads SELECT * FROM orchestration_v2_projection_threads')
+            db.commit()
+            with self.assertRaises(RuntimeError):
+                t3_delegate.matching_thread(database, 'old-session')
+
+    def test_cli_session_cannot_fall_back_to_unrelated_t3_app_thread(self):
+        database, codex_home = self.create_migrated_thread()
+        with sqlite3.connect(codex_home / 'state_5.sqlite') as db:
+            db.execute("UPDATE threads SET originator='codex-tui'")
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}):
+            with self.assertRaises(RuntimeError):
+                t3_delegate.matching_thread(database, 'old-session')
+
     def create_v2_database(self):
         database = self.home / 'statev2.sqlite'
         with sqlite3.connect(database) as connection:
@@ -31,6 +120,7 @@ class T3DelegateTests(unittest.TestCase):
                   ('provider-thread', 'v2-thread', 'codex',
                    '{"nativeThreadRef":{"nativeId":"codex-session"},"status":"running"}');
             ''')
+            connection.execute('ALTER TABLE orchestration_v2_projection_threads ADD COLUMN default_provider TEXT')
         return database
 
     def test_v2_thread_matches_native_session_including_running_tasks(self):
