@@ -25,17 +25,22 @@ matching_codex_session() {
 import sqlite3
 import subprocess
 import sys
+import json
 
 database, repo, branch, head = sys.argv[1:]
+git_results = {}
 
 def git(cwd, *args):
-    result = subprocess.run(['git', '-C', cwd, *args], capture_output=True, text=True)
-    return result.stdout.strip() if result.returncode == 0 else ''
+    key = (cwd, args)
+    if key not in git_results:
+        result = subprocess.run(['git', '-C', cwd, *args], capture_output=True, text=True)
+        git_results[key] = result.stdout.strip() if result.returncode == 0 else ''
+    return git_results[key]
 
 try:
     with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as connection:
         rows = connection.execute('''
-            SELECT id, cwd, git_branch, git_sha FROM threads
+            SELECT id, cwd, git_branch, git_sha, rollout_path FROM threads
             WHERE originator IN ('Codex Desktop', 't3code_desktop', 'T3 Code', 'codex-tui', 'codex_exec')
               AND (thread_source IS NULL OR thread_source != 'subagent')
               AND (git_origin_url LIKE ? OR git_origin_url LIKE ?)
@@ -46,7 +51,7 @@ except sqlite3.Error:
 
 matches = [[], [], [], []]
 seen = set()
-for session_id, cwd, stored_branch, stored_head in rows:
+for session_id, cwd, stored_branch, stored_head, _rollout in rows:
     if cwd in seen:
         continue
     seen.add(cwd)
@@ -59,6 +64,40 @@ for session_id, cwd, stored_branch, stored_head in rows:
                                      stored_branch == branch, stored_head == head)):
         if matched:
             matches[index].append((session_id, cwd))
+# Agents can resolve reviews in a temporary worktree without changing the
+# session's original cwd. Check only indexed rollouts before scanning history.
+if not matches[0] and not matches[1]:
+    event_matches = [{}, {}]
+    for session_id, _cwd, _branch, _head, rollout in rows:
+        if not rollout:
+            continue
+        paths = set()
+        try:
+            with open(rollout) as events:
+                for line in events:
+                    if '"cwd"' not in line:
+                        continue
+                    try:
+                        cwd = json.loads(line).get('payload', {}).get('item', {}).get('cwd')
+                    except (ValueError, AttributeError):
+                        continue
+                    if isinstance(cwd, str):
+                        paths.add(cwd.removeprefix('file://'))
+        except OSError:
+            continue
+        for cwd in sorted(paths):
+            root = git(cwd, 'rev-parse', '--show-toplevel')
+            if not root:
+                continue
+            origin = git(root, 'remote', 'get-url', 'origin')
+            if not origin.endswith((f'github.com:{repo}.git', f'github.com/{repo}.git', f'github.com/{repo}')):
+                continue
+            for index, matched in enumerate((git(root, 'branch', '--show-current') == branch,
+                                             git(root, 'rev-parse', 'HEAD') == head)):
+                if matched:
+                    event_matches[index].setdefault(root, (session_id, root))
+    for index, group in enumerate(event_matches):
+        matches[index].extend(group.values())
 for group in matches:
     if len(group) == 1:
         print(*group[0], sep='\t')

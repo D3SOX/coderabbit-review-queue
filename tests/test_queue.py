@@ -744,10 +744,10 @@ import sqlite3
 import sys
 db, cwd, session = sys.argv[1:]
 with sqlite3.connect(db) as connection:
-    connection.execute('CREATE TABLE threads (id TEXT, cwd TEXT, git_origin_url TEXT, git_branch TEXT, git_sha TEXT, originator TEXT, updated_at INTEGER, thread_source TEXT)')
-    connection.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    connection.execute('CREATE TABLE threads (id TEXT, cwd TEXT, git_origin_url TEXT, git_branch TEXT, git_sha TEXT, originator TEXT, updated_at INTEGER, thread_source TEXT, rollout_path TEXT)')
+    connection.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)',
         (session, cwd, 'git@github.com:example/repo.git', 't3code/original', 'old-head', 'T3 Code', 1, 'user'))
-    connection.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    connection.execute('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)',
         ('subagent', cwd, 'git@github.com:example/repo.git', 'target-branch', 'old-head', 'T3 Code', 2, 'subagent'))
 PY
 rg() { return 1; }
@@ -755,6 +755,37 @@ matching_codex_session target-branch "$head"
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('12345678-1234-1234-1234-123456789abc', result.stdout)
+
+    def test_indexed_task_matches_temporary_review_worktree_without_global_scan(self):
+        result = self.run_shell(r'''
+codex_state_db="$state_root/state.sqlite"
+old="$state_root/old"
+current="$state_root/review"
+mkdir -p "$old" "$current/android"
+git -C "$old" init -q
+git -C "$old" remote add origin git@github.com:example/repo.git
+git -C "$current" init -q
+git -C "$current" remote add origin git@github.com:example/repo.git
+git -C "$current" config user.name Test
+git -C "$current" config user.email test@example.com
+git -C "$current" config commit.gpgSign false
+git -C "$current" commit --allow-empty -qm initial
+git -C "$current" branch -M target-branch
+head=$(git -C "$current" rev-parse HEAD)
+file="$state_root/task.jsonl"
+printf '%s\n' "{\"type\":\"event_msg\",\"payload\":{\"item\":{\"cwd\":\"file://$current/android\"}}}" >"$file"
+python3 - "$codex_state_db" "$old" "$file" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute('CREATE TABLE threads (id TEXT,cwd TEXT,git_branch TEXT,git_sha TEXT,originator TEXT,thread_source TEXT,git_origin_url TEXT,updated_at INTEGER,rollout_path TEXT)')
+    db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?)', ('session',sys.argv[2],'old','old','T3 Code','user','git@github.com:example/repo.git',1,sys.argv[3]))
+PY
+rg() { echo 'unexpected global rollout scan' >&2; return 1; }
+matching_codex_session target-branch "$head"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('unexpected global rollout scan', result.stderr)
+        self.assertIn('session\t', result.stdout)
 
     def test_codex_match_finds_cli_sessions(self):
         for originator in ('codex-tui', 'codex_exec'):
