@@ -23,6 +23,25 @@ import queue_gui_status
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_selected_running_t3_task_can_be_steered_but_not_bulk_delegated(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.tasks = queue_gui.QTreeWidget()
+        window.monitor_activity = None
+        window.selected_repo.return_value = "example/repo"
+        window.delegate_process.state.return_value = QProcess.NotRunning
+        window.delegate_button = queue_gui.QPushButton()
+        window.delegate_all_button = queue_gui.QPushButton()
+        for steerable in (False, True):
+            status = "Finished CodeRabbit reviews:\n  #1 PR\n    Result: 2 unresolved\n    Agent task: Codex Running" + (" (steerable)" if steerable else "") + "\tTask\tWorking\n"
+            queue_gui.QueueWindow.populate_tasks(window, status)
+            window.tasks.setCurrentItem(window.tasks.topLevelItem(0))
+            queue_gui.QueueWindow.update_delegate_button(window)
+            self.assertEqual(window.delegate_button.isEnabled(), steerable)
+            self.assertFalse(window.delegate_all_button.isEnabled())
+            self.assertEqual(window.delegate_button.text(), "Steer selected" if steerable else "Delegate selected")
+        app.processEvents()
+
     def test_refresh_keeps_visible_pr_when_rows_above_change(self):
         app = QApplication.instance() or QApplication([])
         for table, pixel_scroll in (("queue", False), ("tasks", False), ("queue", True), ("tasks", True)):

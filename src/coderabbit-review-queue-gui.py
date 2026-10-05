@@ -765,11 +765,15 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
     def update_delegate_button(self) -> None:
         item = self.tasks.currentItem()
         process_idle = self.delegate_process.state() == QProcess.NotRunning
+        if process_idle:
+            steerable = item is not None and bool(item.data(0, Qt.UserRole + 3))
+            self.delegate_button.setText("Steer selected" if steerable else "Delegate selected")
         self.delegate_button.setEnabled(
             item is not None
             and bool(self.selected_repo())
             and bool(item.data(0, Qt.UserRole + 2))
-            and not bool(item.data(0, Qt.UserRole + 1))
+            and (not bool(item.data(0, Qt.UserRole + 1))
+                 or bool(item.data(0, Qt.UserRole + 3)))
             and process_idle
         )
         has_idle = any(
@@ -788,7 +792,8 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             item is None
             or not repo
             or not bool(item.data(0, Qt.UserRole + 2))
-            or bool(item.data(0, Qt.UserRole + 1))
+            or (bool(item.data(0, Qt.UserRole + 1))
+                and not bool(item.data(0, Qt.UserRole + 3)))
             or self.delegate_process.state() != QProcess.NotRunning
         ):
             return

@@ -64,6 +64,10 @@ codex_task_progress() {
   IFS=$'\t' read -r task_title task_model task_effort <<<"$metadata"
   t3_title=$(python3 "$script_dir/t3-delegate.py" --title "$session_id" 2>/dev/null || true)
   [[ -z $t3_title ]] || task_title=$t3_title
+  if [[ $state == Running ]] &&
+    python3 "$script_dir/t3-delegate.py" --can-steer "$session_id" >/dev/null 2>&1; then
+    state='Running (steerable)'
+  fi
   [[ -n $task_title ]] || task_title='—'
   printf '%s\t%s\t%s\n' "$state" "$task_title" "$message"
 }

@@ -522,6 +522,14 @@ resume_codex_via_t3() {
   printf '%s' "$prompt" | python3 "$script_dir/t3-delegate.py" "$session_id"
 }
 
+codex_can_receive_review() {
+  local session_id=$1 state=$2
+  [[ $state == idle ]] || {
+    [[ $state == running ]] &&
+      python3 "$script_dir/t3-delegate.py" --can-steer "$session_id" >/dev/null 2>&1
+  }
+}
+
 resume_codex_via_exec() {
   local session_id=$1 client_pid pid_file log_path attempt
   shift
@@ -656,7 +664,9 @@ route_unresolved_review() {
     fi
   fi
 
-  if [[ $codex_state == running || $claude_state == running ]]; then
+  if [[ $claude_state == running ]] || {
+    [[ $codex_state == running ]] && ! codex_can_receive_review "$codex_session_id" "$codex_state"
+  }; then
     printf 'Matching agent task for PR #%s is already running; deferring review routing.\n' \
       "$pr"
     return 0
@@ -665,7 +675,7 @@ route_unresolved_review() {
   agent=''
   session_id=''
   session_cwd=''
-  if [[ $codex_state == idle ]]; then
+  if codex_can_receive_review "$codex_session_id" "$codex_state"; then
     agent=codex
     session_id=$codex_session_id
     session_cwd=$codex_session_cwd
@@ -720,7 +730,7 @@ resume_codex_session() {
   local routing_reason=${8:-unresolved CodeRabbit review}
   local session_state resume_status metadata task_title task_model task_effort
   local task_sandbox_policy task_approval_mode
-  local originator
+  local originator is_t3=0
   local routing_lock_path routing_lock_fd
   local thread_id
   local -a codex_args
@@ -738,7 +748,7 @@ resume_codex_session() {
 
   sleep 1
   session_state=$(codex_session_state "$session_id")
-  if [[ $session_state != idle ]]; then
+  if ! codex_can_receive_review "$session_id" "$session_state"; then
     if [[ $session_state == running ]]; then
       printf 'Codex task %s for PR #%s started while routing; deferring review routing.\n' \
         "$session_id" "$pr"
@@ -752,30 +762,36 @@ resume_codex_session() {
 
   printf 'Routing %s on PR #%s to Codex task %s.\n' \
     "$routing_reason" "$pr" "$session_id"
-  metadata=$(codex_thread_metadata "$session_id" 2>/dev/null || true)
-  IFS=$'\t' read -r task_title task_model task_effort task_sandbox_policy \
-    task_approval_mode <<<"$metadata"
-  codex_args=(exec)
-  [[ -z $task_model ]] || codex_args+=(-m "$task_model")
-  [[ -z $task_effort ]] || codex_args+=(-c "model_reasoning_effort=$task_effort")
-  if ! codex_resume_permission_args "$task_sandbox_policy" "$task_approval_mode" \
-    codex_args; then
-    desktop_notify \
-      'CodeRabbit delegation blocked' \
-      "PR #$pr — $title"$'\n''Could not safely reproduce the task permissions.' \
-      'critical'
-    exec {routing_lock_fd}>&-
-    return 1
-  fi
-  codex_args+=(resume --all "$session_id" "$prompt")
   originator=$(codex_session_originator "$session_id" 2>/dev/null || true)
+  if [[ $originator == 't3code_desktop' || $originator == 'T3 Code' ]] ||
+    python3 "$script_dir/t3-delegate.py" --can-steer "$session_id" >/dev/null 2>&1; then
+    is_t3=1
+  fi
+  if (( is_t3 == 0 )); then
+    metadata=$(codex_thread_metadata "$session_id" 2>/dev/null || true)
+    IFS=$'\t' read -r task_title task_model task_effort task_sandbox_policy \
+      task_approval_mode <<<"$metadata"
+    codex_args=(exec)
+    [[ -z $task_model ]] || codex_args+=(-m "$task_model")
+    [[ -z $task_effort ]] || codex_args+=(-c "model_reasoning_effort=$task_effort")
+    if ! codex_resume_permission_args "$task_sandbox_policy" "$task_approval_mode" \
+      codex_args; then
+      desktop_notify \
+        'CodeRabbit delegation blocked' \
+        "PR #$pr — $title"$'\n''Could not safely reproduce the task permissions.' \
+        'critical'
+      exec {routing_lock_fd}>&-
+      return 1
+    fi
+    codex_args+=(resume --all "$session_id" "$prompt")
+  fi
   if (
     cd "$session_cwd"
-    [[ $(codex_session_state "$session_id") == idle ]] || exit 75
-    if [[ $originator == 't3code_desktop' || $originator == 'T3 Code' ]]; then
+    if (( is_t3 )); then
       resume_codex_via_t3 "$session_id" "$prompt"
       exit $?
     fi
+    [[ $(codex_session_state "$session_id") == idle ]] || exit 75
     if [[ $originator == 'Codex Desktop' ]] && \
       resume_codex_via_daemon "$session_id" "$prompt"; then
       exit 0

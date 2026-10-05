@@ -918,6 +918,43 @@ resume_codex_session 42 title head "$session" "$worktree" prompt threads
         self.assertIn('t3 resume <12345678-1234-1234-1234-123456789abc> <prompt>', result.stdout)
         self.assertNotIn('unexpected detached codex', result.stdout)
 
+    def test_running_t3_v2_task_receives_review_without_detached_resume(self):
+        result = self.run_shell(r'''
+worktree="$state_root/worktree"
+mkdir -p "$worktree"
+git -C "$worktree" init -q
+codex_session_state() { echo running; }
+codex_session_originator() { echo 'T3 Code'; }
+codex_can_receive_review() { return 0; }
+resume_codex_via_t3() { echo "steer $1 $2"; }
+codex_thread_metadata() { echo 'unexpected permission override'; return 1; }
+resume_codex_via_exec() { echo 'unexpected detached resume'; return 1; }
+desktop_notify() { :; }
+threads=(thread-1)
+resume_codex_session 42 title head session "$worktree" prompt threads
+grep -qx thread-1 "$routed_threads_file"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('steer session prompt', result.stdout)
+        self.assertNotIn('unexpected', result.stdout)
+
+    def test_auto_routing_steers_supported_running_task_but_defers_others(self):
+        for steerable in (True, False):
+            with self.subTest(steerable=steerable):
+                result = self.run_shell(r'''
+agent_mode_override=codex
+agent_host() { :; }
+unresolved_coderabbit_rows() { printf 'finding\tfile\t1\tfalse\n'; }
+matching_codex_session() { printf 'session\t/worktree\n'; }
+codex_session_state() { echo running; }
+resume_codex_session() { echo 'review delivered'; }
+desktop_notify() { :; }
+''' + f'codex_can_receive_review() {{ return {0 if steerable else 1}; }}\n' + r'''
+route_unresolved_review 42 branch head title
+''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual('review delivered' in result.stdout, steerable)
+
     def test_completed_delegation_leaves_merge_to_agent(self):
         result = self.run_shell(r'''
 worktree="$state_root/worktree"

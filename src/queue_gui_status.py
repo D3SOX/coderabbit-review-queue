@@ -694,6 +694,7 @@ class StatusMixin:
             item.setData(0, Qt.UserRole, number)
             item.setData(0, Qt.UserRole + 1, "Running" in state.split())
             item.setData(0, Qt.UserRole + 2, actionable)
+            item.setData(0, Qt.UserRole + 3, state.endswith("(steerable)"))
             item.setToolTip(5, detail)
             self.tasks.addTopLevelItem(item)
             if number == selected_number:
