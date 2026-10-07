@@ -161,17 +161,23 @@ def matching_thread(database, session_id):
     return thread_id, runtime_mode, interaction_mode, json.loads(model_json)
 
 
+def has_active_run(connection, thread_id):
+    # T3's `waiting` is a completed provider turn awaiting checkpoint capture,
+    # not agent execution. PR-watch background work must not block delegation.
+    return connection.execute('''
+        SELECT 1 FROM orchestration_v2_projection_runs
+        WHERE thread_id = ? AND status IN
+          ('queued', 'preparing', 'starting', 'running') LIMIT 1
+    ''', (thread_id,)).fetchone() is not None
+
+
 def thread_state(session_id):
     database = t3_database()
     if database.name != 'statev2.sqlite':
         raise RuntimeError('T3 v2 task state unavailable')
     thread_id = matching_thread(database, session_id)[0]
     with closing(sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=1)) as connection:
-        active = connection.execute('''
-            SELECT 1 FROM orchestration_v2_projection_runs
-            WHERE thread_id = ? AND status IN
-              ('queued', 'preparing', 'starting', 'running', 'waiting') LIMIT 1
-        ''', (thread_id,)).fetchone()
+        active = has_active_run(connection, thread_id)
     return 'running' if active else 'idle'
 
 
@@ -236,11 +242,7 @@ def send_turn(session_id, prompt, *, steer=True):
         if database.name == 'statev2.sqlite':
             if not steer:
                 with sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=5) as connection:
-                    active = connection.execute('''
-                        SELECT 1 FROM orchestration_v2_projection_runs
-                        WHERE thread_id = ? AND status IN
-                          ('queued', 'preparing', 'starting', 'running', 'waiting') LIMIT 1
-                    ''', (thread_id,)).fetchone()
+                    active = has_active_run(connection, thread_id)
                 if active:
                     raise RuntimeError('T3 task is not idle; leaving feedback for retry')
             command = {

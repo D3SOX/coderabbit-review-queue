@@ -16,6 +16,35 @@ SPEC.loader.exec_module(t3_delegate)
 
 
 class T3DelegateTests(unittest.TestCase):
+    def test_pr_watch_wait_is_idle_but_an_actual_turn_is_running(self):
+        database = self.create_v2_database()
+        with sqlite3.connect(database) as connection:
+            connection.execute("INSERT INTO orchestration_v2_projection_runs VALUES ('v2-thread', 'waiting')")
+            connection.execute('UPDATE orchestration_v2_projection_provider_threads SET payload_json=?',
+                               (json.dumps({'nativeThreadRef': {'nativeId': 'codex-session'},
+                                            'status': 'idle', 'pendingBackgroundTasks': [
+                                                {'taskId': 'pull-request-watch:github.com/example/repo#42',
+                                                 'kind': 'monitor'}]}),))
+        with patch.object(t3_delegate, 't3_home', return_value=self.home):
+            self.assertEqual(t3_delegate.thread_state('codex-session'), 'idle')
+            with sqlite3.connect(database) as connection:
+                connection.execute("INSERT INTO orchestration_v2_projection_runs VALUES ('v2-thread', 'running')")
+            self.assertEqual(t3_delegate.thread_state('codex-session'), 'running')
+
+    def test_idle_only_dispatch_can_resume_while_pr_watch_waits(self):
+        database = self.create_v2_database()
+        with sqlite3.connect(database) as connection:
+            connection.execute("INSERT INTO orchestration_v2_projection_runs VALUES ('v2-thread', 'waiting')")
+        credential = type('Result', (), {'stdout': json.dumps({
+            'token': 'secret', 'sessionId': 'auth-session'})})()
+        with patch.object(t3_delegate, 't3_home', return_value=self.home), \
+             patch.object(t3_delegate, 't3_cli', return_value=['t3']), \
+             patch.object(t3_delegate.subprocess, 'run', return_value=credential), \
+             patch.object(t3_delegate, 'dispatch_v2') as dispatch:
+            t3_delegate.send_turn('codex-session', 'Resolve review', steer=False)
+        dispatch.assert_called_once()
+        self.assertNotIn('deliveryIntent', dispatch.call_args.args[2])
+
     def create_migrated_thread(self):
         database = self.create_v2_database()
         worktree = Path(self.temp.name) / 'worktree'
