@@ -174,6 +174,9 @@ class T3DelegateTests(unittest.TestCase):
         # Omit overrides: v2 inherits model/options/permissions from the thread.
         self.assertNotIn('modelSelection', command)
         self.assertNotIn('runtimeMode', command)
+        issue_args = run.call_args_list[0].args[0]
+        self.assertEqual([issue_args[index + 1] for index, arg in enumerate(issue_args)
+                          if arg == '--scope'], ['orchestration:read', 'orchestration:operate'])
         self.assertIn('revoke', run.call_args.args[0])
 
     def test_idle_only_dispatch_defers_if_task_became_busy_and_revokes_auth(self):

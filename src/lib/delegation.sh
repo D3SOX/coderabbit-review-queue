@@ -653,6 +653,7 @@ route_unresolved_review() {
       --resolve-merge-conflicts-setting "$resolve_conflicts"); then
       printf '%s\n' "$remote_output"
       if [[ $remote_output == *"Delegation confirmed for PR #$pr."* ]]; then
+        clear_routing_failure "$pr"
         mark_pr_delegated "$pr"
         if archive_after_merge_enabled; then
           local archive_session_id
@@ -842,6 +843,7 @@ resume_codex_session() {
       printf '%s\n' "$thread_id" >>"$routed_threads_file"
     done
     printf 'Delegation confirmed for PR #%s.\n' "$pr"
+    clear_routing_failure "$pr"
     desktop_notify \
       'CodeRabbit review routed' \
       "PR #$pr — $title"$'\n'"Sent $routing_reason to its Codex task."
@@ -856,10 +858,7 @@ resume_codex_session() {
       done
       printf 'Codex task resume failed for PR #%s; leaving it eligible for retry.\n' "$pr" >&2
       dispatch_result=1
-      desktop_notify \
-        'CodeRabbit routing failed' \
-        "PR #$pr — $title"$'\n'"Could not resume the matching Codex task." \
-        'critical'
+      notify_routing_failure_once "$pr" "$head_sha" "$title"
     fi
   fi
   exec {routing_lock_fd}>&-
@@ -921,6 +920,7 @@ resume_claude_session() {
       printf '%s\n' "$thread_id" >>"$routed_threads_file"
     done
     printf 'Delegation confirmed for PR #%s.\n' "$pr"
+    clear_routing_failure "$pr"
     desktop_notify \
       'CodeRabbit review routed' \
       "PR #$pr — $title"$'\n'"Sent unresolved feedback to its Claude session."
@@ -944,6 +944,31 @@ resume_claude_session() {
   exec {routing_lock_fd}>&-
 }
 
+clear_routing_failure() {
+  local failure_file="$state_root/$repo_key-routing-failure-$1" failure_lock_fd
+  exec {failure_lock_fd}>"$failure_file.lock"
+  flock -x "$failure_lock_fd"
+  [[ ! -f $failure_file ]] || rm -f -- "$failure_file"
+  exec {failure_lock_fd}>&-
+}
+
+notify_routing_failure_once() {
+  local pr=$1 head_sha=$2 title=$3
+  local failure_file="$state_root/$repo_key-routing-failure-$pr" failure_lock_fd
+  # Forced delegation is used by the SSH helper; its caller owns notifications.
+  (( force_delegation == 0 )) || return 0
+  exec {failure_lock_fd}>"$failure_file.lock"
+  flock -x "$failure_lock_fd"
+  if [[ -f $failure_file && $(<"$failure_file") == "$head_sha" ]]; then
+    exec {failure_lock_fd}>&-
+    return 0
+  fi
+  printf '%s\n' "$head_sha" >"$failure_file"
+  desktop_notify 'CodeRabbit routing failed' \
+    "PR #$pr — $title"$'\n'"Review monitoring remains active; delegation will retry." 'critical'
+  exec {failure_lock_fd}>&-
+}
+
 route_all_unresolved() {
   local state=$1
   local pr branch_name head_sha title
@@ -953,10 +978,7 @@ route_all_unresolved() {
     if ! route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"; then
       printf 'Agent routing failed for PR #%s; review monitoring will continue.\n' \
         "$pr" >&2
-      desktop_notify \
-        'CodeRabbit routing failed' \
-        "PR #$pr — $title"$'\n'"Review monitoring remains active." \
-        'critical'
+      notify_routing_failure_once "$pr" "$head_sha" "$title"
     fi
   done < <(reviewed_rows <<<"$state")
   return 0

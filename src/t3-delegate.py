@@ -234,7 +234,8 @@ def send_turn(session_id, prompt, *, steer=True):
     cli = t3_cli()
     issue = subprocess.run(
         [*cli, 'auth', 'session', 'issue', '--base-dir', str(home.parent),
-         '--json', '--ttl', '5m', '--label', 'CodeRabbit Review Queue'],
+         '--json', '--ttl', '5m', '--label', 'CodeRabbit Review Queue',
+         '--scope', 'orchestration:read', '--scope', 'orchestration:operate'],
         capture_output=True, text=True, check=True, timeout=15,
     )
     credential = json.loads(issue.stdout)

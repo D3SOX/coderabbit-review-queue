@@ -11,6 +11,32 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_repeated_routing_failures_notify_once_across_poll_workers(self):
+        result = self.run_shell(r'''
+reviewed_rows() { printf '42\tbranch\thead\tTitle\n'; }
+route_unresolved_review() { return 1; }
+desktop_notify() { echo notification; }
+( route_all_unresolved '{}' )
+( route_all_unresolved '{}' )
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['notification'])
+
+    def test_routing_failure_alert_rearms_after_success_or_changed_head(self):
+        result = self.run_shell(r'''
+desktop_notify() { echo notification; }
+notify_routing_failure_once 42 head Title
+notify_routing_failure_once 42 head Title
+clear_routing_failure 42
+notify_routing_failure_once 42 head Title
+notify_routing_failure_once 42 next-head Title
+notify_routing_failure_once 43 head Title
+force_delegation=1
+notify_routing_failure_once 44 head Title
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['notification'] * 4)
+
     def test_remote_routing_attempt_without_success_does_not_consume_feedback(self):
         result = self.run_shell(r'''
 printf 'codex\n' >"$auto_delegate_file"
