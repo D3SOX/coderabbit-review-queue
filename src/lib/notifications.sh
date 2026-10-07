@@ -67,6 +67,9 @@ desktop_notify() {
   local urgency=${3:-normal}
   local with_sound=${4:-0}
   local app_icon
+  # Always identify the repository, including when monitors overlap. Put it
+  # first in the body so a long notification title cannot hide the project.
+  [[ -z ${repo:-} ]] || message="$repo"$'\n'"$message"
   app_icon="$script_dir/coderabbit-logomark.svg"
   [[ -f $app_icon ]] || app_icon="$script_dir/../assets/icons/coderabbit-logomark.svg"
   [[ -f $app_icon ]] || app_icon='system-software-update'

@@ -11,6 +11,64 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_review_wait_does_not_block_other_pr_feedback_routing(self):
+        result = self.run_shell(r'''
+printf 'codex\n' >"$auto_delegate_file"
+wait_for_github_quota() { :; }
+gh() { if [[ $* == *'/status'* ]]; then echo '{"statuses":[]}'; else echo '[]'; fi; }
+process_approval_actions_async() { touch "$state_root/routed"; }
+sleep() { [[ -f $state_root/routed ]] || exit 99; exit 0; }
+wait_for_review_completion 43 now head 'Other PR'
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_quota_wait_routes_feedback_even_when_auto_merge_is_disabled(self):
+        result = self.run_shell(r'''
+printf 'codex\n' >"$auto_delegate_file"
+printf '0\n' >"$auto_merge_file"
+clock=100
+date() { if [[ $* == '-u +%s' ]]; then echo "$clock"; else command date "$@"; fi; }
+sleep() { clock=$((clock + $1)); }
+desktop_notify() { :; }
+monitor_snapshot() { echo 'new feedback'; }
+route_all_unresolved_async() { printf '%s\n' "$1" >>"$state_root/routed"; }
+queue_approved_thread_archives() { :; }
+merge_approved_reviews() { :; }
+wait_until 180 quiet
+wait
+[[ -f $state_root/routed ]] && cat "$state_root/routed"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('new feedback', result.stdout)
+
+    def test_quota_worker_shares_snapshot_with_feedback_routing(self):
+        result = self.run_shell(r'''
+printf 'codex\n' >"$auto_delegate_file"
+monitor_snapshot() { echo called >>"$state_root/snapshots"; echo 'fresh snapshot'; }
+route_all_unresolved_async() { echo "$1" >"$state_root/routed"; }
+queue_approved_thread_archives() { :; }
+merge_approved_reviews() { :; }
+process_approval_actions_async
+wait
+[[ $(<"$state_root/routed") == 'fresh snapshot' ]]
+[[ $(wc -l <"$state_root/snapshots") == 1 ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_notifications_identify_each_repository(self):
+        result = self.run_shell(r'''
+notify-send() { printf '%s\n' "${@: -2}" >>"$state_root/notifications"; }
+desktop_notify 'CodeRabbit review finished' 'PR #42 is ready to inspect.'
+configure_repo another/project
+desktop_notify 'CodeRabbit queue waiting' 'Next review window opens later.'
+cat "$state_root/notifications"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            'CodeRabbit review finished', 'example/repo', 'PR #42 is ready to inspect.',
+            'CodeRabbit queue waiting', 'another/project', 'Next review window opens later.',
+        ])
+
     def test_remote_status_forwards_selected_agent_mode(self):
         result = self.run_shell(r'''
 printf 'codex\n' >"$auto_delegate_file"

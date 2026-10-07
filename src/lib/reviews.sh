@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
+poll_wait_background_actions() {
+  local attempt=$1
+  (( attempt % 12 == 1 )) || return 0
+  wait_for_github_quota
+  if auto_delegation_enabled || { auto_merge_enabled && merge_after_approval_enabled; }; then
+    process_approval_actions_async
+  fi
+}
+
 wait_until() {
   local expiry=$1
   local notification_mode=${2:-notify}
@@ -25,7 +34,9 @@ wait_until() {
     sleep "$interval"
     now=$(date -u +%s)
     delay=$((expiry - now))
-    if (( delay > 0 )) && auto_merge_enabled && merge_after_approval_enabled; then
+    if (( delay > 0 )) && {
+      auto_delegation_enabled || { auto_merge_enabled && merge_after_approval_enabled; }
+    }; then
       process_approval_actions_async
     fi
   done
@@ -157,7 +168,7 @@ query_quota() {
   command_at=$(jq -r .created_at <<<"$command")
 
   for ((attempt = 1; attempt <= quota_response_attempts; attempt++)); do
-    (( attempt % 12 != 1 )) || wait_for_github_quota
+    poll_wait_background_actions "$attempt"
     comments=$(gh api --paginate "repos/$repo/issues/$pr/comments")
     row=$(quota_row_from_comments "$command_at" <<<"$comments")
     if [[ -n $row ]]; then
@@ -197,7 +208,7 @@ wait_for_acceptance() {
   local attempt comments statuses result
 
   for ((attempt = 1; attempt <= acceptance_response_attempts; attempt++)); do
-    (( attempt % 12 != 1 )) || wait_for_github_quota
+    poll_wait_background_actions "$attempt"
     comments=$(gh api --paginate "repos/$repo/issues/$pr/comments")
     statuses=$(gh api "repos/$repo/commits/$head_sha/status")
     result=$(
@@ -293,7 +304,7 @@ wait_for_review_completion() {
   local attempt statuses result reviews comments failure_reason approved feedback
 
   for ((attempt = 1; ; attempt++)); do
-    (( attempt % 12 != 1 )) || wait_for_github_quota
+    poll_wait_background_actions "$attempt"
     statuses=$(gh api "repos/$repo/commits/$head_sha/status")
     result=$(
       jq -r --arg since "$triggered_at" '

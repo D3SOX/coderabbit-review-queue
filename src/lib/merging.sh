@@ -232,6 +232,11 @@ process_approval_actions_async() {
     # Quota waits have no current snapshot. Fetch inside the locked worker so
     # slow GitHub/agent lookups cannot block the review timer or overlap scans.
     [[ -n $state ]] || state=$(monitor_snapshot) || exit 1
+    # Reviews triggered outside this queue can finish while quota is exhausted.
+    # Route their feedback from this same snapshot, not only at dispatch time.
+    if auto_delegation_enabled; then
+      route_all_unresolved_async "$state"
+    fi
     # Capture the task before a merge can delete its branch. Lookup and merge
     # run independently of both the review queue and older archive attempts.
     queue_approved_thread_archives "$state"
