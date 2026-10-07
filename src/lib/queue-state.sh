@@ -143,6 +143,7 @@ configure_repo() {
   requeued_items_at_top_file="$state_root/$repo_key-requeued-items-at-top"
   agent_host_file="$state_root/$repo_key-agent-host"
   delegated_prs_file="$state_root/$repo_key-delegated-prs.txt"
+  requeued_heads_file="$state_root/$repo_key-requeued-heads.tsv"
   delegation_prompt_mode_file="$state_root/$repo_key-delegation-prompt-mode"
   delegation_prompt_template_file="$state_root/$repo_key-delegation-prompt-template"
   steer_running_agents_file="$state_root/$repo_key-steer-running-agents"
@@ -409,6 +410,39 @@ stale_rows() {
   '
 }
 
+position_requeued_pr() {
+  local pr=$1 head_sha=$2 order_lock_fd
+  [[ -f $delegated_prs_file ]] &&
+    rg -q -F -x "$pr" "$delegated_prs_file" || return 0
+
+  exec {order_lock_fd}>"$queue_order_file.lock"
+  flock -x "$order_lock_fd"
+  # Position each returned head once. If a stale GUI save omitted this PR,
+  # restore it, but never undo subsequent manual moves while it is present.
+  if [[ -f $requeued_heads_file && -f $queue_order_file ]] &&
+    rg -q -F -x "$pr"$'\t'"$head_sha" "$requeued_heads_file" &&
+    rg -q -F -x "$pr" "$queue_order_file"; then
+    exec {order_lock_fd}>&-
+    return 0
+  fi
+  {
+    if requeued_items_at_top_enabled; then printf '%s\n' "$pr"; fi
+    if [[ -f $queue_order_file ]]; then
+      awk -v pr="$pr" '$0 != pr' "$queue_order_file"
+    fi
+    if ! requeued_items_at_top_enabled; then printf '%s\n' "$pr"; fi
+  } >"$queue_order_file.tmp.$$"
+  mv "$queue_order_file.tmp.$$" "$queue_order_file"
+  {
+    if [[ -f $requeued_heads_file ]]; then
+      awk -F '\t' -v pr="$pr" '$1 != pr' "$requeued_heads_file"
+    fi
+    printf '%s\t%s\n' "$pr" "$head_sha"
+  } >"$requeued_heads_file.tmp.$$"
+  mv "$requeued_heads_file.tmp.$$" "$requeued_heads_file"
+  exec {order_lock_fd}>&-
+}
+
 load_stale_rows() {
   local state=$1
   local defer_agent_decisions=${2:-0}
@@ -429,6 +463,7 @@ load_stale_rows() {
       ((deferred_review_count+=1))
       continue
     fi
+    position_requeued_pr "$pr" "$head_sha"
     loaded+=("$row")
   done < <(stale_rows <<<"$state")
 

@@ -11,6 +11,50 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_actual_requeue_uses_its_own_preference_and_preserves_later_manual_moves(self):
+        for new_top, requeue_top, expected in [('0', '1', '2 4 9'), ('1', '0', '4 9 2')]:
+            with self.subTest(new_top=new_top, requeue_top=requeue_top):
+                result = self.run_shell(r'''
+printf '%s\n' ''' + new_top + r''' >"$new_items_at_top_file"
+printf '%s\n' ''' + requeue_top + r''' >"$requeued_items_at_top_file"
+printf '2\n' >"$delegated_prs_file"
+printf '4\n9\n' >"$queue_order_file"
+stale_rows() { printf '4\tnow\tbranch\thead-4\tTitle\t-\n9\tnow\tbranch\thead-9\tTitle\t-\n2\tnow\tbranch\tnew-head\tTitle\t-\n'; }
+load_stale_rows '{}'
+printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
+printf '9\n2\n4\n' >"$queue_order_file"
+load_stale_rows '{}'
+printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
+''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [expected, '9 2 4'])
+
+    def test_requeue_waits_for_agent_and_recovers_missing_saved_position(self):
+        result = self.run_shell(r'''
+printf '0\n' >"$new_items_at_top_file"
+printf '1\n' >"$requeued_items_at_top_file"
+printf '2\n' >"$delegated_prs_file"
+printf '4\n9\n' >"$queue_order_file"
+stale_rows() { printf '4\tnow\tbranch\thead-4\tTitle\t-\n9\tnow\tbranch\thead-9\tTitle\t-\n2\tnow\tbranch\tnew-head\tTitle\t-\n'; }
+agent_review_decision_pending() { [[ $1 == 2$'\t'* ]]; }
+load_stale_rows '{}' 1
+printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
+[[ ! -f $requeued_heads_file ]] || exit 99
+load_stale_rows '{}'
+printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
+# A GUI save based on the old finished table may drop the newly returned PR.
+printf '9\n4\n' >"$queue_order_file"
+load_stale_rows '{}'
+printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
+# A subsequent head returns again even if the user moved the previous head.
+printf '9\n4\n2\n' >"$queue_order_file"
+stale_rows() { printf '4\tnow\tbranch\thead-4\tTitle\t-\n9\tnow\tbranch\thead-9\tTitle\t-\n2\tnow\tbranch\tnext-head\tTitle\t-\n'; }
+load_stale_rows '{}'
+printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['4 9', '2 4 9', '2 9 4', '2 9 4'])
+
     def test_review_wait_does_not_block_other_pr_feedback_routing(self):
         result = self.run_shell(r'''
 printf 'codex\n' >"$auto_delegate_file"
