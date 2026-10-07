@@ -11,6 +11,70 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_approved_outside_diff_feedback_is_delegated(self):
+        data = {'data': {'repository': {'pullRequest': {
+            'headRefOid': 'head', 'reviews': {'nodes': [{
+                'id': 'outside-review', 'state': 'COMMENTED',
+                'body': '> **⚠️ Outside diff range comments (1)**\n> Catch teardown failures.',
+                'author': {'login': 'coderabbitai'}, 'commit': {'oid': 'head'},
+            }, {'id': 'approval', 'state': 'APPROVED', 'body': '',
+                'author': {'login': 'coderabbitai'}, 'commit': {'oid': 'head'}}]},
+            'reviewThreads': {'nodes': [], 'pageInfo': {'hasNextPage': False}},
+        }}}}
+        result = self.run_shell(r'''
+fixture_page=$(cat)
+gh() { printf '%s\n' "$fixture_page"; }
+printf 'codex\n' >"$auto_delegate_file"
+agent_host() { :; }
+matching_codex_session() { printf 'session\t/worktree\n'; }
+codex_session_state() { echo idle; }
+resume_codex_session() { printf 'DELEGATED: %s\n%s\n' "$1" "$6"; }
+route_unresolved_review 1913 branch head Title
+''', data)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('DELEGATED: 1913', result.stdout)
+        self.assertIn('outside-diff:outside-review', result.stdout)
+        self.assertIn('outside-diff', result.stdout.lower())
+
+    def test_merge_refuses_current_head_outside_diff_feedback_even_with_admin(self):
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviews":[{"author":{"login":"coderabbitai"},"state":"COMMENTED","commit":{"oid":"head"},"body":"> **⚠️ Outside diff range comments (1)**"},{"author":{"login":"coderabbitai"},"state":"APPROVED","commit":{"oid":"head"},"body":""}]}'
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  else
+    printf 'UNSAFE MERGE: %s\n' "$*"
+  fi
+}
+merge_pr_now 1913 head squash 1 1
+''')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('UNSAFE MERGE', result.stdout)
+
+    def test_outside_diff_feedback_ignores_zero_old_dismissed_and_other_authors(self):
+        for count, head, state, author in [
+            (0, 'head', 'COMMENTED', 'coderabbitai'),
+            (1, 'old-head', 'COMMENTED', 'coderabbitai'),
+            (1, 'head', 'DISMISSED', 'coderabbitai'),
+            (1, 'head', 'COMMENTED', 'someone-else'),
+        ]:
+            with self.subTest(count=count, head=head, state=state, author=author):
+                data = {'data': {'repository': {'pullRequest': {
+                    'headRefOid': 'head', 'reviews': {'nodes': [{
+                        'id': 'review', 'state': state,
+                        'body': f'Outside diff range comments ({count})',
+                        'author': {'login': author}, 'commit': {'oid': head},
+                    }]}, 'reviewThreads': {'nodes': [], 'pageInfo': {'hasNextPage': False}},
+                }}}}
+                result = self.run_shell(r'''
+fixture_page=$(cat)
+gh() { printf '%s\n' "$fixture_page"; }
+unresolved_coderabbit_rows 1913
+''', data)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, '')
+
     def test_repeated_routing_failures_notify_once_across_poll_workers(self):
         result = self.run_shell(r'''
 reviewed_rows() { printf '42\tbranch\thead\tTitle\n'; }

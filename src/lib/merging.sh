@@ -94,7 +94,7 @@ merge_pr_now() {
       .author.login != "coderabbitai"
       or .commit.oid != $head
       or .state == "DISMISSED"
-      or ((.body // "") | test("Nitpick comments \\([1-9][0-9]*\\)"; "i") | not)))
+      or ((.body // "") | test("(Nitpick comments|Outside diff range comments)\\s*\\([1-9][0-9]*\\)"; "i") | not)))
   ' <<<"$data" >/dev/null; then
       break
     fi

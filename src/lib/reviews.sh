@@ -484,9 +484,12 @@ GRAPHQL
             .author.login == "coderabbitai"
             and .commit.oid == $pr.headRefOid
             and .state != "DISMISSED"
-            and ((.body // "") | test("Nitpick comments \\([1-9][0-9]*\\)"; "i"))
+            and ((.body // "") | test("(Nitpick comments|Outside diff range comments)\\s*\\([1-9][0-9]*\\)"; "i"))
           )
-        | ["nitpick:" + .id, "CodeRabbit review-body nitpick", 0, false]
+        | (if ((.body // "") | test("Nitpick comments\\s*\\([1-9][0-9]*\\)"; "i"))
+           then ["nitpick:" + .id, "CodeRabbit review-body feedback", 0, false]
+           else ["outside-diff:" + .id, "CodeRabbit outside-diff feedback", 0, false]
+           end)
         | @tsv
       ' <<<"$page"
     fi

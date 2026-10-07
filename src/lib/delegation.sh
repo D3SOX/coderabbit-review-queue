@@ -724,8 +724,8 @@ route_unresolved_review() {
   prompt=$(render_delegation_prompt \
     "$pr" "$title" "$(IFS=', '; printf '%s' "${new_threads[*]}")")
   for thread_id in "${new_ids[@]}"; do
-    if [[ $thread_id == nitpick:* ]]; then
-      prompt+=$'\n\nCodeRabbit also left nitpick feedback in a review body on the current PR head. Fetch that review with gh, verify and address its findings; it is not a resolvable review thread.'
+    if [[ $thread_id == nitpick:* || $thread_id == outside-diff:* ]]; then
+      prompt+=$'\n\nCodeRabbit also left review-body feedback (nitpicks or outside-diff findings) on the current PR head. Fetch that review with gh, verify and address its findings; these findings are not resolvable review threads.'
       break
     fi
   done
