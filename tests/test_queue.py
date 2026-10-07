@@ -11,6 +11,39 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_remote_routing_attempt_without_success_does_not_consume_feedback(self):
+        result = self.run_shell(r'''
+printf 'codex\n' >"$auto_delegate_file"
+agent_host() { echo desktop; }
+unresolved_coderabbit_rows() { printf 'thread-42\tfile\t1\tfalse\n'; }
+remote_agent_command() { echo 'Routing unresolved CodeRabbit review on PR #42 to Codex task session.'; }
+route_unresolved_review 42 branch head Title
+[[ ! -s $routed_threads_file && ! -s $delegated_prs_file ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_delegate_cli_preserves_dispatch_failure(self):
+        result = self.run_shell(r'''
+snapshot() { echo '{}'; }
+reviewed_rows() { printf '42\tbranch\thead\tTitle\n'; }
+route_unresolved_review() { return 1; }
+if delegate_pr_now 42; then exit 0; else exit 1; fi
+''')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    def test_remote_confirmed_dispatch_marks_feedback_routed(self):
+        result = self.run_shell(r'''
+printf 'codex\n' >"$auto_delegate_file"
+agent_host() { echo desktop; }
+archive_after_merge_enabled() { return 1; }
+unresolved_coderabbit_rows() { printf 'thread-42\tfile\t1\tfalse\n'; }
+remote_agent_command() { echo 'Delegation confirmed for PR #42.'; }
+route_unresolved_review 42 branch head Title
+[[ $(<"$routed_threads_file") == thread-42 ]]
+[[ $(<"$delegated_prs_file") == 42 ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_actual_requeue_uses_its_own_preference_and_preserves_later_manual_moves(self):
         for new_top, requeue_top, expected in [('0', '1', '2 4 9'), ('1', '0', '4 9 2')]:
             with self.subTest(new_top=new_top, requeue_top=requeue_top):
@@ -1216,6 +1249,7 @@ printf '1\n' >"$merge_after_delegation_file"
 codex_session_state() { printf 'idle\n'; }
 codex_thread_metadata() { printf 'Review task\tgpt-6-astra\tmedium\t{"type":"disabled"}\tnever\n'; }
 codex() { :; }
+resume_codex_via_exec() { return 0; }
 desktop_notify() { :; }
 gh() { printf 'unexpected gh call: %s\n' "$*"; return 1; }
 threads=(thread-1)
@@ -1223,6 +1257,22 @@ resume_codex_session 42 title head "$session" "$worktree" prompt threads
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('unexpected gh call:', result.stdout)
+
+    def test_failed_codex_dispatch_returns_failure_without_confirmation(self):
+        result = self.run_shell(r'''
+worktree="$state_root/worktree"
+mkdir -p "$worktree"
+git -C "$worktree" init -q
+codex_session_state() { echo idle; }
+codex_session_originator() { echo codex-tui; }
+codex_thread_metadata() { printf 'Task\tmodel\tmedium\t{"type":"disabled"}\tnever\n'; }
+resume_codex_via_exec() { return 1; }
+desktop_notify() { :; }
+threads=(thread-1)
+if resume_codex_session 42 Title head session "$worktree" prompt threads; then exit 0; else exit 1; fi
+''')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('Delegation confirmed', result.stdout)
 
     def test_validate_repo_rejects_missing_repository(self):
         result = self.run_shell(r'''

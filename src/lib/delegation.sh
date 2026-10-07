@@ -652,7 +652,7 @@ route_unresolved_review() {
       "$merge_after_delegation" "$merge_admin" \
       --resolve-merge-conflicts-setting "$resolve_conflicts"); then
       printf '%s\n' "$remote_output"
-      if [[ $remote_output == *"Routing unresolved CodeRabbit review"* ]]; then
+      if [[ $remote_output == *"Delegation confirmed for PR #$pr."* ]]; then
         mark_pr_delegated "$pr"
         if archive_after_merge_enabled; then
           local archive_session_id
@@ -753,6 +753,7 @@ resume_codex_session() {
   local -n thread_ids=$7
   local routing_reason=${8:-unresolved CodeRabbit review}
   local session_state resume_status metadata task_title task_model task_effort
+  local dispatch_result=0
   local task_sandbox_policy task_approval_mode
   local originator is_t3=0 native_steering=0
   local routing_lock_path routing_lock_fd
@@ -840,6 +841,7 @@ resume_codex_session() {
       attempted_route_threads["$thread_id"]=1
       printf '%s\n' "$thread_id" >>"$routed_threads_file"
     done
+    printf 'Delegation confirmed for PR #%s.\n' "$pr"
     desktop_notify \
       'CodeRabbit review routed' \
       "PR #$pr — $title"$'\n'"Sent $routing_reason to its Codex task."
@@ -853,6 +855,7 @@ resume_codex_session() {
         attempted_route_threads["$thread_id"]=1
       done
       printf 'Codex task resume failed for PR #%s; leaving it eligible for retry.\n' "$pr" >&2
+      dispatch_result=1
       desktop_notify \
         'CodeRabbit routing failed' \
         "PR #$pr — $title"$'\n'"Could not resume the matching Codex task." \
@@ -860,6 +863,7 @@ resume_codex_session() {
     fi
   fi
   exec {routing_lock_fd}>&-
+  return "$dispatch_result"
 }
 
 resume_claude_session() {
@@ -916,6 +920,7 @@ resume_claude_session() {
       attempted_route_threads["$thread_id"]=1
       printf '%s\n' "$thread_id" >>"$routed_threads_file"
     done
+    printf 'Delegation confirmed for PR #%s.\n' "$pr"
     desktop_notify \
       'CodeRabbit review routed' \
       "PR #$pr — $title"$'\n'"Sent unresolved feedback to its Claude session."

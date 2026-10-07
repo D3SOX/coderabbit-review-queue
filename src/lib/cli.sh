@@ -235,7 +235,7 @@ delegate_pr_now() {
     [[ $pr == "$requested_pr" ]] || continue
     force_delegation=1
     route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"
-    return 0
+    return $?
   done < <(reviewed_rows <<<"$state")
 
   printf 'PR #%s is not an eligible open pull request.\n' "$requested_pr" >&2
