@@ -11,6 +11,7 @@ show_status() {
   local -A unresolved_prs=()
   local -A finished_prs=()
   local -A queued_prs=()
+  local -A approved_prs=()
 
   status_quota_available || return $?
   state=$(snapshot "$snapshot_max_age")
@@ -39,6 +40,7 @@ show_status() {
   while IFS=$'\t' read -r pr title; do
     [[ -n ${pr:-} ]] || continue
     approved+=("$pr"$'\t'"$title")
+    approved_prs[$pr]=1
   done < <(approved_review_rows "$state")
 
   while IFS=$'\t' read -r pr branch_name head_sha title; do
@@ -88,6 +90,8 @@ show_status() {
       finished+=$'\n'"  #$pr $title"
       if (( count > 0 )); then
         finished+=$'\n'"    Result: $count unresolved"
+      elif [[ -n ${approved_prs[$pr]:-} ]]; then
+        finished+=$'\n'"    Result: Approved"
       elif [[ $task_progress == *Running* ]]; then
         finished+=$'\n'"    Result: Feedback resolved; agent running"
       elif [[ $task_progress == *Idle* ]]; then

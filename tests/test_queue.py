@@ -1614,6 +1614,26 @@ show_status 60
         self.assertIn('Finished CodeRabbit reviews:\n  #42 fix review', result.stdout)
         self.assertNotIn('Queued PRs:\n  #42 ', result.stdout)
 
+    def test_follow_up_approval_replaces_old_completed_delegation_label(self):
+        pr = self.pr(42, head='new-head')
+        pr['reviews']['nodes'] = [{
+            'author': {'login': 'coderabbitai'}, 'body': 'Review passed',
+            'state': 'APPROVED', 'commit': {'oid': 'new-head'},
+        }]
+        result = self.run_shell(r'''
+printf '42\n' >"$delegated_prs_file"
+snapshot() { cat; }
+status_quota_available() { :; }
+unresolved_coderabbit_rows() { :; }
+agent_task_progress() { printf 'Codex Idle\tReview task\tdone\n'; }
+show_status 60
+''', {'data': {'repository': {'pullRequests': {'nodes': [pr]}}}})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Result: Approved', result.stdout)
+        self.assertIn('Agent task: Codex Idle\tReview task', result.stdout)
+        self.assertNotIn('Result: Agent completed review', result.stdout)
+        self.assertNotIn('Queued PRs:\n  #42 ', result.stdout)
+
     def test_agent_chosen_follow_up_review_returns_idle_pr_to_queue(self):
         pr = self.pr(42, head='new-head')
         pr['reviews']['nodes'] = [{
