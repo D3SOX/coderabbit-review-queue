@@ -622,6 +622,71 @@ class ReviewRequestRefreshTests(unittest.TestCase):
 
         window.stop_all_monitors_action.setVisible.assert_called_once_with(True)
 
+    def test_tray_project_menu_switches_via_existing_repository_selector(self):
+        app = QApplication.instance() or QApplication([])
+        with patch.object(queue_gui.QueueWindow, "load_cached_repos", return_value=True):
+            window = queue_gui.QueueWindow()
+        window.repo_combo.blockSignals(True)
+        window.repo_combo.addItems(["first/repo", "second/repo"])
+        window.repo_combo.blockSignals(False)
+        window.displayed_repo = "first/repo"
+        window.queue.addTopLevelItem(queue_gui.QTreeWidgetItem(["#42", "old PR"]))
+        window.hide()
+        try:
+            window.tray_icon.contextMenu().aboutToShow.emit()
+            actions = window.tray_project_menu.actions()
+            self.assertEqual([action.text() for action in actions], ["first/repo", "second/repo"])
+            self.assertEqual([action.isChecked() for action in actions], [True, False])
+            with patch.object(window, "activate_repo") as activate:
+                actions[1].trigger()
+                activate.assert_called_once_with("second/repo")
+            self.assertEqual(window.selected_repo(), "second/repo")
+            self.assertEqual(window.repo_combo.currentIndex(), 1)
+            self.assertEqual(window.queue.topLevelItemCount(), 0)
+            self.assertFalse(window.isVisible())
+            window.tray_icon.contextMenu().aboutToShow.emit()
+            self.assertEqual([action.isChecked() for action in window.tray_project_menu.actions()], [False, True])
+            self.assertEqual(len(window.tray_project_actions.actions()), 2)
+        finally:
+            window.close()
+            app.processEvents()
+
+    def test_tray_project_menu_tracks_repository_list_and_validation(self):
+        app = QApplication.instance() or QApplication([])
+        with patch.object(queue_gui.QueueWindow, "load_cached_repos", return_value=True):
+            window = queue_gui.QueueWindow()
+        try:
+            window.update_tray_project_menu()
+            self.assertFalse(window.tray_project_menu.isEnabled())
+            window.repo_combo.blockSignals(True)
+            window.repo_combo.addItems(["first/repo", "first/repo", "stale/repo"])
+            window.repo_combo.setEditText("manual/repo")
+            window.displayed_repo = "manual/repo"
+            window.update_tray_project_menu()
+            self.assertEqual([action.text() for action in window.tray_project_menu.actions()],
+                             ["first/repo", "stale/repo", "manual/repo"])
+            self.assertTrue(window.tray_project_menu.actions()[-1].isChecked())
+            window.repo_combo.clear()
+            window.repo_combo.addItem("new/repo")
+            window.displayed_repo = "new/repo"
+            window.update_tray_project_menu()
+            self.assertEqual([action.text() for action in window.tray_project_menu.actions()], ["new/repo"])
+            window.repo_combo.setEnabled(False)
+            window.update_tray_project_menu()
+            self.assertFalse(window.tray_project_menu.isEnabled())
+            with patch.object(window, "repo_changed") as changed:
+                window.select_tray_project("other/repo")
+                changed.assert_not_called()
+            window.repo_combo.setEnabled(True)
+            window.update_tray_project_menu()
+            self.assertTrue(window.tray_project_menu.isEnabled())
+            with patch.object(window, "repo_changed") as changed:
+                window.select_tray_project("new/repo")
+                changed.assert_not_called()
+        finally:
+            window.close()
+            app.processEvents()
+
     def test_recent_complete_status_cache_skips_startup_refresh(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "status.txt"

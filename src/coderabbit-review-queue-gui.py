@@ -10,9 +10,10 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, QLocale, QProcess, QSize, QTimer, Qt, QUrl
+from PySide6.QtCore import QDate, QDateTime, QLocale, QProcess, QSignalBlocker, QSize, QTimer, Qt, QUrl
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QColor,
     QDesktopServices,
     QFont,
@@ -410,11 +411,14 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         )
         self.stop_all_monitors_action.setVisible(False)
         tray_menu.addAction(self.window_action)
+        self.tray_project_menu = tray_menu.addMenu("Switch project")
+        self.tray_project_actions = QActionGroup(self.tray_project_menu)
         tray_menu.addAction(refresh_action)
         tray_menu.addSeparator()
         tray_menu.addAction(quit_action)
         tray_menu.addAction(self.stop_all_monitors_action)
         tray_menu.aboutToShow.connect(self.update_tray_window_action)
+        tray_menu.aboutToShow.connect(self.update_tray_project_menu)
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.tray_activated)
         self.tray_icon.setToolTip(self.base_window_title)
@@ -493,6 +497,38 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             else "Show CodeRabbit queue"
         )
         self.stop_all_monitors_action.setVisible(self.any_monitor_running())
+
+    def update_tray_project_menu(self) -> None:
+        self.tray_project_menu.clear()
+        repos = list(dict.fromkeys(
+            self.repo_combo.itemText(index).strip()
+            for index in range(self.repo_combo.count())
+            if self.repo_combo.itemText(index).strip()
+        ))
+        selected = self.selected_repo()
+        if selected and self.displayed_repo == selected and selected not in repos:
+            repos.append(selected)
+        self.tray_project_menu.setEnabled(bool(repos) and self.repo_combo.isEnabled())
+        for repo in repos:
+            action = self.tray_project_menu.addAction(repo)
+            action.setCheckable(True)
+            self.tray_project_actions.addAction(action)
+            action.setChecked(repo == selected)
+            action.triggered.connect(
+                lambda _checked, repo=repo: self.select_tray_project(repo)
+            )
+
+    def select_tray_project(self, repo: str) -> None:
+        if not self.repo_combo.isEnabled() or repo == self.selected_repo():
+            return
+        index = self.repo_combo.findText(repo)
+        with QSignalBlocker(self.repo_combo):
+            if index >= 0:
+                self.repo_combo.setCurrentIndex(index)
+            else:
+                self.repo_combo.setEditText(repo)
+        self.repository_text_changed(repo)
+        self.repo_changed(repo)
 
     def any_monitor_running(self) -> bool:
         for pid_file in Path("/tmp").glob("coderabbit-review-queue-*.pid"):
