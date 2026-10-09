@@ -11,6 +11,46 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_task_matching_ignores_github_repository_casing(self):
+        for indexed in (False, True):
+            with self.subTest(indexed=indexed):
+                result = self.run_shell(r'''
+configure_repo D3SOX/Vegsnap
+codex_state_db="$state_root/tasks.sqlite"
+codex_sessions_root="$state_root/sessions"
+worktree="$state_root/worktree"
+mkdir -p "$worktree" "$codex_sessions_root"
+git -C "$worktree" init -q --initial-branch=native-ios-app
+git -C "$worktree" remote add origin git@github.com:D3SOX/vegsnap.git
+git -C "$worktree" -c user.name=Test -c user.email=test@example.com -c commit.gpgSign=false commit -q --allow-empty -m initial
+head=$(git -C "$worktree" rev-parse HEAD)
+session=12345678-1234-1234-1234-123456789abc
+printf '%s\n' "{\"timestamp\":\"2026-10-09T12:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"originator\":\"T3 Code\",\"id\":\"$session\",\"cwd\":\"$worktree\",\"git\":{\"repository_url\":\"git@github.com:D3SOX/vegsnap.git\",\"branch\":\"port-native-ios-app\"}}}" >"$codex_sessions_root/task.jsonl"
+''' + (r'''
+python3 - "$codex_state_db" "$worktree" "$session" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute('CREATE TABLE threads (id TEXT,cwd TEXT,git_branch TEXT,git_sha TEXT,originator TEXT,thread_source TEXT,git_origin_url TEXT,updated_at INTEGER,rollout_path TEXT)')
+    db.execute('INSERT INTO threads VALUES (?,?,?,NULL,?,NULL,?,1,NULL)',
+               (sys.argv[3],sys.argv[2],'port-native-ios-app','T3 Code','git@github.com:D3SOX/vegsnap.git'))
+PY
+rg() { return 1; }
+''' if indexed else '') + r'''
+matching_codex_session native-ios-app "$head"
+match_status=$?
+(( match_status == 0 )) || exit "$match_status"
+# Only the repository identity is case-insensitive, not the branch name.
+if matching_codex_session Native-ios-app unrelated-head; then
+  exit 1
+fi
+configure_repo D3SOX/Vegsnap-other
+if matching_codex_session native-ios-app "$head"; then
+  exit 1
+fi
+''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('12345678-1234-1234-1234-123456789abc', result.stdout)
+
     def test_approved_outside_diff_feedback_is_delegated(self):
         data = {'data': {'repository': {'pullRequest': {
             'headRefOid': 'head', 'reviews': {'nodes': [{

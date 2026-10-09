@@ -3,6 +3,7 @@
 matching_codex_session() {
   local branch_name=$1
   local head_sha=$2
+  local repo_lower=${repo,,}
   local file meta parsed timestamp session_id cwd metadata_branch metadata_head
   local event_cwd
   local live_branch live_head remote key candidate_path candidate_session
@@ -21,7 +22,7 @@ matching_codex_session() {
   # worktree's *current* branch/head (the stored values may predate a push).
   if [[ -f $codex_state_db ]]; then
     local indexed_match
-    indexed_match=$(python3 - "$codex_state_db" "$repo" "$branch_name" "$head_sha" <<'PY'
+    indexed_match=$(python3 - "$codex_state_db" "$repo_lower" "$branch_name" "$head_sha" <<'PY'
 import sqlite3
 import subprocess
 import sys
@@ -55,7 +56,7 @@ for session_id, cwd, stored_branch, stored_head, _rollout in rows:
     if cwd in seen:
         continue
     seen.add(cwd)
-    origin = git(cwd, 'remote', 'get-url', 'origin')
+    origin = git(cwd, 'remote', 'get-url', 'origin').lower()
     if not origin.endswith((f'github.com:{repo}.git', f'github.com/{repo}.git', f'github.com/{repo}')):
         continue
     live_branch = git(cwd, 'branch', '--show-current')
@@ -89,7 +90,7 @@ if not matches[0] and not matches[1]:
             root = git(cwd, 'rev-parse', '--show-toplevel')
             if not root:
                 continue
-            origin = git(root, 'remote', 'get-url', 'origin')
+            origin = git(root, 'remote', 'get-url', 'origin').lower()
             if not origin.endswith((f'github.com:{repo}.git', f'github.com/{repo}.git', f'github.com/{repo}')):
                 continue
             for index, matched in enumerate((git(root, 'branch', '--show-current') == branch,
@@ -117,8 +118,8 @@ PY
     meta=$(head -n 1 "$file")
     parsed=$(
       jq -r \
-        --arg repo "$repo" '
-        (.payload.git.repository_url // "") as $url
+        --arg repo "$repo_lower" '
+        (.payload.git.repository_url // "" | ascii_downcase) as $url
         | select(
           .type == "session_meta"
           and (.payload.originator | IN("Codex Desktop", "t3code_desktop", "T3 Code", "codex-tui", "codex_exec"))
@@ -160,9 +161,9 @@ PY
       continue
     fi
     remote=$(git -C "$cwd" remote get-url origin 2>/dev/null || true)
-    if [[ $remote != *"github.com:$repo.git" &&
-      $remote != *"github.com/$repo.git" &&
-      $remote != *"github.com/$repo" ]]; then
+    if [[ ${remote,,} != *"github.com:$repo_lower.git" &&
+      ${remote,,} != *"github.com/$repo_lower.git" &&
+      ${remote,,} != *"github.com/$repo_lower" ]]; then
       continue
     fi
     live_branch=$(git -C "$cwd" branch --show-current 2>/dev/null || true)
@@ -186,9 +187,9 @@ PY
         continue
       fi
       remote=$(git -C "$event_cwd" remote get-url origin 2>/dev/null || true)
-      if [[ $remote != *"github.com:$repo.git" &&
-        $remote != *"github.com/$repo.git" &&
-        $remote != *"github.com/$repo" ]]; then
+      if [[ ${remote,,} != *"github.com:$repo_lower.git" &&
+        ${remote,,} != *"github.com/$repo_lower.git" &&
+        ${remote,,} != *"github.com/$repo_lower" ]]; then
         continue
       fi
       live_branch=$(git -C "$event_cwd" branch --show-current 2>/dev/null || true)
@@ -209,7 +210,7 @@ PY
       ' "$file" 2>/dev/null | sort -u
     )
   done < <(
-    rg -l --fixed-strings \
+    rg -i -l --fixed-strings \
       "$repo" \
       "$codex_sessions_root" 2>/dev/null || true
   )
