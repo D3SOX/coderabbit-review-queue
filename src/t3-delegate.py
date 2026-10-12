@@ -164,10 +164,13 @@ def matching_thread(database, session_id):
 def has_active_run(connection, thread_id):
     # T3's `waiting` is a completed provider turn awaiting checkpoint capture,
     # not agent execution. PR-watch background work must not block delegation.
+    # Held queued messages also wait for user action rather than executing.
     return connection.execute('''
         SELECT 1 FROM orchestration_v2_projection_runs
-        WHERE thread_id = ? AND status IN
-          ('queued', 'preparing', 'starting', 'running') LIMIT 1
+        WHERE thread_id = ? AND (
+          status IN ('preparing', 'starting', 'running')
+          OR (status = 'queued' AND json_extract(payload_json, '$.queueHeld') IS NOT 1)
+        ) LIMIT 1
     ''', (thread_id,)).fetchone() is not None
 
 
