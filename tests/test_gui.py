@@ -23,6 +23,37 @@ import queue_gui_status
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_claude_delegation_is_running_only_after_delivery_confirmation(self):
+        for confirmed in (True, False):
+            with self.subTest(confirmed=confirmed):
+                window = Mock()
+                window.delegate_pr = '42'
+                output = 'Routing unresolved CodeRabbit review on PR #42 to Claude session session.\n'
+                if confirmed:
+                    output += 'Delegation confirmed for PR #42.\n'
+                window.delegate_process.readAllStandardOutput.return_value = output.encode()
+                window.delegate_process.readAllStandardError.return_value = b''
+                queue_gui.QueueWindow.delegate_finished(window, 0)
+                self.assertEqual(window.mark_delegation_running.called, confirmed)
+
+    def test_monitor_activity_does_not_starve_successful_status_updates(self):
+        window = Mock()
+        window.status_repo = "example/repo"
+        window.displayed_repo = "example/repo"
+        window.selected_repo.return_value = "example/repo"
+        window.status_monitor_signature = (1, 1)
+        window.status_completion_signature = None
+        window.status_process.readAllStandardOutput.return_value = (
+            b"Repository: example/repo\nNo eligible open PR has an outstanding CodeRabbit review request.\n"
+        )
+        window.status_process.readAllStandardError.return_value = b""
+        with patch.object(queue_gui_status, 'file_signature', side_effect=[(2, 2), None]):
+            queue_gui.QueueWindow.status_finished(window, 0)
+        window.populate_tasks.assert_called_once()
+        self.assertNotIn('#2115', window.populate_tasks.call_args.args[0])
+        window.save_status_cache.assert_called_once()
+        window.refresh.assert_called_once_with()
+
     def test_delegation_dialog_saves_repository_steering_preference(self):
         app = QApplication.instance() or QApplication([])
         class SaveDialog(queue_gui_settings.QDialog):

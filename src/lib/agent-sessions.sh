@@ -248,6 +248,7 @@ matching_claude_session() {
   local head_sha=$2
   local project_dir file line parsed timestamp session_id cwd metadata_branch
   local live_branch live_head remote key
+  local repo_lower=${repo,,}
   local -A branch_sessions=()
   local -A branch_timestamps=()
   local -A head_sessions=()
@@ -288,21 +289,20 @@ matching_claude_session() {
     [[ -n $session_id && -n $cwd ]] || continue
     [[ -n $timestamp ]] || timestamp='1970-01-01T00:00:00.000Z'
 
+    if ! git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
+      continue
+    fi
+    remote=$(git -C "$cwd" remote get-url origin 2>/dev/null || true)
+    if [[ ${remote,,} != *"github.com:$repo_lower.git" &&
+      ${remote,,} != *"github.com/$repo_lower.git" &&
+      ${remote,,} != *"github.com/$repo_lower" ]]; then
+      continue
+    fi
     if [[ $metadata_branch == "$branch_name" ]]; then
       if [[ $timestamp > ${metadata_branch_timestamps[$cwd]:-} ]]; then
         metadata_branch_timestamps["$cwd"]=$timestamp
         metadata_branch_sessions["$cwd"]=$session_id
       fi
-    fi
-
-    if ! git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
-      continue
-    fi
-    remote=$(git -C "$cwd" remote get-url origin 2>/dev/null || true)
-    if [[ $remote != *"github.com:$repo.git" &&
-      $remote != *"github.com/$repo.git" &&
-      $remote != *"github.com/$repo" ]]; then
-      continue
     fi
     live_branch=$(git -C "$cwd" branch --show-current 2>/dev/null || true)
     live_head=$(git -C "$cwd" rev-parse HEAD 2>/dev/null || true)
@@ -319,12 +319,8 @@ matching_claude_session() {
       fi
     fi
   done < <(
-    find "$claude_projects_root" -mindepth 1 -maxdepth 1 -type d \
-      \( -name "*-${name}" -o -name "*-${name}--*" \) \
-      -print0 2>/dev/null |
-      while IFS= read -r -d '' project_dir; do
-        find "$project_dir" -maxdepth 1 -type f -name '*.jsonl' -print0 2>/dev/null
-      done
+    find "$claude_projects_root" -mindepth 2 -maxdepth 2 -type f \
+      -name '*.jsonl' -print0 2>/dev/null
   )
 
   for key in branch_sessions head_sessions metadata_branch_sessions; do
@@ -345,12 +341,8 @@ claude_session_file() {
   local session_file
 
   session_file=$(
-    find "$claude_projects_root" -mindepth 1 -maxdepth 1 -type d \
-      \( -name "*-${name}" -o -name "*-${name}--*" \) \
-      -print0 2>/dev/null |
-      while IFS= read -r -d '' project_dir; do
-        find "$project_dir" -maxdepth 1 -type f -name "${session_id}.jsonl" -print 2>/dev/null
-      done |
+    find "$claude_projects_root" -mindepth 2 -maxdepth 2 -type f \
+      -name "${session_id}.jsonl" -print 2>/dev/null |
       head -n 1
   )
   [[ -n $session_file ]] || return 1
@@ -360,14 +352,21 @@ claude_session_file() {
 claude_session_state() {
   local session_id=$1
   local session_file=${2:-}
-  local last_op last_stop mtime now age
+  local last_op last_stop mtime now age state
 
-  if jq -e --arg id "$session_id" '
-      any(.[]; .sessionId == $id and ((.state // "") != "done"))
-    ' <<<"$(claude_agents_json)" >/dev/null 2>&1; then
-    printf 'running\n'
-    return 0
+  if state=$(python3 "$script_dir/t3-delegate.py" --state "$session_id" --provider claudeAgent 2>/dev/null); then
+    case $state in
+      idle | running) printf '%s\n' "$state"; return 0 ;;
+    esac
   fi
+
+  state=$(jq -r --arg id "$session_id" '
+      .[] | select(.sessionId == $id) | .status // .state // empty
+    ' <<<"$(claude_agents_json)" 2>/dev/null || true)
+  case $state in
+    busy | running | starting) printf 'running\n'; return 0 ;;
+    idle | ready | done | stopped) printf 'idle\n'; return 0 ;;
+  esac
 
   if [[ -z $session_file ]]; then
     session_file=$(claude_session_file "$session_id" 2>/dev/null || true)

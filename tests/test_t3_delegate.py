@@ -16,6 +16,39 @@ SPEC.loader.exec_module(t3_delegate)
 
 
 class T3DelegateTests(unittest.TestCase):
+    def test_claude_t3_dispatch_preserves_thread_settings_and_supports_steering(self):
+        database = self.create_v2_database()
+        with sqlite3.connect(database) as connection:
+            connection.execute('UPDATE orchestration_v2_projection_provider_threads SET provider=?,payload_json=?',
+                               ('claude_subscription', json.dumps({'driver': 'claudeAgent',
+                                   'nativeThreadRef': {'nativeId': 'claude-session'}})))
+            connection.execute("INSERT INTO orchestration_v2_projection_runs (thread_id,status) VALUES ('v2-thread','running')")
+        credential = type('Result', (), {'stdout': json.dumps({
+            'token': 'secret', 'sessionId': 'auth-session'})})()
+        with patch.object(t3_delegate, 't3_home', return_value=self.home), \
+             patch.object(t3_delegate, 't3_cli', return_value=['t3']), \
+             patch.object(t3_delegate.subprocess, 'run', return_value=credential), \
+             patch.object(t3_delegate, 'dispatch_v2') as dispatch:
+            self.assertEqual(t3_delegate.thread_title('claude-session', provider='claudeAgent'), 'Review task')
+            self.assertEqual(t3_delegate.thread_state('claude-session', provider='claudeAgent'), 'running')
+            with self.assertRaises(RuntimeError):
+                t3_delegate.matching_thread(database, 'claude-session')
+            t3_delegate.send_turn('claude-session', 'Resolve review', provider='claudeAgent')
+            command = dispatch.call_args.args[2]
+            self.assertEqual(command['deliveryIntent'], 'auto')
+            self.assertEqual(command['threadId'], 'v2-thread')
+            for setting in ('modelSelection', 'runtimeMode', 'interactionMode'):
+                self.assertNotIn(setting, command)
+            dispatch.reset_mock()
+            with self.assertRaisesRegex(RuntimeError, 'not idle'):
+                t3_delegate.send_turn('claude-session', 'Resolve review', provider='claudeAgent', steer=False)
+            dispatch.assert_not_called()
+            with sqlite3.connect(database) as connection:
+                connection.execute('DELETE FROM orchestration_v2_projection_runs')
+            t3_delegate.send_turn('claude-session', 'Resolve review', provider='claudeAgent', steer=False)
+            dispatch.assert_called_once()
+            self.assertNotIn('deliveryIntent', dispatch.call_args.args[2])
+
     def test_held_queued_runs_are_idle_but_runnable_turns_remain_busy(self):
         database = self.create_v2_database()
         with patch.object(t3_delegate, 't3_home', return_value=self.home):
@@ -112,6 +145,22 @@ class T3DelegateTests(unittest.TestCase):
         with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}):
             thread = t3_delegate.matching_thread(database, 'old-session')
         self.assertEqual(thread[0], 'v2-thread')
+
+    def test_t3_owner_checks_the_live_repo_and_branch(self):
+        database, _codex_home = self.create_migrated_thread()
+        with sqlite3.connect(database) as connection:
+            connection.execute('INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?)',
+                               ('claude-thread', 'v2-thread', 'claude_subscription',
+                                json.dumps({'driver': 'claudeAgent', 'nativeThreadRef': {'nativeId': 'claude-session'}})))
+            connection.execute('UPDATE orchestration_v2_projection_threads SET active_provider_thread_id=?',
+                               ('claude-thread',))
+        with patch.object(t3_delegate, 't3_home', return_value=self.home):
+            self.assertEqual(t3_delegate.thread_owner('EXAMPLE/REPO', 'pr-branch'), 'claudeAgent')
+            self.assertEqual(t3_delegate.thread_owner('other/repo', 'pr-branch'), '')
+            self.assertEqual(t3_delegate.thread_owner('example/repo', 'other-branch'), '')
+            subprocess.run(['git', '-C', str(Path(self.temp.name) / 'worktree'), 'symbolic-ref',
+                            'HEAD', 'refs/heads/changed-branch'], check=True)
+            self.assertEqual(t3_delegate.thread_owner('example/repo', 'pr-branch'), '')
 
     def test_migrated_dispatch_reaches_app_thread_and_inherits_settings(self):
         database, codex_home = self.create_migrated_thread()

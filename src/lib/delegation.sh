@@ -553,6 +553,22 @@ codex_can_steer() {
     python3 "$script_dir/codex-steer.py" --can-steer "$1" >/dev/null 2>&1
 }
 
+claude_can_steer() {
+  python3 "$script_dir/t3-delegate.py" --can-steer "$1" --provider claudeAgent >/dev/null 2>&1 ||
+    python3 "$script_dir/claude-steer.py" --can-steer "$1" >/dev/null 2>&1
+}
+
+agent_prefers_claude() {
+  [[ $(python3 "$script_dir/t3-delegate.py" --owner "$repo" "$1" 2>/dev/null) == claudeAgent ]] ||
+    [[ $(python3 "$script_dir/claude-steer.py" --owner "$repo" "$1" 2>/dev/null) == claude ]]
+}
+
+claude_can_receive_review() {
+  [[ $2 == idle ]] || {
+    [[ $2 == running ]] && steer_running_agents_enabled && claude_can_steer "$1"
+  }
+}
+
 resume_codex_via_exec() {
   local session_id=$1 client_pid pid_file log_path attempt
   shift
@@ -672,6 +688,10 @@ route_unresolved_review() {
     return 1
   fi
 
+  if [[ $mode == auto ]] && agent_prefers_claude "$branch_name"; then
+    allow_codex=0
+  fi
+
   if (( allow_codex )); then
     if codex_match=$(matching_codex_session "$branch_name" "$head_sha"); then
       IFS=$'\t' read -r codex_session_id codex_session_cwd <<<"$codex_match"
@@ -689,7 +709,7 @@ route_unresolved_review() {
     fi
   fi
 
-  if [[ $claude_state == running ]] || {
+  if { [[ $claude_state == running ]] && ! claude_can_receive_review "$claude_session_id" "$claude_state"; } || {
     [[ $codex_state == running ]] && ! codex_can_receive_review "$codex_session_id" "$codex_state"
   }; then
     printf 'Matching agent task for PR #%s is already running; deferring review routing.\n' \
@@ -704,7 +724,7 @@ route_unresolved_review() {
     agent=codex
     session_id=$codex_session_id
     session_cwd=$codex_session_cwd
-  elif [[ $claude_state == idle ]]; then
+  elif claude_can_receive_review "$claude_session_id" "$claude_state"; then
     agent=claude
     session_id=$claude_session_id
     session_cwd=$claude_session_cwd
@@ -738,7 +758,7 @@ route_unresolved_review() {
       ;;
     claude)
       resume_claude_session "$pr" "$title" "$session_id" "$session_cwd" "$prompt" \
-        new_ids
+        new_ids "$head_sha"
       ;;
   esac
 }
@@ -872,7 +892,8 @@ resume_claude_session() {
   local session_cwd=$4
   local prompt=$5
   local -n thread_ids=$6
-  local git_common_dir session_state resume_status session_file
+  local head_sha=$7
+  local git_common_dir session_state resume_status session_file dispatch_result=0
   local routing_lock_path routing_lock_fd
   local thread_id
 
@@ -892,7 +913,7 @@ resume_claude_session() {
 
   sleep 1
   session_state=$(claude_session_state "$session_id" "$session_file")
-  if [[ $session_state != idle ]]; then
+  if ! claude_can_receive_review "$session_id" "$session_state"; then
     if [[ $session_state == running ]]; then
       printf 'Claude session %s for PR #%s started while routing; deferring review routing.\n' \
         "$session_id" "$pr"
@@ -904,17 +925,37 @@ resume_claude_session() {
     return 0
   fi
 
+  if ! steer_running_agents_enabled; then
+    if [[ $(gh pr view "$pr" --repo "$repo" --json state --jq .state) != OPEN ]]; then
+      printf 'PR #%s is no longer open; not delegating.\n' "$pr"
+      exec {routing_lock_fd}>&-
+      return 0
+    fi
+  fi
+
   printf 'Routing unresolved CodeRabbit review on PR #%s to Claude session %s.\n' \
     "$pr" "$session_id"
   if (
     cd "$session_cwd"
+    if python3 "$script_dir/t3-delegate.py" --can-steer "$session_id" --provider claudeAgent >/dev/null 2>&1; then
+      local -a args=("$script_dir/t3-delegate.py" "$session_id" --provider claudeAgent)
+      steer_running_agents_enabled || args+=(--wait-idle)
+      python3 "${args[@]}" <<<"$prompt"
+      exit $?
+    fi
+    if python3 "$script_dir/claude-steer.py" --can-steer "$session_id" >/dev/null 2>&1; then
+      local -a args=("$script_dir/claude-steer.py" "$session_id")
+      steer_running_agents_enabled || args+=(--wait-idle)
+      python3 "${args[@]}" <<<"$prompt"
+      exit $?
+    fi
     [[ $(claude_session_state "$session_id" "$session_file") == idle ]] || exit 75
     claude -p \
       --resume "$session_id" \
-      --permission-mode acceptEdits \
       --add-dir "$git_common_dir" \
       "$prompt"
   ); then
+    mark_pr_delegated "$pr"
     for thread_id in "${thread_ids[@]}"; do
       attempted_route_threads["$thread_id"]=1
       printf '%s\n' "$thread_id" >>"$routed_threads_file"
@@ -935,13 +976,12 @@ resume_claude_session() {
       done
       printf 'Claude session resume failed for PR #%s; leaving it eligible for retry.\n' \
         "$pr" >&2
-      desktop_notify \
-        'CodeRabbit routing failed' \
-        "PR #$pr — $title"$'\n'"Could not resume the matching Claude session." \
-        'critical'
+      dispatch_result=1
+      notify_routing_failure_once "$pr" "$head_sha" "$title"
     fi
   fi
   exec {routing_lock_fd}>&-
+  return "$dispatch_result"
 }
 
 clear_routing_failure() {

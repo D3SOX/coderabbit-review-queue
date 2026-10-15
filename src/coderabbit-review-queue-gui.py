@@ -883,9 +883,10 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         stderr = bytes(self.delegate_process.readAllStandardError()).decode().strip()
         self.delegate_button.setText("Delegate selected")
         self.delegate_all_button.setText("Delegate all idle")
+        confirmed = set(re.findall(r"Delegation confirmed for PR #(\d+)\.", stdout))
         for number in set(re.findall(r"PR #(\d+)", stdout)):
             if (
-                "Routing unresolved CodeRabbit review on PR #" + number in stdout
+                number in confirmed
                 or "for PR #" + number + " is already running" in stdout
             ):
                 self.mark_delegation_running(number)
@@ -899,20 +900,18 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             )
         elif not self.delegate_pr:
             self.update_delegate_button()
-            started = len(
-                set(re.findall(r"Routing unresolved CodeRabbit review on PR #(\d+)", stdout))
-            )
+            started = len(confirmed)
             self.show_transient_status(
                 f"Started {started} idle agent task{'' if started == 1 else 's'}"
             )
         elif (
             "already running" in stdout
             or "started while routing" in stdout
-            or "Routing unresolved CodeRabbit review" in stdout
+            or self.delegate_pr in confirmed
         ):
             if self.delegate_pr:
                 self.mark_delegation_running(self.delegate_pr)
-            if "Routing unresolved CodeRabbit review" in stdout:
+            if self.delegate_pr in confirmed:
                 self.show_transient_status(
                     f"PR #{self.delegate_pr}: agent task started"
                 )

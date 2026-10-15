@@ -81,7 +81,7 @@ PY
 claude_task_progress() {
   local branch_name=$1
   local head_sha=$2
-  local match session_id session_cwd session_file state message
+  local match session_id session_cwd session_file state message task_title
 
   if ! match=$(matching_claude_session "$branch_name" "$head_sha"); then
     printf 'No matching task\n'
@@ -121,11 +121,12 @@ claude_task_progress() {
       }'
   )
 
-  if [[ -n $message ]]; then
-    printf '%s (%s) — %s\n' "$state" "${session_id:0:8}" "$message"
-  else
-    printf '%s (%s)\n' "$state" "${session_id:0:8}"
+  task_title=$(python3 "$script_dir/t3-delegate.py" --title "$session_id" --provider claudeAgent 2>/dev/null || true)
+  [[ -n $task_title ]] || task_title='—'
+  if [[ $state == Running ]] && claude_can_steer "$session_id"; then
+    state='Running (steerable)'
   fi
+  printf '%s\t%s\t%s\n' "$state" "$task_title" "$message"
 }
 
 local_agent_task_progress() {
@@ -133,6 +134,22 @@ local_agent_task_progress() {
   local head_sha=$2
   local codex_out claude_out mode
   mode=${agent_mode_override:-$(auto_delegation_mode)}
+
+  if [[ $mode == auto || $mode == disabled ]]; then
+    if agent_prefers_claude "$branch_name"; then
+      mode=claude
+    fi
+  fi
+
+  if [[ $mode == claude ]]; then
+    claude_out=$(claude_task_progress "$branch_name" "$head_sha")
+    if [[ $claude_out == 'No matching task' ]]; then
+      printf '%s\n' "$claude_out"
+    else
+      printf 'Claude %s\n' "$claude_out"
+    fi
+    return 0
+  fi
 
   codex_out=$(codex_task_progress "$branch_name" "$head_sha")
   if [[ $codex_out == Running* ]]; then

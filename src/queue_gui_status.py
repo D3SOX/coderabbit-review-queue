@@ -221,9 +221,10 @@ class StatusMixin:
             return
         if self.status_repo != self.displayed_repo:
             return
-        if self.status_monitor_signature != file_signature(
+        monitor_changed = self.status_monitor_signature != file_signature(
             self.monitor_state_file(self.status_repo)
-        ) or self.status_completion_signature != file_signature(
+        )
+        if self.status_completion_signature != file_signature(
             self.review_completion_file(self.status_repo)
         ):
             self.status_failures = 0
@@ -282,6 +283,11 @@ class StatusMixin:
         self.populate_tasks(stdout)
         self.show_transient_status("Status refreshed", 3000)
         self.update_monitor_state()
+        # A slow status query may overlap every monitor phase change. Apply
+        # its fresh PR list first (removing merged PRs), then catch up; throwing
+        # every such response away can leave the tables stale indefinitely.
+        if monitor_changed:
+            self.refresh()
 
     def advance_spinner(self) -> None:
         frame = self.spinner_frames[self.spinner_index]

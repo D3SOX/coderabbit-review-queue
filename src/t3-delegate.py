@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send a Codex follow-up through the running T3 Code server."""
+"""Send an agent follow-up through the running T3 Code server."""
 
 import json
 import os
@@ -25,7 +25,7 @@ def t3_database():
     return home / ('statev2.sqlite' if (home / 'statev2.sqlite').is_file() else 'state.sqlite')
 
 
-def thread_title(session_id):
+def thread_title(session_id, *, provider='codex'):
     database = t3_database()
     if not database.is_file():
         return ''
@@ -34,15 +34,15 @@ def thread_title(session_id):
             rows = connection.execute('''
                 SELECT t.title FROM orchestration_v2_projection_provider_threads p
                 JOIN orchestration_v2_projection_threads t ON t.thread_id = p.thread_id
-                WHERE (p.provider = 'codex' OR json_extract(p.payload_json, '$.driver') = 'codex')
+                WHERE (p.provider = ? OR json_extract(p.payload_json, '$.driver') = ?)
                   AND json_extract(p.payload_json, '$.nativeThreadRef.nativeId') = ?
                   AND t.active_provider_thread_id = p.provider_thread_id
                   AND t.deleted_at IS NULL
-            ''', (session_id,)).fetchall()
+            ''', (provider, provider, session_id)).fetchall()
             if len(rows) == 1:
                 return ' '.join((rows[0][0] or '').split())
             try:
-                thread_id = matching_thread(database, session_id)[0]
+                thread_id = matching_thread(database, session_id, provider=provider)[0]
             except RuntimeError:
                 return ''
             title = connection.execute('SELECT title FROM orchestration_v2_projection_threads '
@@ -52,10 +52,10 @@ def thread_title(session_id):
             SELECT t.title
             FROM provider_session_runtime r
             JOIN projection_threads t ON t.thread_id = r.thread_id
-            WHERE r.provider_name = 'codex'
+            WHERE r.provider_name = ?
               AND json_extract(r.resume_cursor_json, '$.threadId') = ?
               AND t.deleted_at IS NULL
-        ''', (session_id,)).fetchall()
+        ''', (provider, session_id)).fetchall()
     if len(rows) != 1:
         return ''
     return ' '.join((rows[0][0] or '').split())
@@ -124,7 +124,7 @@ def matching_worktree_thread(connection, session_id):
     ''', (cwd, branch, repository.group(1).lower())).fetchall()
 
 
-def matching_thread(database, session_id):
+def matching_thread(database, session_id, *, provider='codex'):
     with closing(sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=5)) as connection:
         if database.name == 'statev2.sqlite':
             rows = connection.execute('''
@@ -132,12 +132,12 @@ def matching_thread(database, session_id):
                        json_extract(t.payload_json, '$.modelSelection')
                 FROM orchestration_v2_projection_provider_threads p
                 JOIN orchestration_v2_projection_threads t ON t.thread_id = p.thread_id
-                WHERE (p.provider = 'codex' OR json_extract(p.payload_json, '$.driver') = 'codex')
+                WHERE (p.provider = ? OR json_extract(p.payload_json, '$.driver') = ?)
                   AND json_extract(p.payload_json, '$.nativeThreadRef.nativeId') = ?
                   AND t.active_provider_thread_id = p.provider_thread_id
                   AND t.deleted_at IS NULL AND t.archived_at IS NULL
-            ''', (session_id,)).fetchall()
-            if not rows:
+            ''', (provider, provider, session_id)).fetchall()
+            if not rows and provider == 'codex':
                 rows = matching_worktree_thread(connection, session_id)
             if len(rows) != 1:
                 raise RuntimeError(f'Expected one active T3 v2 thread; found {len(rows)}')
@@ -149,10 +149,10 @@ def matching_thread(database, session_id):
             FROM provider_session_runtime r
             JOIN projection_threads t ON t.thread_id = r.thread_id
             JOIN projection_thread_sessions s ON s.thread_id = t.thread_id
-            WHERE r.provider_name = 'codex'
+            WHERE r.provider_name = ?
               AND json_extract(r.resume_cursor_json, '$.threadId') = ?
               AND t.deleted_at IS NULL AND t.archived_at IS NULL
-        ''', (session_id,)).fetchall()
+        ''', (provider, session_id)).fetchall()
     if len(rows) != 1:
         raise RuntimeError(f'Expected one active T3 thread for Codex session {session_id}; found {len(rows)}')
     thread_id, runtime_mode, interaction_mode, model_json, status = rows[0]
@@ -174,14 +174,46 @@ def has_active_run(connection, thread_id):
     ''', (thread_id,)).fetchone() is not None
 
 
-def thread_state(session_id):
+def thread_state(session_id, *, provider='codex'):
     database = t3_database()
     if database.name != 'statev2.sqlite':
         raise RuntimeError('T3 v2 task state unavailable')
-    thread_id = matching_thread(database, session_id)[0]
+    thread_id = matching_thread(database, session_id, provider=provider)[0]
     with closing(sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=1)) as connection:
         active = has_active_run(connection, thread_id)
     return 'running' if active else 'idle'
+
+
+def thread_owner(repo, branch):
+    """Use the current T3 provider, not an old native session on the branch."""
+    database = t3_database()
+    if database.name != 'statev2.sqlite':
+        return ''
+    with closing(sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=1)) as connection:
+        rows = connection.execute('''
+            SELECT json_extract(p.payload_json, '$.driver'),
+                   json_extract(t.payload_json, '$.worktreePath')
+            FROM orchestration_v2_projection_threads t
+            JOIN orchestration_v2_projection_provider_threads p
+              ON t.active_provider_thread_id = p.provider_thread_id
+            WHERE t.deleted_at IS NULL AND t.archived_at IS NULL
+              AND json_extract(t.payload_json, '$.branch') = ?
+              AND json_extract(p.payload_json, '$.driver') IN ('codex', 'claudeAgent')
+        ''', (branch,)).fetchall()
+    matches = set()
+    for driver, cwd in rows:
+        if not cwd:
+            continue
+        origin = subprocess.run(['git', '-C', cwd, 'remote', 'get-url', 'origin'],
+                                capture_output=True, text=True, timeout=3)
+        repository = re.search(r'github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$', origin.stdout.strip(), re.I)
+        if origin.returncode or not repository or repository.group(1).lower() != repo.lower():
+            continue
+        live = subprocess.run(['git', '-C', cwd, 'branch', '--show-current'],
+                              capture_output=True, text=True, timeout=3)
+        if live.returncode == 0 and live.stdout.strip() == branch:
+            matches.add(driver)
+    return matches.pop() if len(matches) == 1 else ''
 
 
 def dispatch_v2(origin, token, command, method='orchestration.dispatchCommand'):
@@ -224,11 +256,11 @@ socket.onerror = () => { console.error('T3 WebSocket failed'); process.exit(1); 
         raise RuntimeError(result.stderr.strip() or 'T3 v2 message dispatch failed')
 
 
-def send_turn(session_id, prompt, *, steer=True):
+def send_turn(session_id, prompt, *, steer=True, provider='codex'):
     home = t3_home()
     database = t3_database()
     thread_id, runtime_mode, interaction_mode, model = matching_thread(
-        database, session_id
+        database, session_id, provider=provider
     )
     origin = json.loads((home / 'server-runtime.json').read_text())['origin']
     parsed = urlparse(origin)
@@ -297,17 +329,26 @@ def send_turn(session_id, prompt, *, steer=True):
 
 if __name__ == '__main__':
     try:
-        if sys.argv[1] == '--title':
-            print(thread_title(sys.argv[2]))
+        provider = 'codex'
+        if '--provider' in sys.argv:
+            index = sys.argv.index('--provider')
+            provider = sys.argv[index + 1]
+            if provider not in ('codex', 'claudeAgent'):
+                raise ValueError('Unsupported T3 provider')
+            del sys.argv[index:index + 2]
+        if sys.argv[1] == '--owner':
+            print(thread_owner(sys.argv[2], sys.argv[3]))
+        elif sys.argv[1] == '--title':
+            print(thread_title(sys.argv[2], provider=provider))
         elif sys.argv[1] == '--state':
-            print(thread_state(sys.argv[2]))
+            print(thread_state(sys.argv[2], provider=provider))
         elif sys.argv[1] == '--can-steer':
             database = t3_database()
             if database.name != 'statev2.sqlite':
                 sys.exit(1)
-            matching_thread(database, sys.argv[2])
+            matching_thread(database, sys.argv[2], provider=provider)
         else:
-            send_turn(sys.argv[1], sys.stdin.read(), steer='--wait-idle' not in sys.argv[2:])
+            send_turn(sys.argv[1], sys.stdin.read(), steer='--wait-idle' not in sys.argv[2:], provider=provider)
     except (IndexError, OSError, ValueError, RuntimeError, sqlite3.Error, subprocess.SubprocessError) as error:
         print(f'T3 delegation failed: {error}', file=sys.stderr)
         sys.exit(1)

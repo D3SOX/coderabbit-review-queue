@@ -11,6 +11,118 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_auto_status_uses_the_current_t3_claude_owner(self):
+        result = self.run_shell(r'''
+agent_mode_override=auto
+python3() { [[ $2 == --owner ]] && echo claudeAgent; }
+codex_task_progress() { echo 'unexpected Codex lookup' >&2; return 99; }
+claude_task_progress() { printf 'Idle\tClaude thread\tDone\n'; }
+local_agent_task_progress branch head
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'Claude Idle\tClaude thread\tDone\n')
+
+    def test_auto_routing_steers_the_current_t3_claude_owner(self):
+        result = self.run_shell(r'''
+agent_mode_override=auto
+agent_host() { :; }
+python3() { [[ $2 == --owner ]] && echo claudeAgent; }
+unresolved_coderabbit_rows() { printf 'thread-1\tfile\t1\tfalse\n'; }
+matching_codex_session() { echo 'unexpected Codex lookup' >&2; return 99; }
+matching_claude_session() { printf 'session\t/worktree\n'; }
+claude_session_state() { echo running; }
+claude_can_steer() { return 0; }
+render_delegation_prompt() { echo 'Resolve review'; }
+auto_merge_instruction() { :; }
+resume_claude_session() { echo 'CLAUDE ROUTED'; }
+route_unresolved_review 42 branch head Title
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('CLAUDE ROUTED', result.stdout)
+
+    def test_native_claude_status_uses_busy_or_idle_instead_of_process_existence(self):
+        for status, expected in [('idle', 'idle'), ('busy', 'running')]:
+            with self.subTest(status=status):
+                result = self.run_shell(r'''
+python3() { return 1; }
+''' + f'''_claude_agents_json='[{{"sessionId":"session","status":"{status}"}}]'\n''' + r'''
+claude_session_state session
+''')
+                self.assertEqual(result.stdout.strip(), expected)
+
+    def test_claude_only_status_never_looks_up_codex(self):
+        result = self.run_shell(r'''
+agent_mode_override=claude
+codex_task_progress() { echo 'unexpected Codex lookup' >&2; return 99; }
+claude_task_progress() { printf 'Idle\tClaude thread\tDone\n'; }
+local_agent_task_progress branch head
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'Claude Idle\tClaude thread\tDone\n')
+
+    def test_claude_routing_steers_t3_and_resumes_standalone_without_duplicate_turns(self):
+        for t3, state, steering, expected in [(True, 'running', True, 'T3'),
+                (True, 'idle', True, 'T3'), (False, 'idle', True, 'CLI'),
+                (False, 'running', True, None), (True, 'running', False, None),
+                (True, 'idle', False, 'T3'), ('native', 'running', True, 'NATIVE')]:
+            with self.subTest(t3=t3, state=state, steering=steering):
+                result = self.run_shell(r'''
+session_cwd="$state_root/worktree"
+mkdir -p "$session_cwd"
+git -C "$session_cwd" init -q
+sleep() { :; }
+desktop_notify() { :; }
+gh() { echo OPEN; }
+claude_session_file() { echo /nonexistent; }
+''' + f'''
+claude_session_state() {{ echo {state}; }}
+claude_can_steer() {{ return {0 if t3 else 1}; }}
+is_t3={1 if t3 is True else 0}
+is_native={1 if t3 == 'native' else 0}
+steer_running_agents_override={1 if steering else 0}
+''' + r'''
+python3() {
+  if [[ $2 == --can-steer ]]; then
+    [[ $1 == */t3-delegate.py && $is_t3 == 1 || $1 == */claude-steer.py && $is_native == 1 ]]
+    return
+  fi
+  if [[ $is_native == 1 ]]; then printf 'NATIVE %s\n' "$*"; else printf 'T3 %s\n' "$*"; fi
+  cat
+}
+claude() { printf 'CLI %s\n' "$*"; }
+ids=(thread-1)
+resume_claude_session 42 Title session "$session_cwd" 'Resolve review' ids head
+if [[ -f $routed_threads_file ]]; then cat "$routed_threads_file"; fi
+''')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if expected:
+                    self.assertIn(expected + ' ', result.stdout)
+                    self.assertIn('Delegation confirmed for PR #42.', result.stdout)
+                    self.assertIn('thread-1', result.stdout)
+                else:
+                    self.assertNotIn('Delegation confirmed', result.stdout)
+                    self.assertNotIn('thread-1', result.stdout)
+                if t3 is True and expected:
+                    self.assertIn('--provider claudeAgent', result.stdout)
+                    self.assertEqual('--wait-idle' in result.stdout, not steering)
+
+    def test_claude_task_matching_finds_t3_worktree_sessions(self):
+        result = self.run_shell(r'''
+claude_projects_root="$state_root/claude-projects"
+worktree="$state_root/.t3/worktrees/repo/t3-example"
+mkdir -p "$worktree" "$claude_projects_root/-home-test--t3-worktrees-repo-t3-example"
+git -C "$worktree" init -q --initial-branch=target-branch
+git -C "$worktree" remote add origin git@github.com:Example/Repo.git
+session=12345678-1234-1234-1234-123456789abc
+session_file="$claude_projects_root/-home-test--t3-worktrees-repo-t3-example/$session.jsonl"
+printf '%s\n' "{\"type\":\"user\",\"timestamp\":\"2026-10-15T08:00:00Z\",\"sessionId\":\"$session\",\"cwd\":\"$worktree\",\"gitBranch\":\"target-branch\"}" >"$session_file"
+matching_claude_session target-branch unrelated-head
+claude_session_file "$session"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('12345678-1234-1234-1234-123456789abc\t', result.stdout)
+        self.assertIn('t3-example/12345678-1234-1234-1234-123456789abc.jsonl', result.stdout)
+
     def test_task_matching_ignores_github_repository_casing(self):
         for indexed in (False, True):
             with self.subTest(indexed=indexed):

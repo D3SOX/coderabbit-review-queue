@@ -44,6 +44,7 @@ install -m 755 \
   "$source_dir/src/t3-delegate.py" \
   "$lib_dir/t3-delegate.py"
 install -m 755 "$source_dir/src/codex-steer.py" "$lib_dir/codex-steer.py"
+install -m 755 "$source_dir/src/claude-steer.py" "$lib_dir/claude-steer.py"
 install -m 644 \
   "$icons_source_dir/coderabbit-logomark.svg" \
   "$lib_dir/coderabbit-logomark.svg"
