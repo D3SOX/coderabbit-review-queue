@@ -23,6 +23,23 @@ import queue_gui_status
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
+    def test_gui_started_monitor_keeps_diagnostics_in_repository_log(self):
+        window = Mock()
+        window.selected_repo.return_value = 'example/repo'
+        window.monitor_pid.return_value = None
+        window.starting_monitors = set()
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / 'example__repo-monitor.log'
+            log_path.write_text('previous diagnostic\n')
+            def launch(*_args, **kwargs):
+                self.assertIs(kwargs['stdout'], kwargs['stderr'])
+                kwargs['stderr'].write(b'new diagnostic\n')
+            with patch.object(queue_gui, 'STATE_ROOT', Path(directory)), \
+                 patch.object(queue_gui.subprocess, 'Popen', side_effect=launch), \
+                 patch.object(queue_gui.QTimer, 'singleShot'):
+                queue_gui.QueueWindow.start_monitor(window)
+            self.assertEqual(log_path.read_text(), 'previous diagnostic\nnew diagnostic\n')
+
     def test_claude_delegation_is_running_only_after_delivery_confirmation(self):
         for confirmed in (True, False):
             with self.subTest(confirmed=confirmed):

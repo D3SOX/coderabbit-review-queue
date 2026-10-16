@@ -946,14 +946,17 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.update_monitor_state()
         self.statusBar().showMessage("Starting monitor…")
         try:
-            subprocess.Popen(
-                [SCRIPT, "--repo", repo],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                close_fds=True,
-            )
+            STATE_ROOT.mkdir(parents=True, exist_ok=True)
+            log_path = STATE_ROOT / f"{repo.replace('/', '__')}-monitor.log"
+            with log_path.open("ab") as log:
+                subprocess.Popen(
+                    [SCRIPT, "--repo", repo],
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=log,
+                    start_new_session=True,
+                    close_fds=True,
+                )
         except OSError as error:
             self.starting_monitors.discard(repo)
             self.update_monitor_state()

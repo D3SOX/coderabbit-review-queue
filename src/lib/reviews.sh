@@ -215,7 +215,7 @@ wait_for_acceptance() {
       jq -r \
         --arg since "$triggered_at" \
         --arg head "$head_sha" \
-        --argjson statuses "$statuses" '
+        --slurpfile statuses <(printf '%s\n' "$statuses") '
         if (
           any(
             .[];
@@ -227,7 +227,7 @@ wait_for_acceptance() {
             )
           )
           or any(
-            $statuses.statuses[];
+            $statuses[0].statuses[];
             .context == "CodeRabbit"
             and .created_at >= $since
             and .description == "Review rate limited"
@@ -252,7 +252,7 @@ wait_for_acceptance() {
             )
           )
           or any(
-            $statuses.statuses[];
+            $statuses[0].statuses[];
             .context == "CodeRabbit"
             and (
               (
@@ -332,12 +332,12 @@ wait_for_review_completion() {
     if [[ $result == completed ]]; then
       reviews=$(gh api --paginate --slurp "repos/$repo/pulls/$pr/reviews?per_page=100")
       comments=$(gh api --paginate --slurp "repos/$repo/issues/$pr/comments?per_page=100")
-      if jq -e \
+      if jq -s -e \
         --arg since "$triggered_at" \
-        --arg head "$head_sha" \
-        --argjson comments "$comments" '
+        --arg head "$head_sha" '
+          .[0] as $reviews | .[1] as $comments |
           any(
-            .[][];
+            $reviews[][];
             .user.login == "coderabbitai[bot]"
             and (.commit_id // "") == $head
             and (.submitted_at // "") >= $since
@@ -359,7 +359,7 @@ wait_for_review_completion() {
             )
             and ((.body | contains("rate limited by coderabbit.ai")) | not)
           )
-        ' <<<"$reviews" >/dev/null; then
+        ' < <(printf '%s\n' "$reviews" "$comments") >/dev/null; then
         write_monitor_state waiting '' '' 0
         write_review_completion "$pr" "$head_sha" "$title"
         printf 'CodeRabbit finished PR #%s.\n' "$pr"

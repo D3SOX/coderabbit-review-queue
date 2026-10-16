@@ -11,6 +11,46 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_large_commit_status_does_not_block_review_acceptance(self):
+        result = self.run_shell(r'''
+wait_for_github_quota() { :; }
+gh() {
+  if [[ $* == *'/status'* ]]; then
+    printf '{"padding":"'
+    head -c 150000 /dev/zero | tr '\0' x
+    printf '","statuses":[{"context":"CodeRabbit","created_at":"2026-10-16T13:06:53Z","state":"pending","description":"Review in progress"}]}\n'
+  else
+    echo '[]'
+  fi
+}
+sleep() { exit 99; }
+wait_for_acceptance 2134 2026-10-16T12:48:29Z head Title
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('CodeRabbit accepted PR #2134.', result.stdout)
+
+    def test_large_comment_history_does_not_trap_completed_review_in_progress(self):
+        result = self.run_shell(r'''
+wait_for_github_quota() { :; }
+gh() {
+  if [[ $* == *'/status'* ]]; then
+    printf '%s\n' '{"statuses":[{"context":"CodeRabbit","created_at":"2026-10-16T13:06:53Z","state":"success","description":"Review completed"}]}'
+  elif [[ $* == *'/reviews?'* ]]; then
+    printf '%s\n' '[[{"user":{"login":"coderabbitai[bot]"},"state":"COMMENTED","commit_id":"head","submitted_at":"2026-10-16T13:06:44Z","body":"Review findings"}]]'
+  else
+    printf '[ [{"user":{"login":"someone"},"body":"'
+    head -c 150000 /dev/zero | tr '\0' x
+    printf '","created_at":"2026-10-16T13:06:44Z","updated_at":"2026-10-16T13:06:44Z"}] ]\n'
+  fi
+}
+desktop_notify() { :; }
+sleep() { echo 'Still waiting on an already completed review' >&2; exit 99; }
+wait_for_review_completion 2134 2026-10-16T12:48:29Z head Title
+[[ -s $review_completion_file ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('CodeRabbit finished PR #2134.', result.stdout)
+
     def test_auto_status_uses_the_current_t3_claude_owner(self):
         result = self.run_shell(r'''
 agent_mode_override=auto
