@@ -244,96 +244,78 @@ claude_agents_json() {
 }
 
 matching_claude_session() {
-  local branch_name=$1
-  local head_sha=$2
-  local project_dir file line parsed timestamp session_id cwd metadata_branch
-  local live_branch live_head remote key
-  local repo_lower=${repo,,}
-  local -A branch_sessions=()
-  local -A branch_timestamps=()
-  local -A head_sessions=()
-  local -A head_timestamps=()
-  local -A metadata_branch_sessions=()
-  local -A metadata_branch_timestamps=()
-
   [[ -d $claude_projects_root ]] || return 1
+  # A shell/jq/git pipeline per transcript exceeded the SSH status budget.
+  # Parse history in one process and inspect each worktree only once.
+  python3 - "$claude_projects_root" "$repo" "$1" "$2" <<'PY'
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
 
-  while IFS= read -r -d '' file; do
-    [[ -n ${file:-} ]] || continue
-    line=$(
-      rg -N -m 1 \
-        '"cwd":"/' \
-        "$file" 2>/dev/null || true
-    )
-    [[ -n $line ]] || continue
-    parsed=$(
-      jq -r '
-        select(
-          .cwd != null
-          and .cwd != ""
-          and .sessionId != null
-          and .sessionId != ""
-          and ((.isSidechain // false) | not)
+projects, repo, branch, head = sys.argv[1:]
+repo = repo.lower()
+worktrees = {}
+matches = [{}, {}, {}]
+
+def git(cwd, *args):
+    try:
+        result = subprocess.run(['git', '-C', cwd, *args], capture_output=True,
+                                text=True, timeout=3)
+        return result.stdout.strip() if result.returncode == 0 else ''
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+for file in Path(projects).glob('*/*.jsonl'):
+    entry = None
+    try:
+        with file.open() as events:
+            for line in events:
+                if '"cwd"' not in line or '"sessionId"' not in line:
+                    continue
+                try:
+                    candidate = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(candidate, dict) and candidate.get('cwd')
+                        and candidate.get('sessionId')):
+                    entry = candidate
+                    break
+    except (OSError, UnicodeError):
+        continue
+    if entry is None or entry.get('isSidechain'):
+        continue
+    cwd, session = entry['cwd'], entry['sessionId']
+    if not isinstance(cwd, str) or not isinstance(session, str):
+        continue
+    if cwd not in worktrees:
+        origin = git(cwd, 'remote', 'get-url', 'origin')
+        repository = re.search(r'github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$', origin, re.I)
+        worktrees[cwd] = (
+            (git(cwd, 'branch', '--show-current'), git(cwd, 'rev-parse', 'HEAD'))
+            if repository and repository.group(1).lower() == repo else None
         )
-        | [
-            (.timestamp // ""),
-            .sessionId,
-            .cwd,
-            (.gitBranch // "")
-          ]
-        | @tsv
-      ' <<<"$line" 2>/dev/null || true
-    )
-    [[ -n $parsed ]] || continue
-    IFS=$'\t' read -r timestamp session_id cwd metadata_branch <<<"$parsed"
-    [[ -n $session_id && -n $cwd ]] || continue
-    [[ -n $timestamp ]] || timestamp='1970-01-01T00:00:00.000Z'
+    current = worktrees[cwd]
+    if current is None:
+        continue
+    timestamp = entry.get('timestamp') or '1970-01-01T00:00:00.000Z'
+    if not isinstance(timestamp, str):
+        continue
+    for group, matched in zip(matches, (current[0] == branch, current[1] == head,
+                                       entry.get('gitBranch') == branch)):
+        if matched and (cwd not in group or timestamp > group[cwd][0]):
+            group[cwd] = (timestamp, session)
 
-    if ! git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
-      continue
-    fi
-    remote=$(git -C "$cwd" remote get-url origin 2>/dev/null || true)
-    if [[ ${remote,,} != *"github.com:$repo_lower.git" &&
-      ${remote,,} != *"github.com/$repo_lower.git" &&
-      ${remote,,} != *"github.com/$repo_lower" ]]; then
-      continue
-    fi
-    if [[ $metadata_branch == "$branch_name" ]]; then
-      if [[ $timestamp > ${metadata_branch_timestamps[$cwd]:-} ]]; then
-        metadata_branch_timestamps["$cwd"]=$timestamp
-        metadata_branch_sessions["$cwd"]=$session_id
-      fi
-    fi
-    live_branch=$(git -C "$cwd" branch --show-current 2>/dev/null || true)
-    live_head=$(git -C "$cwd" rev-parse HEAD 2>/dev/null || true)
-    if [[ $live_branch == "$branch_name" ]]; then
-      if [[ $timestamp > ${branch_timestamps[$cwd]:-} ]]; then
-        branch_timestamps["$cwd"]=$timestamp
-        branch_sessions["$cwd"]=$session_id
-      fi
-    fi
-    if [[ $live_head == "$head_sha" ]]; then
-      if [[ $timestamp > ${head_timestamps[$cwd]:-} ]]; then
-        head_timestamps["$cwd"]=$timestamp
-        head_sessions["$cwd"]=$session_id
-      fi
-    fi
-  done < <(
-    find "$claude_projects_root" -mindepth 2 -maxdepth 2 -type f \
-      -name '*.jsonl' -print0 2>/dev/null
-  )
-
-  for key in branch_sessions head_sessions metadata_branch_sessions; do
-    local -n candidates=$key
-    if (( ${#candidates[@]} == 1 )); then
-      printf '%s\t%s\n' "${candidates[@]}" "${!candidates[@]}"
-      return 0
-    fi
-    if (( ${#candidates[@]} > 1 )); then
-      return 1
-    fi
-  done
-  return 1
+for group in matches:
+    if len(group) == 1:
+        cwd, (_timestamp, session) = next(iter(group.items()))
+        print(session, cwd, sep='\t')
+        sys.exit(0)
+    if group:
+        break
+sys.exit(1)
+PY
 }
 
 claude_session_file() {

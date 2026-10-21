@@ -11,6 +11,69 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_claude_task_matching_checks_each_worktree_once_not_each_transcript(self):
+        result = self.run_shell(r'''
+claude_projects_root="$state_root/claude"
+worktree="$state_root/worktree"
+mkdir -p "$worktree" "$state_root/bin" "$claude_projects_root/project"
+git -C "$worktree" init -q -b target-branch
+git -C "$worktree" remote add origin git@github.com:example/repo.git
+export REAL_GIT=$(command -v git)
+export GIT_CALLS="$state_root/git-calls"
+python3 - "$state_root/bin/git" "$claude_projects_root/project" "$worktree" <<'PY'
+import json, pathlib, sys
+binary, project, cwd = sys.argv[1:]
+stub = pathlib.Path(binary)
+stub.write_text('#!/usr/bin/env bash\nprintf "call\\n" >>"$GIT_CALLS"\nexec "$REAL_GIT" "$@"\n')
+stub.chmod(0o755)
+for i in range(30):
+    (pathlib.Path(project) / f'session-{i}.jsonl').write_text(json.dumps({
+        'sessionId': f'session-{i}', 'cwd': cwd, 'gitBranch': 'target-branch',
+        'timestamp': f'2026-10-21T12:{i:02d}:00Z',
+    }, separators=(',', ':')) + '\n')
+PY
+export PATH="$state_root/bin:$PATH"
+matching_claude_session target-branch unrelated-head
+wc -l <"$GIT_CALLS"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        match, calls = result.stdout.splitlines()
+        self.assertTrue(match.startswith('session-29\t'), match)
+        self.assertLessEqual(int(calls), 3, 'Repeated history scans exhaust the remote status budget')
+
+    def test_claude_matching_prefers_live_branch_and_rejects_ambiguous_worktrees(self):
+        for ambiguous in (False, True):
+            with self.subTest(ambiguous=ambiguous):
+                result = self.run_shell(r'''
+claude_projects_root="$state_root/claude"
+for number in 1 2; do
+  mkdir -p "$state_root/worktree-$number"
+  git -C "$state_root/worktree-$number" init -q -b target-branch
+  git -C "$state_root/worktree-$number" remote add origin git@github.com:Example/Repo.git
+done
+''' + ('' if ambiguous else 'git -C "$state_root/worktree-2" symbolic-ref HEAD refs/heads/other-branch\n') + r'''
+python3 - "$claude_projects_root" "$state_root" <<'PY'
+import json, pathlib, sys
+projects, state = map(pathlib.Path, sys.argv[1:])
+for number in (1, 2):
+    project = projects / str(number)
+    project.mkdir(parents=True)
+    entry = {'cwd': str(state / f'worktree-{number}'), 'gitBranch': 'target-branch',
+             'sessionId': f'session-{number}', 'timestamp': f'2026-10-21T12:0{number}:00Z'}
+    (project / f'session-{number}.jsonl').write_text(json.dumps(entry) + '\n')
+    entry.update(sessionId='subagent', isSidechain=True, timestamp='2099-01-01T00:00:00Z')
+    (project / 'sidechain.jsonl').write_text(json.dumps(entry) + '\n')
+    (project / 'broken.jsonl').write_text('{invalid json}\n')
+PY
+matching_claude_session target-branch unrelated-head
+''')
+                if ambiguous:
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(result.stdout, '')
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(result.stdout.startswith('session-1\t'), result.stdout)
+
     def test_large_commit_status_does_not_block_review_acceptance(self):
         result = self.run_shell(r'''
 wait_for_github_quota() { :; }
