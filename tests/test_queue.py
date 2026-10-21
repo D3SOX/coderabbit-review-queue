@@ -313,6 +313,28 @@ if delegate_pr_now 42; then exit 0; else exit 1; fi
 ''')
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
+    def test_repeated_delegate_arguments_route_only_selected_prs_from_one_snapshot(self):
+        result = self.run_shell(r'''
+snapshot() { echo snapshot >&2; echo '{}'; }
+reviewed_rows() { printf '41\tfirst\thead\tFirst\n42\tsecond\thead\tSecond\n43\tthird\thead\tThird\n'; }
+route_unresolved_review() { printf 'routed %s\n' "$1"; }
+main --repo example/repo --delegate 43 --delegate 41
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['routed 43', 'routed 41'])
+        self.assertEqual(result.stderr.splitlines(), ['snapshot'])
+
+    def test_batch_delegation_continues_after_missing_pr_or_dispatch_failure(self):
+        result = self.run_shell(r'''
+snapshot() { echo '{}'; }
+reviewed_rows() { printf '41\tfirst\thead\tFirst\n42\tsecond\thead\tSecond\n'; }
+route_unresolved_review() { printf 'routed %s\n' "$1"; [[ $1 != 41 ]]; }
+main --repo example/repo --delegate 99 --delegate 41 --delegate 42
+''')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['routed 41', 'routed 42'])
+        self.assertIn('PR #99 is not an eligible open pull request.', result.stderr)
+
     def test_remote_confirmed_dispatch_marks_feedback_routed(self):
         result = self.run_shell(r'''
 printf 'codex\n' >"$auto_delegate_file"

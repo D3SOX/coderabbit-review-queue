@@ -642,6 +642,7 @@ class StatusMixin:
     @preserve_viewport("tasks")
     def populate_tasks(self, status: str) -> None:
         current_item = self.tasks.currentItem()
+        selected_numbers = {item.data(0, Qt.UserRole) for item in self.tasks.selectedItems()}
         selected_number = (
             current_item.data(0, Qt.UserRole) if current_item is not None else None
         )
@@ -704,7 +705,10 @@ class StatusMixin:
             item.setToolTip(5, detail)
             self.tasks.addTopLevelItem(item)
             if number == selected_number:
-                self.tasks.setCurrentItem(item)
+                self.tasks.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
+            item.setSelected(number in selected_numbers)
+        if self.tasks.currentItem() is None and self.tasks.selectedItems():
+            self.tasks.setCurrentItem(self.tasks.selectedItems()[0], 0, QItemSelectionModel.NoUpdate)
         self.update_delegate_button()
 
     def move_selected(self, offset: int, *, to_edge: bool = False) -> None:

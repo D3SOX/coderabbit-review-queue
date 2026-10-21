@@ -231,19 +231,28 @@ show_gui() {
 }
 
 delegate_pr_now() {
-  local requested_pr=$1
+  local requested_pr found failed=0
   local state pr branch_name head_sha title
 
   state=$(snapshot 0)
-  while IFS=$'\t' read -r pr branch_name head_sha title; do
-    [[ $pr == "$requested_pr" ]] || continue
-    force_delegation=1
-    route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"
-    return $?
-  done < <(reviewed_rows <<<"$state")
+  for requested_pr in "$@"; do
+    found=0
+    while IFS=$'\t' read -r pr branch_name head_sha title; do
+      [[ $pr == "$requested_pr" ]] || continue
+      found=1
+      force_delegation=1
+      if ! route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"; then
+        failed=1
+      fi
+      break
+    done < <(reviewed_rows <<<"$state")
 
-  printf 'PR #%s is not an eligible open pull request.\n' "$requested_pr" >&2
-  return 1
+    if (( ! found )); then
+      printf 'PR #%s is not an eligible open pull request.\n' "$requested_pr" >&2
+      failed=1
+    fi
+  done
+  return "$failed"
 }
 
 delegate_all_now() {

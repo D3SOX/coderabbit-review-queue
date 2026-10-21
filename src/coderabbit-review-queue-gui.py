@@ -59,6 +59,13 @@ from queue_gui_settings import SettingsMixin
 from queue_gui_status import StatusMixin
 
 
+def task_can_delegate(item: QTreeWidgetItem, steering: bool) -> bool:
+    return bool(item.data(0, Qt.UserRole + 2)) and (
+        not bool(item.data(0, Qt.UserRole + 1))
+        or (steering and bool(item.data(0, Qt.UserRole + 3)))
+    )
+
+
 class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -101,6 +108,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.delegate_process.finished.connect(self.delegate_finished)
         self.delegate_repo = ""
         self.delegate_pr = ""
+        self.delegate_prs: list[str] = []
         self.starting_monitors: set[str] = set()
         # True after we have shown a future rate-limit countdown; used so the
         # availability ding fires on transition, not on startup already-open.
@@ -311,6 +319,11 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         )
         self.tasks.setRootIsDecorated(False)
         self.tasks.setAlternatingRowColors(True)
+        self.tasks.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self.tasks.setToolTip(
+            "Select multiple PRs with Ctrl-click or Shift-click. "
+            "Delegate / steer selected acts on eligible selected PRs only."
+        )
         self.tasks.header().resizeSection(0, 90)
         self.tasks.header().resizeSection(1, 300)
         self.tasks.header().resizeSection(2, 120)
@@ -800,17 +813,13 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         )
 
     def update_delegate_button(self) -> None:
-        item = self.tasks.currentItem()
         process_idle = self.delegate_process.state() == QProcess.NotRunning
         steering = self.steer_running_agents_enabled(self.selected_repo())
         if process_idle:
             self.delegate_button.setText("Delegate / steer selected" if steering else "Delegate selected")
         self.delegate_button.setEnabled(
-            item is not None
+            any(task_can_delegate(item, steering) for item in self.tasks.selectedItems())
             and bool(self.selected_repo())
-            and bool(item.data(0, Qt.UserRole + 2))
-            and (not bool(item.data(0, Qt.UserRole + 1))
-                 or (steering and bool(item.data(0, Qt.UserRole + 3))))
             and process_idle
         )
         has_idle = any(
@@ -823,33 +832,29 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         )
 
     def delegate_selected(self) -> None:
-        item = self.tasks.currentItem()
         repo = self.selected_repo()
-        if (
-            item is None
-            or not repo
-            or not bool(item.data(0, Qt.UserRole + 2))
-            or (bool(item.data(0, Qt.UserRole + 1))
-                and not (self.steer_running_agents_enabled(repo)
-                         and bool(item.data(0, Qt.UserRole + 3))))
-            or self.delegate_process.state() != QProcess.NotRunning
-        ):
+        if not repo or self.delegate_process.state() != QProcess.NotRunning:
             return
-        self.delegate_pr = item.data(0, Qt.UserRole)
+        steering = self.steer_running_agents_enabled(repo)
+        numbers = [
+            item.data(0, Qt.UserRole)
+            for item in sorted(self.tasks.selectedItems(), key=self.tasks.indexOfTopLevelItem)
+            if task_can_delegate(item, steering)
+        ]
+        if not numbers:
+            return
+        self.delegate_prs = numbers
+        self.delegate_pr = numbers[0] if len(numbers) == 1 else ""
         self.delegate_repo = repo
         self.delegate_button.setEnabled(False)
+        self.delegate_all_button.setEnabled(False)
         self.delegate_button.setText("Delegating…")
         self.statusBar().showMessage(
-            f"Delegating PR #{self.delegate_pr} feedback…"
+            "Delegating feedback for " + ", ".join(f"#{number}" for number in numbers) + "…"
         )
         self.delegate_process.setProgram(SCRIPT)
         self.delegate_process.setArguments(
-            [
-                "--repo",
-                repo,
-                "--delegate",
-                self.delegate_pr,
-            ]
+            ["--repo", repo] + [arg for number in numbers for arg in ("--delegate", number)]
         )
         self.delegate_process.start()
 
@@ -858,6 +863,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         if not repo or self.delegate_process.state() != QProcess.NotRunning:
             return
         self.delegate_pr = ""
+        self.delegate_prs = []
         self.delegate_repo = repo
         self.delegate_button.setEnabled(False)
         self.delegate_all_button.setEnabled(False)
@@ -886,8 +892,9 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         confirmed = set(re.findall(r"Delegation confirmed for PR #(\d+)\.", stdout))
         for number in set(re.findall(r"PR #(\d+)", stdout)):
             if (
-                number in confirmed
-                or "for PR #" + number + " is already running" in stdout
+                self.selected_repo() == self.delegate_repo
+                and (number in confirmed
+                     or "for PR #" + number + " is already running" in stdout)
             ):
                 self.mark_delegation_running(number)
         if exit_code != 0:
@@ -897,6 +904,11 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
                 self,
                 "Delegation failed",
                 stderr or stdout.strip() or "Unknown delegation error",
+            )
+        elif len(self.delegate_prs) > 1:
+            self.update_delegate_button()
+            self.show_transient_status(
+                f"Delegated {len(confirmed)} of {len(self.delegate_prs)} selected PRs"
             )
         elif not self.delegate_pr:
             self.update_delegate_button()
@@ -909,7 +921,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             or "started while routing" in stdout
             or self.delegate_pr in confirmed
         ):
-            if self.delegate_pr:
+            if self.delegate_pr and self.selected_repo() == self.delegate_repo:
                 self.mark_delegation_running(self.delegate_pr)
             if self.delegate_pr in confirmed:
                 self.show_transient_status(

@@ -45,6 +45,9 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             with self.subTest(confirmed=confirmed):
                 window = Mock()
                 window.delegate_pr = '42'
+                window.delegate_prs = ['42']
+                window.delegate_repo = 'example/repo'
+                window.selected_repo.return_value = 'example/repo'
                 output = 'Routing unresolved CodeRabbit review on PR #42 to Claude session session.\n'
                 if confirmed:
                     output += 'Delegation confirmed for PR #42.\n'
@@ -52,6 +55,133 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 window.delegate_process.readAllStandardError.return_value = b''
                 queue_gui.QueueWindow.delegate_finished(window, 0)
                 self.assertEqual(window.mark_delegation_running.called, confirmed)
+
+    def test_finished_reviews_support_ctrl_and_shift_selection(self):
+        app = QApplication.instance() or QApplication([])
+        from PySide6.QtTest import QTest
+        with patch.object(queue_gui.QueueWindow, 'load_cached_repos', return_value=True):
+            window = queue_gui.QueueWindow()
+        try:
+            self.assertEqual(window.tasks.selectionMode(), window.queue.selectionMode())
+            window.tasks.resize(600, 200)
+            for number in range(4):
+                window.tasks.addTopLevelItem(queue_gui.QTreeWidgetItem([str(number)]))
+            window.show()
+            app.processEvents()
+            def click(index, modifiers=Qt.NoModifier):
+                point = window.tasks.visualItemRect(window.tasks.topLevelItem(index)).center()
+                QTest.mouseClick(window.tasks.viewport(), Qt.LeftButton, modifiers, point)
+            click(0)
+            click(2, Qt.ControlModifier)
+            self.assertEqual({item.text(0) for item in window.tasks.selectedItems()}, {'0', '2'})
+            click(3, Qt.ShiftModifier)
+            self.assertEqual({item.text(0) for item in window.tasks.selectedItems()}, {'0', '2', '3'})
+        finally:
+            window.hide()
+            window.deleteLater()
+            app.processEvents()
+
+    def test_finished_refresh_preserves_selection_and_current_without_scrolling(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.tasks = queue_gui.QTreeWidget()
+        window.tasks.setSelectionMode(queue_gui.QTreeWidget.ExtendedSelection)
+        window.tasks.resize(400, 120)
+        window.tasks.show()
+        window.monitor_activity = None
+        def refresh(numbers):
+            status = 'Finished CodeRabbit reviews:\n' + ''.join(
+                f'  #{n} PR {n}\n    Result: 2 unresolved\n    Agent task: Codex Idle\tTask\tDone\n'
+                for n in numbers)
+            queue_gui.QueueWindow.populate_tasks(window, status)
+            app.processEvents()
+        try:
+            refresh(range(40))
+            window.tasks.setCurrentItem(window.tasks.topLevelItem(30))
+            window.tasks.topLevelItem(35).setSelected(True)
+            window.tasks.verticalScrollBar().setValue(10)
+            before = window.tasks.itemAt(5, 0).data(0, Qt.UserRole)
+            refresh([99] + list(reversed(range(40))))
+            self.assertEqual({i.data(0, Qt.UserRole) for i in window.tasks.selectedItems()}, {'30', '35'})
+            self.assertEqual(window.tasks.currentItem().data(0, Qt.UserRole), '30')
+            self.assertEqual(window.tasks.itemAt(5, 0).data(0, Qt.UserRole), before)
+            refresh(n for n in range(40) if n != 30)
+            self.assertEqual({i.data(0, Qt.UserRole) for i in window.tasks.selectedItems()}, {'35'})
+            self.assertEqual(window.tasks.currentItem().data(0, Qt.UserRole), '35')
+            window.tasks.clearSelection()
+            refresh(range(40))
+            self.assertFalse(window.tasks.selectedItems())
+        finally:
+            window.tasks.close()
+
+    def test_delegate_selected_uses_only_eligible_selected_prs(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.tasks = queue_gui.QTreeWidget()
+        window.tasks.setSelectionMode(queue_gui.QTreeWidget.ExtendedSelection)
+        window.delegate_button = queue_gui.QPushButton()
+        window.delegate_all_button = queue_gui.QPushButton()
+        window.selected_repo.return_value = 'example/repo'
+        window.delegate_process.state.return_value = QProcess.NotRunning
+        window.steer_running_agents_enabled.return_value = True
+        for number, actionable, running, steerable in (
+            ('1', True, False, False), ('2', True, False, False),
+            ('3', True, True, True), ('4', False, False, False),
+            ('5', True, True, False),
+        ):
+            item = queue_gui.QTreeWidgetItem([number])
+            for role, value in enumerate((number, running, actionable, steerable)):
+                item.setData(0, Qt.UserRole + role, value)
+            window.tasks.addTopLevelItem(item)
+            item.setSelected(number != '1')
+        queue_gui.QueueWindow.update_delegate_button(window)
+        self.assertTrue(window.delegate_button.isEnabled())
+        queue_gui.QueueWindow.delegate_selected(window)
+        self.assertEqual(window.delegate_prs, ['2', '3'])
+        self.assertEqual(window.delegate_repo, 'example/repo')
+        window.delegate_process.setArguments.assert_called_once_with(
+            ['--repo', 'example/repo', '--delegate', '2', '--delegate', '3'])
+        self.assertFalse(window.delegate_button.isEnabled())
+        self.assertFalse(window.delegate_all_button.isEnabled())
+        window.steer_running_agents_enabled.return_value = False
+        queue_gui.QueueWindow.delegate_selected(window)
+        self.assertEqual(window.delegate_prs, ['2'])
+        window.delegate_process.state.return_value = QProcess.Running
+        window.delegate_process.start.reset_mock()
+        queue_gui.QueueWindow.update_delegate_button(window)
+        queue_gui.QueueWindow.delegate_selected(window)
+        self.assertFalse(window.delegate_button.isEnabled())
+        window.delegate_process.start.assert_not_called()
+        window.delegate_process.state.return_value = QProcess.NotRunning
+        window.tasks.clearSelection()
+        queue_gui.QueueWindow.update_delegate_button(window)
+        self.assertFalse(window.delegate_button.isEnabled())
+        window.delegate_process.start.reset_mock()
+        queue_gui.QueueWindow.delegate_selected(window)
+        window.delegate_process.start.assert_not_called()
+        app.processEvents()
+
+    def test_batch_delegation_confirms_only_delivered_prs_in_original_repository(self):
+        for current_repo, exit_code in (('example/repo', 0), ('other/repo', 0), ('example/repo', 1)):
+            window = Mock()
+            window.delegate_repo = 'example/repo'
+            window.selected_repo.return_value = current_repo
+            window.delegate_pr = ''
+            window.delegate_prs = ['1', '2']
+            window.delegate_process.readAllStandardOutput.return_value = (
+                b'Delegation confirmed for PR #1.\nRouting PR #2.\n')
+            window.delegate_process.readAllStandardError.return_value = b''
+            with patch.object(queue_gui.QMessageBox, 'warning') as warning:
+                queue_gui.QueueWindow.delegate_finished(window, exit_code)
+            self.assertEqual(warning.called, exit_code != 0)
+            if current_repo == window.delegate_repo:
+                window.mark_delegation_running.assert_called_once_with('1')
+            else:
+                window.mark_delegation_running.assert_not_called()
+            if exit_code == 0:
+                window.show_transient_status.assert_called_with('Delegated 1 of 2 selected PRs')
+            else:
+                window.show_transient_status.assert_called_with('Delegation failed', 6000)
 
     def test_monitor_activity_does_not_starve_successful_status_updates(self):
         window = Mock()

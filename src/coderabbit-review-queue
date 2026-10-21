@@ -98,7 +98,7 @@ main() {
   local action='run'
   local completed_pr=''
   local selected_repo=''
-  local delegate_pr=''
+  local -a delegate_prs=()
   local excluded_authors=''
   local task_branch=''
   local task_head=''
@@ -151,7 +151,7 @@ main() {
           return 2
         }
         action='delegate'
-        delegate_pr=$2
+        delegate_prs+=("$2")
         shift 2
         ;;
       --delegate-all)
@@ -362,7 +362,7 @@ main() {
     return $?
   fi
   if [[ $action == delegate ]]; then
-    delegate_pr_now "$delegate_pr"
+    delegate_pr_now "${delegate_prs[@]}"
     return $?
   fi
   if [[ $action == delegate-all ]]; then
