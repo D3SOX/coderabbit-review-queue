@@ -42,6 +42,16 @@ query($owner: String!, $name: String!) {
                         login
                       }
                     }
+                    ... on CheckRun {
+                      name
+                      status
+                      conclusion
+                      startedAt
+                      completedAt
+                      title
+                      summary
+                      checkSuite { app { slug } }
+                    }
                   }
                 }
               }
@@ -287,14 +297,16 @@ excluded_authors_json() {
 }
 
 eligible_state() {
-  jq --argjson ignoreDrafts "$(ignore_drafts_json)" \
+  jq -L "$script_dir/lib" --argjson ignoreDrafts "$(ignore_drafts_json)" \
     --argjson excludedBranches "$(excluded_branches_json)" \
     --argjson excludedAuthors "$(excluded_authors_json)" '
+    include "coderabbit-checks";
     .data.repository.pullRequests.nodes |= map(
       select($ignoreDrafts == false or (.isDraft | not))
       | select(.headRefName as $b | ($excludedBranches | index($b) | not))
       | select((.author.login // "" | ascii_downcase) as $a
           | ($excludedAuthors | index($a) | not))
+      | (.commits.nodes[]?.commit.statusCheckRollup.contexts.nodes[]? |= coderabbit_check_context)
     )
   '
 }

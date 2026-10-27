@@ -11,6 +11,110 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'src/coderabbit-review-queue'
 
 
 class QueueTests(unittest.TestCase):
+    def test_completed_coderabbit_check_run_releases_review_wait(self):
+        result = self.run_shell(r'''
+poll_wait_background_actions() { :; }
+desktop_notify() { :; }
+gh() {
+  case "$*" in
+    *'/status') echo '{"statuses":[]}' ;;
+    *'/check-runs'*) echo '{"check_runs":[{"name":"CodeRabbit","app":{"slug":"coderabbitai"},"status":"completed","conclusion":"success","started_at":"2026-10-27T11:04:37Z","completed_at":"2026-10-27T11:11:18Z","output":{"title":"Finished","summary":"Result: Success - Review completed"}}]}' ;;
+    *'/reviews?'*) echo '[[{"user":{"login":"coderabbitai[bot]"},"commit_id":"head","submitted_at":"2026-10-27T11:11:10Z","state":"CHANGES_REQUESTED","body":"Actionable comments posted: 4"}]]' ;;
+    *'/comments?'*) echo '[[{"user":{"login":"coderabbitai[bot]"},"created_at":"2026-10-27T11:04:11Z","updated_at":"2026-10-27T11:11:19Z","body":"Action performed: Review finished."}]]' ;;
+    *) return 99 ;;
+  esac
+}
+set -T
+trap 'case "$BASH_COMMAND" in sleep\ *) echo "Still waiting after the review check completed" >&2; exit 97 ;; esac' DEBUG
+wait_for_review_completion 2434 2026-10-27T11:04:04Z head Title
+[[ -s $review_completion_file ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('CodeRabbit finished PR #2434.', result.stdout)
+
+    def test_check_run_completion_requires_fresh_owned_success_and_published_review(self):
+        for status, conclusion, app, started, published, expected in [
+            ('completed', 'success', 'coderabbitai', '2026-10-27T11:04:37Z', True, 0),
+            ('in_progress', None, 'coderabbitai', '2026-10-27T11:04:37Z', True, 97),
+            ('completed', 'success', 'another-app', '2026-10-27T11:04:37Z', True, 97),
+            ('completed', 'success', 'coderabbitai', '2026-10-27T10:04:37Z', True, 97),
+            ('completed', 'success', 'coderabbitai', '2026-10-27T11:04:37Z', False, 97),
+            ('completed', 'skipped', 'coderabbitai', '2026-10-27T11:04:37Z', True, 97),
+            ('completed', 'failure', 'coderabbitai', '2026-10-27T11:04:37Z', True, 4),
+        ]:
+            with self.subTest(status=status, conclusion=conclusion, app=app, started=started, published=published):
+                fixture = {
+                    'checks': {'check_runs': [{'name': 'CodeRabbit', 'app': {'slug': app},
+                        'status': status, 'conclusion': conclusion, 'started_at': started}]},
+                    'reviews': [[{'user': {'login': 'coderabbitai[bot]'}, 'commit_id': 'head',
+                        'submitted_at': '2026-10-27T11:11:10Z', 'state': 'COMMENTED',
+                        'body': 'Review findings'}]] if published else [[]],
+                }
+                result = self.run_shell(r'''
+fixture=$(cat)
+poll_wait_background_actions() { :; }
+desktop_notify() { :; }
+gh() {
+  case "$*" in
+    *'/status') echo '{"statuses":[]}' ;;
+    *'/check-runs'*) jq -c '.checks' <<<"$fixture" ;;
+    *'/reviews?'*) jq -c '.reviews' <<<"$fixture" ;;
+    *'/comments?'*) echo '[[]]' ;;
+    *) return 99 ;;
+  esac
+}
+set -T
+trap 'case "$BASH_COMMAND" in sleep\ *) exit 97 ;; esac' DEBUG
+wait_for_review_completion 2434 2026-10-27T11:04:04Z head Title
+''', fixture)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
+    def test_check_runs_drive_snapshot_queue_and_active_states(self):
+        for status, conclusion, app, queued, active in [
+            ('IN_PROGRESS', None, 'coderabbitai', False, True),
+            ('QUEUED', None, 'coderabbitai', False, True),
+            ('COMPLETED', 'SUCCESS', 'coderabbitai', False, False),
+            ('COMPLETED', 'SKIPPED', 'coderabbitai', True, False),
+            ('IN_PROGRESS', None, 'another-app', True, False),
+        ]:
+            with self.subTest(status=status, conclusion=conclusion, app=app):
+                pr = self.pr(2434)
+                pr['title'] = 'Buffer settings'
+                pr['commits']['nodes'][0]['commit']['statusCheckRollup']['contexts']['nodes'] = [{
+                    'name': 'CodeRabbit', 'status': status, 'conclusion': conclusion,
+                    'checkSuite': {'app': {'slug': app}},
+                    'startedAt': '2026-10-27T11:04:37Z',
+                }]
+                self.assertEqual(bool(self.rows('stale_rows', [pr])), queued)
+                self.assertEqual(bool(self.rows('active_review_rows "$(cat)"', [pr])), active)
+
+    def test_check_run_acceptance_and_rate_limit_are_detected(self):
+        for status, conclusion, summary, expected in [
+            ('in_progress', None, '', 0),
+            ('completed', 'success', 'Result: Success - Review completed', 0),
+            ('completed', 'neutral', 'More reviews will be available in 20 minutes', 2),
+        ]:
+            with self.subTest(status=status, conclusion=conclusion):
+                result = self.run_shell(r'''
+fixture=$(cat)
+poll_wait_background_actions() { :; }
+desktop_notify() { :; }
+gh() {
+  case "$*" in
+    *'/comments'*) echo '[]' ;;
+    *'/status') echo '{"statuses":[]}' ;;
+    *'/check-runs'*) printf '%s\n' "$fixture" ;;
+    *) return 99 ;;
+  esac
+}
+set -T
+trap 'case "$BASH_COMMAND" in sleep\ *) exit 97 ;; esac' DEBUG
+wait_for_acceptance 2434 2026-10-27T11:04:04Z head Title
+''', {'check_runs': [{'name': 'CodeRabbit', 'app': {'slug': 'coderabbitai'},
+                    'status': status, 'conclusion': conclusion, 'started_at': '2026-10-27T11:04:37Z',
+                    'output': {'summary': summary}}]})
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
     def test_claude_task_matching_checks_each_worktree_once_not_each_transcript(self):
         result = self.run_shell(r'''
 claude_projects_root="$state_root/claude"

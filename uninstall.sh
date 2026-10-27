@@ -30,6 +30,7 @@ rm -f \
   "$lib_dir/coderabbit-logomark-64.png" \
   "$lib_dir/uninstall.sh"
 rm -f "$lib_dir"/lib/*.sh
+rm -f "$lib_dir"/lib/*.jq
 rmdir "$lib_dir/lib" 2>/dev/null || true
 rm -f "$lib_dir"/__pycache__/queue_gui_{common,settings,status}.*.pyc
 rmdir "$lib_dir/__pycache__" 2>/dev/null || true

@@ -36,6 +36,7 @@ install -m 755 \
   "$source_dir/src/coderabbit-review-queue" \
   "$lib_dir/coderabbit-review-queue"
 install -m 644 "$source_dir"/src/lib/*.sh "$lib_dir/lib/"
+install -m 644 "$source_dir"/src/lib/*.jq "$lib_dir/lib/"
 install -m 755 \
   "$source_dir/src/coderabbit-review-queue-gui.py" \
   "$lib_dir/coderabbit-review-queue-gui.py"

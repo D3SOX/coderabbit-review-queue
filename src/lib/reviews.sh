@@ -200,6 +200,30 @@ query_quota() {
   return 1
 }
 
+coderabbit_commit_statuses() {
+  local head_sha=$1 since=$2 statuses checks
+  statuses=$(gh api "repos/$repo/commits/$head_sha/status") || return $?
+  # Keep the single-request path for legacy installations. New CodeRabbit
+  # runs publish CheckRuns instead of commit statuses.
+  if jq -e --arg since "$since" '
+    any(.statuses[]?; .context == "CodeRabbit" and .created_at >= $since)
+  ' <<<"$statuses" >/dev/null; then
+    printf '%s\n' "$statuses"
+    return 0
+  fi
+  checks=$(gh api --paginate --slurp "repos/$repo/commits/$head_sha/check-runs?check_name=CodeRabbit&per_page=100") || return $?
+  jq -s -L "$script_dir/lib" '
+    include "coderabbit-checks";
+    .[0] as $legacy | .[1] as $checks |
+    {statuses: (($legacy.statuses // []) + [
+      $checks | (if type == "array" then .[] else . end)
+      | .check_runs[]? | coderabbit_check_context
+      | select(.context == "CodeRabbit" and .creator.login == "coderabbitai")
+      | .state |= ascii_downcase
+    ])}
+  ' < <(printf '%s\n' "$statuses" "$checks")
+}
+
 wait_for_acceptance() {
   local pr=$1
   local triggered_at=$2
@@ -210,7 +234,7 @@ wait_for_acceptance() {
   for ((attempt = 1; attempt <= acceptance_response_attempts; attempt++)); do
     poll_wait_background_actions "$attempt"
     comments=$(gh api --paginate "repos/$repo/issues/$pr/comments")
-    statuses=$(gh api "repos/$repo/commits/$head_sha/status")
+    statuses=$(coderabbit_commit_statuses "$head_sha" "$triggered_at")
     result=$(
       jq -r \
         --arg since "$triggered_at" \
@@ -305,7 +329,7 @@ wait_for_review_completion() {
 
   for ((attempt = 1; ; attempt++)); do
     poll_wait_background_actions "$attempt"
-    statuses=$(gh api "repos/$repo/commits/$head_sha/status")
+    statuses=$(coderabbit_commit_statuses "$head_sha" "$triggered_at")
     result=$(
       jq -r --arg since "$triggered_at" '
         [
@@ -320,6 +344,7 @@ wait_for_review_completion() {
         | if .description == "Review completed" then "completed"
           elif .description == "Review rate limited" then "limited"
           elif ((.description // "") | test("^Review skipped: [0-9]+ files exceed the limit of [0-9]+")) then .description
+          elif ((.description // "") | startswith("Review failed:")) then .description
           else "waiting"
           end
       ' <<<"$statuses"
@@ -328,6 +353,10 @@ wait_for_review_completion() {
       printf 'Skipping PR #%s: %s. Continuing with the queue.\n' "$pr" "$result"
       desktop_notify 'CodeRabbit review skipped' "PR #$pr: $title"$'\n'"$result"
       return 3
+    fi
+    if [[ $result == "Review failed:"* ]]; then
+      printf 'CodeRabbit did not complete PR #%s: %s Rechecking the queue.\n' "$pr" "$result"
+      return 4
     fi
     if [[ $result == completed ]]; then
       reviews=$(gh api --paginate --slurp "repos/$repo/pulls/$pr/reviews?per_page=100")
