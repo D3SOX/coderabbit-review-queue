@@ -25,6 +25,49 @@ def t3_database():
     return home / ('statev2.sqlite' if (home / 'statev2.sqlite').is_file() else 'state.sqlite')
 
 
+def subagent_thread_ids(connection):
+    """T3-delegated tasks look like ordinary sessions in the native agent DB."""
+    parents = {}
+    excluded = set()
+    for thread_id, raw in connection.execute(
+            'SELECT thread_id, payload_json FROM orchestration_v2_projection_threads'):
+        lineage = json.loads(raw).get('lineage') or {}
+        parents[thread_id] = lineage.get('parentThreadId')
+        if (lineage.get('relationshipToParent') == 'subagent'
+                or thread_id.startswith('thread:delegated-task:')
+                or (parents[thread_id] and lineage.get('relationshipToParent') != 'fork')):
+            excluded.add(thread_id)
+    # Include nested tasks and forks of subagents, not independent user forks.
+    for thread_id in parents:
+        seen = set()
+        current = thread_id
+        while current:
+            if current in excluded or current in seen:
+                excluded.update(seen)
+                break
+            seen.add(current)
+            current = parents.get(current)
+    return excluded
+
+
+def subagent_session_ids(*, provider='codex'):
+    database = t3_database()
+    if database.name != 'statev2.sqlite':
+        return []
+    with closing(sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=1)) as connection:
+        excluded = subagent_thread_ids(connection)
+        sessions = set()
+        for thread_id, raw in connection.execute('''
+            SELECT thread_id, payload_json FROM orchestration_v2_projection_provider_threads
+            WHERE provider = ? OR json_extract(payload_json, '$.driver') = ?
+        ''', (provider, provider)):
+            if thread_id in excluded:
+                native = (json.loads(raw).get('nativeThreadRef') or {}).get('nativeId')
+                if isinstance(native, str) and native:
+                    sessions.add(native)
+        return sorted(sessions)
+
+
 def thread_title(session_id, *, provider='codex'):
     database = t3_database()
     if not database.is_file():
@@ -108,7 +151,8 @@ def matching_worktree_thread(connection, session_id):
     repository = re.search(r'github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$', origin)
     if not repository or not branch:
         return []
-    return connection.execute('''
+    excluded = subagent_thread_ids(connection)
+    rows = connection.execute('''
         SELECT t.thread_id, t.runtime_mode, t.interaction_mode,
                json_extract(t.payload_json, '$.modelSelection')
         FROM orchestration_v2_projection_threads t
@@ -122,11 +166,13 @@ def matching_worktree_thread(connection, session_id):
           AND lower(json_extract(t.payload_json, '$.branchPullRequest.repository')) = ?
           AND json_extract(t.payload_json, '$.branchPullRequest.number') > 0
     ''', (cwd, branch, repository.group(1).lower())).fetchall()
+    return [row for row in rows if row[0] not in excluded]
 
 
 def matching_thread(database, session_id, *, provider='codex'):
     with closing(sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=5)) as connection:
         if database.name == 'statev2.sqlite':
+            excluded = subagent_thread_ids(connection)
             rows = connection.execute('''
                 SELECT t.thread_id, t.runtime_mode, t.interaction_mode,
                        json_extract(t.payload_json, '$.modelSelection')
@@ -137,6 +183,8 @@ def matching_thread(database, session_id, *, provider='codex'):
                   AND t.active_provider_thread_id = p.provider_thread_id
                   AND t.deleted_at IS NULL AND t.archived_at IS NULL
             ''', (provider, provider, session_id)).fetchall()
+            if any(row[0] in excluded for row in rows):
+                raise RuntimeError('Refusing to send review feedback to a T3 subagent')
             if not rows and provider == 'codex':
                 rows = matching_worktree_thread(connection, session_id)
             if len(rows) != 1:
@@ -190,8 +238,9 @@ def thread_owner(repo, branch):
     if database.name != 'statev2.sqlite':
         return ''
     with closing(sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=1)) as connection:
+        excluded = subagent_thread_ids(connection)
         rows = connection.execute('''
-            SELECT json_extract(p.payload_json, '$.driver'),
+            SELECT t.thread_id, json_extract(p.payload_json, '$.driver'),
                    json_extract(t.payload_json, '$.worktreePath')
             FROM orchestration_v2_projection_threads t
             JOIN orchestration_v2_projection_provider_threads p
@@ -201,8 +250,8 @@ def thread_owner(repo, branch):
               AND json_extract(p.payload_json, '$.driver') IN ('codex', 'claudeAgent')
         ''', (branch,)).fetchall()
     matches = set()
-    for driver, cwd in rows:
-        if not cwd:
+    for thread_id, driver, cwd in rows:
+        if thread_id in excluded or not cwd:
             continue
         origin = subprocess.run(['git', '-C', cwd, 'remote', 'get-url', 'origin'],
                                 capture_output=True, text=True, timeout=3)
@@ -338,6 +387,11 @@ if __name__ == '__main__':
             del sys.argv[index:index + 2]
         if sys.argv[1] == '--owner':
             print(thread_owner(sys.argv[2], sys.argv[3]))
+        elif sys.argv[1] == '--subagent-sessions':
+            print(json.dumps(subagent_session_ids(provider=provider)))
+        elif sys.argv[1] == '--is-top-level':
+            if sys.argv[2] in subagent_session_ids(provider=provider):
+                raise RuntimeError('Refusing to send review feedback to a T3 subagent')
         elif sys.argv[1] == '--title':
             print(thread_title(sys.argv[2], provider=provider))
         elif sys.argv[1] == '--state':

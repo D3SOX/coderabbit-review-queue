@@ -781,6 +781,7 @@ resume_codex_session() {
   local thread_id
   local -a codex_args
 
+  python3 "$script_dir/t3-delegate.py" --is-top-level "$session_id" || return 1
   git -C "$session_cwd" rev-parse --git-common-dir >/dev/null
   routing_lock_path="/tmp/coderabbit-review-queue-$repo_key-codex-$session_id.lock"
   exec {routing_lock_fd}>"$routing_lock_path"
@@ -897,6 +898,7 @@ resume_claude_session() {
   local routing_lock_path routing_lock_fd
   local thread_id
 
+  python3 "$script_dir/t3-delegate.py" --is-top-level "$session_id" --provider claudeAgent || return 1
   session_file=$(claude_session_file "$session_id" 2>/dev/null || true)
   git_common_dir=$(
     git -C "$session_cwd" rev-parse --path-format=absolute --git-common-dir

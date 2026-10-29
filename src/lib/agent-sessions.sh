@@ -16,19 +16,22 @@ matching_codex_session() {
   local -A metadata_head_sessions=()
   local -A metadata_head_timestamps=()
   local -A unique_sessions=()
+  local excluded_sessions
+  excluded_sessions=$(python3 "$script_dir/t3-delegate.py" --subagent-sessions 2>/dev/null) || return 1
 
   # The rollout scan below can take longer than the remote status timeout once
   # many tasks exist. Use the recent task index first, checking each recorded
   # worktree's *current* branch/head (the stored values may predate a push).
   if [[ -f $codex_state_db ]]; then
     local indexed_match
-    indexed_match=$(python3 - "$codex_state_db" "$repo_lower" "$branch_name" "$head_sha" <<'PY'
+    indexed_match=$(python3 - "$codex_state_db" "$repo_lower" "$branch_name" "$head_sha" "$excluded_sessions" <<'PY'
 import sqlite3
 import subprocess
 import sys
 import json
 
-database, repo, branch, head = sys.argv[1:]
+database, repo, branch, head, excluded = sys.argv[1:]
+excluded = set(json.loads(excluded))
 git_results = {}
 
 def git(cwd, *args):
@@ -44,9 +47,10 @@ try:
             SELECT id, cwd, git_branch, git_sha, rollout_path FROM threads
             WHERE originator IN ('Codex Desktop', 't3code_desktop', 'T3 Code', 'codex-tui', 'codex_exec')
               AND (thread_source IS NULL OR thread_source != 'subagent')
+              AND id NOT IN (SELECT value FROM json_each(?))
               AND (git_origin_url LIKE ? OR git_origin_url LIKE ?)
             ORDER BY updated_at DESC LIMIT 100
-        ''', (f'%github.com:{repo}.git', f'%github.com/{repo}.git')).fetchall()
+        ''', (json.dumps(list(excluded)), f'%github.com:{repo}.git', f'%github.com/{repo}.git')).fetchall()
 except sqlite3.Error:
     sys.exit(0)
 
@@ -118,12 +122,13 @@ PY
     meta=$(head -n 1 "$file")
     parsed=$(
       jq -r \
-        --arg repo "$repo_lower" '
+        --arg repo "$repo_lower" --argjson excluded "$excluded_sessions" '
         (.payload.git.repository_url // "" | ascii_downcase) as $url
         | select(
           .type == "session_meta"
           and (.payload.originator | IN("Codex Desktop", "t3code_desktop", "T3 Code", "codex-tui", "codex_exec"))
           and (.payload.thread_source // "") != "subagent"
+          and ((.payload.session_id // .payload.id // "") as $id | $excluded | index($id) | not)
           and (
             ($url | endswith("github.com:" + $repo + ".git"))
             or ($url | endswith("github.com/" + $repo + ".git"))
@@ -245,16 +250,19 @@ claude_agents_json() {
 
 matching_claude_session() {
   [[ -d $claude_projects_root ]] || return 1
+  local excluded_sessions
+  excluded_sessions=$(python3 "$script_dir/t3-delegate.py" --subagent-sessions --provider claudeAgent 2>/dev/null) || return 1
   # A shell/jq/git pipeline per transcript exceeded the SSH status budget.
   # Parse history in one process and inspect each worktree only once.
-  python3 - "$claude_projects_root" "$repo" "$1" "$2" <<'PY'
+  python3 - "$claude_projects_root" "$repo" "$1" "$2" "$excluded_sessions" <<'PY'
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
 
-projects, repo, branch, head = sys.argv[1:]
+projects, repo, branch, head, excluded = sys.argv[1:]
+excluded = set(json.loads(excluded))
 repo = repo.lower()
 worktrees = {}
 matches = [{}, {}, {}]
@@ -284,7 +292,7 @@ for file in Path(projects).glob('*/*.jsonl'):
                     break
     except (OSError, UnicodeError):
         continue
-    if entry is None or entry.get('isSidechain'):
+    if entry is None or entry.get('isSidechain') or entry.get('sessionId') in excluded:
         continue
     cwd, session = entry['cwd'], entry['sessionId']
     if not isinstance(cwd, str) or not isinstance(session, str):

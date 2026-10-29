@@ -16,6 +16,125 @@ SPEC.loader.exec_module(t3_delegate)
 
 
 class T3DelegateTests(unittest.TestCase):
+    def test_subagent_session_cannot_receive_review_followups(self):
+        database = self.create_v2_database()
+        with sqlite3.connect(database) as db:
+            raw = db.execute('SELECT payload_json FROM orchestration_v2_projection_threads').fetchone()[0]
+            payload = json.loads(raw)
+            payload['lineage'] = {'parentThreadId': 'parent-thread',
+                                  'relationshipToParent': 'subagent', 'rootThreadId': 'parent-thread'}
+            db.execute('UPDATE orchestration_v2_projection_threads SET payload_json=?', (json.dumps(payload),))
+        with patch.object(t3_delegate, 't3_home', return_value=self.home), \
+             patch.object(t3_delegate, 't3_cli', return_value=['t3']) as cli, \
+             patch.object(t3_delegate.subprocess, 'run', return_value=type('Result', (), {
+                 'stdout': '{"token":"test","sessionId":"auth-session"}'})()), \
+             patch.object(t3_delegate, 'dispatch_v2') as dispatch:
+            with self.assertRaisesRegex(RuntimeError, 'subagent'):
+                t3_delegate.send_turn('codex-session', 'Continue babysitting this PR.')
+        cli.assert_not_called()
+        dispatch.assert_not_called()
+
+    def test_subagent_hierarchy_excludes_nested_tasks_but_keeps_user_forks(self):
+        database = self.create_v2_database()
+        with sqlite3.connect(database) as db:
+            for ident, parent, relation, provider in (
+                ('child', 'v2-thread', 'subagent', 'codex'),
+                ('nested', 'child', 'fork', 'claudeAgent'),
+                ('user-fork', 'v2-thread', 'fork', 'codex'),
+            ):
+                db.execute('INSERT INTO orchestration_v2_projection_threads (thread_id,payload_json) VALUES (?,?)',
+                           (ident, json.dumps({'lineage': {'parentThreadId': parent,
+                                                         'relationshipToParent': relation}})))
+                db.execute('INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?)',
+                           (ident + '-provider', ident, provider, json.dumps({'driver': provider,
+                               'nativeThreadRef': {'nativeId': ident + '-session'}})))
+            self.assertEqual(t3_delegate.subagent_thread_ids(db), {'child', 'nested'})
+        with patch.object(t3_delegate, 't3_home', return_value=self.home):
+            self.assertEqual(t3_delegate.subagent_session_ids(), ['child-session'])
+            self.assertEqual(t3_delegate.subagent_session_ids(provider='claudeAgent'), ['nested-session'])
+
+    def test_migrated_match_ignores_subagents_sharing_the_parent_worktree(self):
+        database, codex_home = self.create_migrated_thread()
+        with sqlite3.connect(database) as db:
+            payload = json.loads(db.execute('SELECT payload_json FROM orchestration_v2_projection_threads').fetchone()[0])
+            payload['lineage'] = {'parentThreadId': 'v2-thread', 'relationshipToParent': 'subagent'}
+            db.execute('INSERT INTO orchestration_v2_projection_threads '
+                       '(thread_id,runtime_mode,interaction_mode,payload_json,default_provider) '
+                       'VALUES (?,?,?,?,?)', ('child', 'full-access', 'default', json.dumps(payload), 'codex'))
+        with patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}):
+            self.assertEqual(t3_delegate.matching_thread(database, 'old-session')[0], 'v2-thread')
+
+    def test_native_codex_matching_excludes_t3_subagents_with_no_native_flag(self):
+        database, codex_home = self.create_migrated_thread()
+        worktree = str(Path(self.temp.name) / 'worktree')
+        payload = {'worktreePath': worktree, 'branch': 'pr-branch',
+                   'lineage': {'parentThreadId': 'v2-thread', 'relationshipToParent': 'subagent',
+                               'rootThreadId': 'v2-thread'}}
+        with sqlite3.connect(database) as db:
+            db.execute('INSERT INTO orchestration_v2_projection_threads '
+                       '(thread_id,title,runtime_mode,interaction_mode,active_provider_thread_id,payload_json) '
+                       'VALUES (?,?,?,?,?,?)', ('child', 'Reviewer', 'full-access', 'default',
+                                              'child-provider', json.dumps(payload)))
+            db.execute('INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?)',
+                       ('child-provider', 'child', 'codex', json.dumps({'driver': 'codex',
+                           'nativeThreadRef': {'nativeId': 'child-session'}})))
+        with sqlite3.connect(codex_home / 'state_5.sqlite') as db:
+            db.execute('DELETE FROM threads')
+            for column in ('git_branch TEXT', 'git_sha TEXT', 'rollout_path TEXT',
+                           'thread_source TEXT', 'git_origin_url TEXT', 'updated_at INTEGER'):
+                db.execute('ALTER TABLE threads ADD COLUMN ' + column)
+            db.execute('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?)',
+                       ('child-session', worktree, 'T3 Code', 'pr-branch', 'head', None,
+                        None, 'git@github.com:example/repo.git', 1))
+        sessions = codex_home / 'sessions'
+        sessions.mkdir()
+        (sessions / 'child.jsonl').write_text(json.dumps({'timestamp': '2026-10-29T06:00:00Z',
+            'type': 'session_meta', 'payload': {'id': 'child-session', 'originator': 'T3 Code',
+                'cwd': worktree, 'git': {'repository_url': 'git@github.com:example/repo.git',
+                                       'branch': 'pr-branch', 'commit_hash': 'head'}}}) + '\n')
+        for indexed in (True, False):
+            if not indexed:
+                (codex_home / 'state_5.sqlite').rename(codex_home / 'index-disabled.sqlite')
+            result = subprocess.run(['bash', '-c',
+                'source "$1"\nconfigure_repo example/repo\nmatching_codex_session pr-branch head',
+                'test', str(SCRIPT.parent / 'coderabbit-review-queue')], capture_output=True, text=True,
+                env={**os.environ, 'CODEX_HOME': str(codex_home), 'T3CODE_HOME': str(self.home.parent),
+                     'XDG_STATE_HOME': str(Path(self.temp.name) / 'state')}, timeout=5)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(result.stdout, '')
+
+    def test_claude_matching_and_cli_fallback_reject_t3_subagent_sessions(self):
+        database, _codex_home = self.create_migrated_thread()
+        worktree = str(Path(self.temp.name) / 'worktree')
+        with sqlite3.connect(database) as db:
+            payload = json.loads(db.execute('SELECT payload_json FROM orchestration_v2_projection_threads').fetchone()[0])
+            payload['lineage'] = {'parentThreadId': 'parent', 'relationshipToParent': 'subagent'}
+            db.execute('UPDATE orchestration_v2_projection_threads SET active_provider_thread_id=?,payload_json=?',
+                       ('child-provider', json.dumps(payload)))
+            db.execute('INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?)',
+                       ('child-provider', 'v2-thread', 'claudeAgent', json.dumps({'driver': 'claudeAgent',
+                           'nativeThreadRef': {'nativeId': 'child-session'}})))
+        projects = Path(self.temp.name) / 'claude-projects'
+        (projects / 'project').mkdir(parents=True)
+        (projects / 'project/child-session.jsonl').write_text(json.dumps({
+            'cwd': worktree, 'sessionId': 'child-session', 'gitBranch': 'pr-branch'}) + '\n')
+        environment = {**os.environ, 'T3CODE_HOME': str(self.home.parent),
+                       'XDG_STATE_HOME': str(Path(self.temp.name) / 'state')}
+        for action in ('matching_claude_session pr-branch head',
+                       'ids=(); resume_claude_session 42 Title child-session /nonexistent "Continue babysitting" ids head',
+                       'ids=(); resume_codex_session 42 Title head child-session /nonexistent "Continue babysitting" ids'):
+            if 'codex_session' in action:
+                with sqlite3.connect(database) as db:
+                    db.execute("UPDATE orchestration_v2_projection_provider_threads SET provider='codex',payload_json=?",
+                               (json.dumps({'driver': 'codex', 'nativeThreadRef': {'nativeId': 'child-session'}}),))
+            result = subprocess.run(['bash', '-c',
+                'source "$1"\nconfigure_repo example/repo\nclaude_projects_root="$2"\n' + action,
+                'test', str(SCRIPT.parent / 'coderabbit-review-queue'), str(projects)],
+                capture_output=True, text=True, env=environment, timeout=5)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertNotIn('Delegation confirmed', result.stdout)
+
+
     def test_claude_t3_dispatch_preserves_thread_settings_and_supports_steering(self):
         database = self.create_v2_database()
         with sqlite3.connect(database) as connection:
