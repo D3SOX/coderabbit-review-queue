@@ -393,16 +393,28 @@ class StatusMixin:
                 summary = f"Review in progress on #{self.active_reviews[0][0]}"
             else:
                 summary = f"Reviews in progress ({labels})"
-            self.timer_label.setText(f"Next review: {summary}")
             tooltip = f"{repo}\n{summary}\n{detail}"
             # A pending countdown takes the badge; otherwise count parallel reviews.
             count = len(self.active_reviews) if len(self.active_reviews) > 1 else 0
             label = ""
-            if self.has_queued_reviews and self.next_review_at is not None:
-                seconds = QDateTime.currentDateTime().secsTo(self.next_review_at)
+            next_review = ""
+            if self.has_queued_reviews:
+                seconds = (
+                    QDateTime.currentDateTime().secsTo(self.next_review_at)
+                    if self.next_review_at is not None else 0
+                )
                 if seconds > 0:
                     label, count = compact_duration(seconds), 0
-                    tooltip += f"\nNext review: {self.format_expiry(self.next_review_at)}"
+                    next_review = self.format_expiry(self.next_review_at)
+                elif self.monitor_pid() is None:
+                    next_review = "Availability unknown"
+                else:
+                    next_review = "Available now"
+                tooltip += f"\nNext review: {next_review}"
+            if next_review:
+                self.timer_label.setText(f"Next review: {next_review} · {summary}")
+            else:
+                self.timer_label.setText(f"Next review: {summary}")
             self.set_tray_state("reviewing", tooltip, label, count)
             self.waiting_for_review_window = False
             return
