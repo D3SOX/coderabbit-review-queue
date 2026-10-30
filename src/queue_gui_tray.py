@@ -3,7 +3,7 @@
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
 
 from queue_gui_common import app_icon
 
@@ -17,8 +17,10 @@ BLUE = QColor("#2563eb")
 SPINNER_BLUE = QColor("#3b82f6")
 GREEN = QColor("#22c55e")
 AMBER = QColor("#f59e0b")
+RED = QColor("#ef4444")
 
 _rabbits: dict[bool, QPixmap] = {}
+_check_icons: dict[str, QIcon] = {}
 
 
 def rabbit(grey: bool = False) -> QPixmap:
@@ -84,6 +86,42 @@ def _time_pill(painter: QPainter, label: str) -> None:
     painter.setPen(Qt.white)
     painter.setFont(_fitted_font(label, 50, 17))
     painter.drawText(QRectF(4, 40, 56, 22), Qt.AlignCenter, label)
+
+
+def check_icon(outcome: str) -> QIcon:
+    """Icon for a CI summary: "passed", "failed", or "pending"."""
+    if outcome not in _check_icons:
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if outcome == "pending":
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(AMBER, 3.5))
+            painter.drawEllipse(QPointF(16, 16), 12, 12)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(AMBER)
+            painter.drawEllipse(QPointF(16, 16), 4.5, 4.5)
+        else:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(GREEN if outcome == "passed" else RED)
+            painter.drawEllipse(QPointF(16, 16), 14, 14)
+            mark = QPainterPath()
+            if outcome == "passed":
+                mark.moveTo(9.5, 16.5)
+                mark.lineTo(14, 21)
+                mark.lineTo(22.5, 11.5)
+            else:
+                mark.moveTo(11, 11)
+                mark.lineTo(21, 21)
+                mark.moveTo(21, 11)
+                mark.lineTo(11, 21)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(Qt.white, 3.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(mark)
+        painter.end()
+        _check_icons[outcome] = QIcon(pixmap)
+    return _check_icons[outcome]
 
 
 def render_tray_icon(state: str, label: str = "", count: int = 0, phase: float = 0.0) -> QPixmap:

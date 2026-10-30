@@ -313,7 +313,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         task_label = QLabel("Finished CodeRabbit reviews")
         self.tasks = QTreeWidget()
         self.tasks.setHeaderLabels(
-            ["PR", "Title", "Result", "Agent status", "Task", "Latest progress"]
+            ["PR", "Title", "Result", "Checks", "Agent status", "Task", "Latest progress"]
         )
         self.tasks.setRootIsDecorated(False)
         self.tasks.setAlternatingRowColors(True)
@@ -325,8 +325,9 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.tasks.header().resizeSection(0, 90)
         self.tasks.header().resizeSection(1, 300)
         self.tasks.header().resizeSection(2, 120)
-        self.tasks.header().resizeSection(3, 130)
-        self.tasks.header().resizeSection(4, 260)
+        self.tasks.header().resizeSection(3, 110)
+        self.tasks.header().resizeSection(4, 130)
+        self.tasks.header().resizeSection(5, 260)
         self.tasks.itemDoubleClicked.connect(
             lambda item, _column: self.open_pr_number(item.data(0, Qt.UserRole))
         )
@@ -881,8 +882,8 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             item = self.tasks.topLevelItem(index)
             if item.data(0, Qt.UserRole) != number:
                 continue
-            agent = item.text(3).partition(" ")[0] or "Codex"
-            item.setText(3, f"{agent} Running")
+            agent = item.text(4).partition(" ")[0] or "Codex"
+            item.setText(4, f"{agent} Running")
             item.setData(0, Qt.UserRole + 1, True)
             break
         self.update_delegate_button()

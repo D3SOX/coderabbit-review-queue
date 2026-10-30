@@ -23,8 +23,9 @@ requests.
   with more reviews can run several at once.
   Oversized PR heads are skipped rather than blocking the queue.
 - Shows pending and in-progress reviews separately from finished reviews,
-  approvals, unresolved feedback, and matching agent-task progress. Queue
-  order, the last status, and unexpired review windows survive an app restart.
+  approvals, unresolved feedback, CI check status, and matching agent-task
+  progress. Queue order, the last status, and unexpired review windows
+  survive an app restart.
 - Runs separate monitors for separate repositories. The GUI can start and stop
   them; the tray icon shows the time to the next window, running reviews,
   available reviews, and a stopped monitor, and can show or hide the window.

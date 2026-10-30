@@ -14,6 +14,7 @@ from queue_gui_common import (
     SCRIPT, STATE_ROOT, compact_duration, file_signature, live_review_number,
     monitor_is_running, status_belongs_to_repo,
 )
+from queue_gui_tray import check_icon
 
 
 def preserve_viewport(table_name):
@@ -125,7 +126,7 @@ class StatusMixin:
             for index in range(self.tasks.topLevelItemCount())
         ):
             item = QTreeWidgetItem(
-                [f"#{number}", title, "Review completed; syncing details", "—", "—", "—"]
+                [f"#{number}", title, "Review completed; syncing details", "—", "—", "—", "—"]
             )
             item.setData(0, Qt.UserRole, number)
             item.setData(0, Qt.UserRole + 1, False)
@@ -657,9 +658,10 @@ class StatusMixin:
         selected_number = (
             current_item.data(0, Qt.UserRole) if current_item is not None else None
         )
-        rows: list[tuple[str, str, str, str]] = []
+        rows: list[tuple[str, str, str, str, str]] = []
         current: tuple[str, str] | None = None
         result = ""
+        checks = ""
         in_finished = False
 
         for line in status.splitlines():
@@ -673,9 +675,13 @@ class StatusMixin:
             if review:
                 current = (review.group(1), review.group(2))
                 result = ""
+                checks = ""
                 continue
             if current and line.startswith("    Result: "):
                 result = line.removeprefix("    Result: ")
+                continue
+            if current and line.startswith("    Checks: "):
+                checks = line.removeprefix("    Checks: ")
                 continue
             if current and (
                 line.startswith("    Agent task: ")
@@ -684,11 +690,11 @@ class StatusMixin:
                 progress = line.removeprefix("    Agent task: ").removeprefix(
                     "    Codex task: "
                 )
-                rows.append((*current, result, progress))
+                rows.append((*current, result, checks, progress))
                 current = None
 
         self.tasks.clear()
-        for number, title, result, progress in rows:
+        for number, title, result, checks, progress in rows:
             if number == live_review_number(self.monitor_activity) and result != "Approved":
                 continue
             fields = progress.split("\t", 2)
@@ -699,21 +705,31 @@ class StatusMixin:
                 state = re.sub(r" \([0-9a-f]{8}\)$", "", state)
                 task_name = "—"
             actionable = result.endswith(" unresolved")
+            checks_match = re.match(r"(\d+/\d+) passed", checks)
             item = QTreeWidgetItem(
                 [
                     f"#{number}",
                     title,
                     result,
+                    f"{checks_match.group(1)} checks" if checks_match else "—",
                     state,
                     task_name,
                     detail,
                 ]
             )
+            if checks_match:
+                outcome = (
+                    "failed" if " failed" in checks
+                    else "pending" if " pending" in checks
+                    else "passed"
+                )
+                item.setIcon(3, check_icon(outcome))
+                item.setToolTip(3, checks)
             item.setData(0, Qt.UserRole, number)
             item.setData(0, Qt.UserRole + 1, "Running" in state.split())
             item.setData(0, Qt.UserRole + 2, actionable)
             item.setData(0, Qt.UserRole + 3, state.endswith("(steerable)"))
-            item.setToolTip(5, detail)
+            item.setToolTip(6, detail)
             self.tasks.addTopLevelItem(item)
             if number == selected_number:
                 self.tasks.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)

@@ -1955,6 +1955,36 @@ cat "$state_root/snapshot-age"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines()[-1], '60')
 
+    def test_finished_reviews_summarize_ci_checks(self):
+        result = self.run_shell(r'''
+snapshot() { cat <<'JSON'
+{"data":{"repository":{"pullRequests":{"nodes":[{"number":42,"title":"fix review","commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"nodes":[
+  {"name":"build","status":"COMPLETED","conclusion":"SUCCESS"},
+  {"name":"docs","status":"COMPLETED","conclusion":"SKIPPED"},
+  {"name":"lint","status":"COMPLETED","conclusion":"FAILURE"},
+  {"name":"test","status":"IN_PROGRESS","conclusion":null},
+  {"context":"CodeRabbit","state":"SUCCESS"},
+  {"context":"deploy","state":"PENDING"},
+  {"context":"legacy","state":"ERROR"},
+  {}
+]}}}}]}},{"number":43,"title":"no checks"}]}}}}
+JSON
+}
+status_quota_available() { :; }
+load_stale_rows() { stale=(); }
+active_review_rows() { :; }
+approved_review_rows() { printf '42\tfix review\n43\tno checks\n'; }
+reviewed_rows() { :; }
+show_status 60
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            '  #42 fix review\n    Result: Approved\n'
+            '    Checks: 3/7 passed, 2 failed, 2 pending\n    Agent task: —\n'
+            '  #43 no checks\n    Result: Approved\n    Agent task: —',
+            result.stdout,
+        )
+
     def test_running_delegation_stays_finished_after_agent_push(self):
         result = self.run_shell(r'''
 printf '42\n' >"$delegated_prs_file"

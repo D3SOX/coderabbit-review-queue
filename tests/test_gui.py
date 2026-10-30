@@ -1358,6 +1358,8 @@ class ReviewRequestRefreshTests(unittest.TestCase):
 
     def test_finished_reviews_include_approved_and_feedback_rows(self):
         app = QApplication.instance() or QApplication([])
+        from queue_gui_tray import check_icon
+
         window = Mock()
         window.tasks = queue_gui.QTreeWidget()
         window.update_delegate_button = Mock()
@@ -1366,21 +1368,39 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             """Finished CodeRabbit reviews:
   #10 approved change
     Result: Approved
+    Checks: 12/12 passed
     Agent task: —
   #11 needs fixes
     Result: 2 unresolved
+    Checks: 4/12 passed, 1 failed, 7 pending
     Agent task: Codex Idle\tResolve review feedback\tLatest task update
+  #12 waiting
+    Result: Approved
+    Checks: 4/12 passed, 8 pending
+    Agent task: —
+  #13 no checks
+    Result: Approved
+    Agent task: —
 """,
         )
-        self.assertEqual(window.tasks.topLevelItemCount(), 2)
-        approved = window.tasks.topLevelItem(0)
-        feedback = window.tasks.topLevelItem(1)
+        self.assertEqual(window.tasks.topLevelItemCount(), 4)
+        approved, feedback, waiting, unchecked = (
+            window.tasks.topLevelItem(index) for index in range(4)
+        )
         self.assertEqual(approved.text(2), "Approved")
         self.assertFalse(approved.data(0, Qt.UserRole + 2))
+        self.assertEqual(approved.text(3), "12/12 checks")
         self.assertEqual(feedback.text(2), "2 unresolved")
-        self.assertEqual(feedback.text(3), "Codex Idle")
-        self.assertEqual(feedback.text(4), "Resolve review feedback")
-        self.assertEqual(feedback.text(5), "Latest task update")
+        self.assertEqual(feedback.text(3), "4/12 checks")
+        self.assertEqual(feedback.toolTip(3), "4/12 passed, 1 failed, 7 pending")
+        self.assertEqual(feedback.text(4), "Codex Idle")
+        self.assertEqual(feedback.text(5), "Resolve review feedback")
+        self.assertEqual(feedback.text(6), "Latest task update")
+        self.assertEqual(approved.icon(3).cacheKey(), check_icon("passed").cacheKey())
+        self.assertEqual(feedback.icon(3).cacheKey(), check_icon("failed").cacheKey())
+        self.assertEqual(waiting.icon(3).cacheKey(), check_icon("pending").cacheKey())
+        self.assertEqual(unchecked.text(3), "—")
+        self.assertTrue(unchecked.icon(3).isNull())
         self.assertTrue(feedback.data(0, Qt.UserRole + 2))
         app.processEvents()
 
@@ -1389,7 +1409,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window = Mock()
         window.tasks = queue_gui.QTreeWidget()
         item = queue_gui.QTreeWidgetItem(
-            ["#1292", "fix menus", "1 unresolved", "Codex Idle", "task", ""]
+            ["#1292", "fix menus", "1 unresolved", "—", "Codex Idle", "task", ""]
         )
         item.setData(0, Qt.UserRole, "1292")
         item.setData(0, Qt.UserRole + 1, False)
@@ -1399,7 +1419,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
 
         queue_gui.QueueWindow.mark_delegation_running(window, "1292")
 
-        self.assertEqual(item.text(3), "Codex Running")
+        self.assertEqual(item.text(4), "Codex Running")
         self.assertTrue(item.data(0, Qt.UserRole + 1))
         window.update_delegate_button.assert_called_once_with()
         app.processEvents()

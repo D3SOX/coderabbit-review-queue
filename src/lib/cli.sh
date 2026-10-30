@@ -3,7 +3,7 @@
 show_status() {
   local snapshot_max_age=${1:-10}
   local state expiry now row pr branch_name head_sha title count task_progress review_mode
-  local completed_pr completed_head completed_title
+  local completed_pr completed_head completed_title result
   local finished=''
   local -a active=()
   local -a approved=()
@@ -13,6 +13,7 @@ show_status() {
   local -A queued_prs=()
   local -A approved_prs=()
   local -A unresolved_counts=()
+  local -A check_summaries=()
 
   status_quota_available || return $?
   state=$(snapshot "$snapshot_max_age")
@@ -23,6 +24,9 @@ show_status() {
     IFS=$'\t' read -r pr _ <<<"$row"
     queued_prs[$pr]=1
   done
+  while IFS=$'\t' read -r pr row; do
+    check_summaries[$pr]=$row
+  done < <(check_summary_rows <<<"$state")
   printf 'Repository: %s\n' "$repo"
 
   while IFS=$'\t' read -r pr title; do
@@ -54,10 +58,8 @@ show_status() {
     if (( count > 0 )); then
       unresolved_prs[$pr]=1
       finished_prs[$pr]=1
-      finished+=$'\n'"  #$pr $title"
-      finished+=$'\n'"    Result: $count unresolved"
       task_progress=$(agent_task_progress "$branch_name" "$head_sha")
-      finished+=$'\n'"    Agent task: $task_progress"
+      add_finished "$pr" "$title" "$count unresolved" "$task_progress"
     fi
   done < <(reviewed_rows <<<"$state")
 
@@ -90,19 +92,18 @@ show_status() {
       # an unreviewed PR and is incorrectly put back into the review queue.
       unresolved_prs[$pr]=1
       finished_prs[$pr]=1
-      finished+=$'\n'"  #$pr $title"
       if (( count > 0 )); then
-        finished+=$'\n'"    Result: $count unresolved"
+        result="$count unresolved"
       elif [[ -n ${approved_prs[$pr]:-} ]]; then
-        finished+=$'\n'"    Result: Approved"
+        result=Approved
       elif [[ $task_progress == *Running* ]]; then
-        finished+=$'\n'"    Result: Feedback resolved; agent running"
+        result='Feedback resolved; agent running'
       elif [[ $task_progress == *Idle* ]]; then
-        finished+=$'\n'"    Result: Agent completed review"
+        result='Agent completed review'
       else
-        finished+=$'\n'"    Result: Feedback resolved; agent status unknown"
+        result='Feedback resolved; agent status unknown'
       fi
-      finished+=$'\n'"    Agent task: $task_progress"
+      add_finished "$pr" "$title" "$result" "$task_progress"
     done <"$delegated_prs_file"
   fi
 
@@ -111,9 +112,7 @@ show_status() {
     [[ -z ${unresolved_prs[$pr]:-} ]] || continue
     unresolved_prs[$pr]=1
     finished_prs[$pr]=1
-    finished+=$'\n'"  #$pr $title"
-    finished+=$'\n'"    Result: Approved"
-    finished+=$'\n'"    Agent task: —"
+    add_finished "$pr" "$title" Approved —
   done
 
   if [[ -s $review_completion_file ]]; then
@@ -126,9 +125,8 @@ show_status() {
           .number == $pr and .headRefOid == $head)
       ' <<<"$state" >/dev/null; then
       unresolved_prs[$completed_pr]=1
-      finished+=$'\n'"  #$completed_pr $completed_title"
-      finished+=$'\n'"    Result: Review completed; syncing details"
-      finished+=$'\n'"    Agent task: —"
+      add_finished "$completed_pr" "$completed_title" \
+        'Review completed; syncing details' —
     fi
   fi
 
@@ -164,6 +162,39 @@ show_status() {
   if [[ -n $finished ]]; then
     printf '\nFinished CodeRabbit reviews:%s\n' "$finished"
   fi
+}
+
+# Appends one finished review to show_status's $finished, using its
+# $check_summaries for the CI line.
+add_finished() {
+  finished+=$'\n'"  #$1 $2"$'\n'"    Result: $3"
+  [[ -z ${check_summaries[$1]:-} ]] ||
+    finished+=$'\n'"    Checks: ${check_summaries[$1]}"
+  finished+=$'\n'"    Agent task: $4"
+}
+
+# Summarizes each PR head's CI checks, e.g. "4/12 passed, 1 failed, 7 pending".
+check_summary_rows() {
+  jq -r '
+    def outcome:
+      if .status then
+        if (.status | ascii_upcase) != "COMPLETED" then "pending"
+        elif (.conclusion // "" | ascii_upcase) | IN("SUCCESS", "NEUTRAL", "SKIPPED") then "passed"
+        else "failed" end
+      elif (.state // "" | ascii_upcase) == "SUCCESS" then "passed"
+      elif (.state // "" | ascii_upcase) | IN("PENDING", "EXPECTED") then "pending"
+      else "failed" end;
+    .data.repository.pullRequests.nodes[]
+    | [.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]? | select(length > 0) | outcome] as $outcomes
+    | select($outcomes | length > 0)
+    | ($outcomes | map(select(. == "failed")) | length) as $failed
+    | ($outcomes | map(select(. == "pending")) | length) as $pending
+    | [.number,
+        "\($outcomes | map(select(. == "passed")) | length)/\($outcomes | length) passed"
+        + (if $failed > 0 then ", \($failed) failed" else "" end)
+        + (if $pending > 0 then ", \($pending) pending" else "" end)]
+    | @tsv
+  '
 }
 
 list_repositories() {
