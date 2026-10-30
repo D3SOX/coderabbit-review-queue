@@ -57,6 +57,26 @@ GRAPHQL
   done
 }
 
+# A queued workflow run has no jobs yet, so its checks are missing from the
+# PR's status rollup. Refuse to merge until every run for the head finished.
+merge_workflow_runs_finished() {
+  local pr=$1 head_sha=$2 runs pending
+  if ! runs=$(gh api --paginate --slurp \
+    "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100") ||
+    ! pending=$(jq -r '
+      if all(.[]; .workflow_runs | type == "array") then
+        [.[].workflow_runs[] | select(.status != "completed") | .name] | unique | join(", ")
+      else error("unexpected response") end
+    ' <<<"$runs" 2>/dev/null); then
+    printf 'PR #%s workflow run status is unavailable.\n' "$pr" >&2
+    return 1
+  fi
+  if [[ -n $pending ]]; then
+    printf 'PR #%s is not ready to merge: workflow runs are pending: %s.\n' "$pr" "$pending" >&2
+    return 1
+  fi
+}
+
 merge_pr_now() {
   local pr=$1 expected_head=$2 method=$3 delete_branch=$4 bypass_approval=${5:-0} data attempt
   for attempt in 1 2 3; do
@@ -134,6 +154,7 @@ merge_pr_now() {
     ' <<<"$data" >&2
     return 1
   done
+  merge_workflow_runs_finished "$pr" "$expected_head" || return 1
   merge_review_threads_clear "$pr" || return 1
   # Merge only the head that passed the guard, even if a push lands meanwhile.
   local -a args=(pr merge "$pr" --repo "$repo" "--$method" --match-head-commit "$expected_head")

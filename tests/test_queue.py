@@ -2276,6 +2276,7 @@ query_quota 42 title
     def test_merge_uses_selected_method_without_github_auto_merge(self):
         result = self.run_shell(r'''
 gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
   if [[ $1 == pr && $2 == view ]]; then
     printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviews":[]}'
   elif [[ $1 == api && $2 == graphql ]]; then
@@ -2294,6 +2295,7 @@ merge_pr_now 42 head squash 1
         result = self.run_shell(r'''
 sleep() { touch "$state_root/retried"; }
 gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
   if [[ $1 == pr && $2 == view ]]; then
     status=UNSTABLE
     [[ ! -f $state_root/retried ]] || status=CLEAN
@@ -2354,6 +2356,7 @@ wait
     def test_merge_accepts_clean_pr_with_cancelled_nonblocking_check(self):
         result = self.run_shell(r'''
 gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
   if [[ $1 == pr && $2 == view ]]; then
     printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"CANCELLED"},{"status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[]}'
   elif [[ $1 == api && $2 == graphql ]]; then
@@ -2370,6 +2373,7 @@ merge_pr_now 42 head squash 1
     def test_admin_merge_accepts_prior_head_changes_requested_with_clear_checks(self):
         result = self.run_shell(r'''
 gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
   if [[ $1 == pr && $2 == view ]]; then
     printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[],"reviews":[{"author":{"login":"coderabbitai"},"state":"CHANGES_REQUESTED","commit":{"oid":"old-head"},"body":"Earlier feedback"}]}'
   elif [[ $1 == api && $2 == graphql ]]; then
@@ -2386,6 +2390,7 @@ merge_pr_now 42 head squash 0 1
     def test_admin_merge_accepts_resolved_current_head_changes_requested(self):
         result = self.run_shell(r'''
 gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
   if [[ $1 == pr && $2 == view ]]; then
     printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[],"reviews":[{"author":{"login":"coderabbitai"},"state":"CHANGES_REQUESTED","commit":{"oid":"head"},"body":"Actionable comments posted: 1"}]}'
   elif [[ $1 == api && $2 == graphql ]]; then
@@ -2402,6 +2407,7 @@ merge_pr_now 42 head squash 0 1
     def test_admin_merge_ignores_superseded_failed_check_attempt(self):
         result = self.run_shell(r'''
 gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
   if [[ $1 == pr && $2 == view ]]; then
     printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","name":"e2e","workflowName":"E2E Tests","startedAt":"2026-09-25T06:58:14Z","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"e2e","workflowName":"E2E Tests","startedAt":"2026-09-25T07:01:37Z","status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[{"author":{"login":"coderabbitai"},"state":"CHANGES_REQUESTED","commit":{"oid":"old-head"},"body":"Earlier feedback"}]}'
   elif [[ $1 == api && $2 == graphql ]]; then
@@ -2418,6 +2424,7 @@ merge_pr_now 42 head squash 0 1
     def test_merge_rechecks_transient_pending_rollup_before_refusing(self):
         result = self.run_shell(r'''
 gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
   if [[ $1 == pr && $2 == view ]]; then
     if [[ ! -f $state_root/viewed ]]; then
       touch "$state_root/viewed"
@@ -2479,6 +2486,33 @@ merge_pr_now 42 head squash 0 0
 ''')
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('UNSAFE MERGE', result.stdout)
+
+    def test_merge_refuses_queued_workflow_run_missing_from_rollup(self):
+        for runs, message in [
+            ('[{"workflow_runs":[{"name":"E2E Tests","status":"queued"},{"name":"Linter","status":"completed"}]}]',
+             'workflow runs are pending: E2E Tests.'),
+            ('{"message":"Not Found"}', 'workflow run status is unavailable.'),
+        ]:
+            with self.subTest(message=message):
+                result = self.run_shell(r'''
+fixture_runs=$(cat)
+gh() {
+  if [[ $* == *actions/runs?head_sha=head* ]]; then
+    printf '%s\n' "$fixture_runs"
+  elif [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS"}],"reviews":[]}'
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  else
+    printf 'UNSAFE MERGE: %s\n' "$*"
+  fi
+}
+merge_pr_now 2519 head squash 1 1
+''', json.loads(runs))
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn('UNSAFE MERGE', result.stdout)
+                self.assertIn(f'PR #2519 {"is not ready to merge: " if "pending" in message else ""}{message}',
+                              result.stderr)
 
     def test_merge_refuses_pending_ci(self):
         result = self.run_shell(r'''

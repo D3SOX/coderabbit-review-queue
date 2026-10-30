@@ -166,9 +166,9 @@ delegating. The button below finished reviews is **Delegate / steer selected**.
 
 Automatic merging and task archiving are off by default. Configure them per
 repository in **Configure approval actions**. Before merging, the queue's
-merge guard checks the live PR head, CI, review states, and unresolved review
-threads, including feedback from other bots. If those checks fail, it does not
-merge. Archiving waits until a merge is confirmed and the matching Codex task
+merge guard checks the live PR head, CI (including workflow runs that have not
+started yet), review states, and unresolved review threads, including feedback
+from other bots. If those checks fail, it does not merge. Archiving waits until a merge is confirmed and the matching Codex task
 is idle.
 
 ## Privacy
