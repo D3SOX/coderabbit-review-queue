@@ -25,7 +25,7 @@ class InstalledIconTests(unittest.TestCase):
             app_dir = data_dir / 'coderabbit-review-queue'
             for filename in ('coderabbit-review-queue', 'coderabbit-review-queue-gui.py',
                              'queue_gui_common.py', 'queue_gui_settings.py',
-                             'queue_gui_status.py', 'lib/queue-state.sh', 'lib/coderabbit-checks.jq',
+                             'queue_gui_status.py', 'queue_gui_tray.py', 'lib/queue-state.sh', 'lib/coderabbit-checks.jq',
                              't3-delegate.py', 'codex-steer.py', 'claude-steer.py', 'coderabbit-logomark.svg'):
                 with self.subTest(runtime_file=filename):
                     self.assertTrue((app_dir / filename).is_file())

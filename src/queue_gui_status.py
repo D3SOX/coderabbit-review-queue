@@ -354,7 +354,7 @@ class StatusMixin:
             if phase == "dispatch_wait":
                 summary = "Waiting for this repository's review slot"
                 self.timer_label.setText(f"Next review: {summary}")
-                self.set_tray_countdown("…", f"{repo}\n{summary}")
+                self.set_tray_state("busy", f"{repo}\n{summary}")
                 self.waiting_for_review_window = False
                 return
             if (
@@ -363,7 +363,7 @@ class StatusMixin:
             ):
                 summary = "Preparing availability check"
                 self.timer_label.setText(f"Next review: {summary}")
-                self.set_tray_countdown("…", f"{repo}\n{summary}")
+                self.set_tray_state("busy", f"{repo}\n{summary}")
                 self.waiting_for_review_window = False
                 return
             if phase in {"checking", "triggering"}:
@@ -372,18 +372,18 @@ class StatusMixin:
                 else:
                     summary = f"Triggering review on #{number}"
                 self.timer_label.setText(f"Next review: {summary}")
-                self.set_tray_countdown("…", f"{repo}\n{summary}\n{title}")
+                self.set_tray_state("busy", f"{repo}\n{summary}\n{title}")
                 self.waiting_for_review_window = False
                 return
             if phase == "reviewing":
                 summary = f"Review in progress on #{number}"
                 self.timer_label.setText(f"Next review: {summary}")
-                self.set_tray_countdown("…", f"{repo}\n{summary}\n{title}")
+                self.set_tray_state("reviewing", f"{repo}\n{summary}\n{title}")
                 self.waiting_for_review_window = False
                 return
         if self.status_loading_repo and self.status_loading_repo == self.selected_repo():
             self.timer_label.setText("Next review: Loading status…")
-            self.set_tray_countdown("…", f"{repo}\nLoading status…")
+            self.set_tray_state("busy", f"{repo}\nLoading status…")
             self.waiting_for_review_window = False
             return
         if self.active_reviews:
@@ -394,26 +394,33 @@ class StatusMixin:
             else:
                 summary = f"Reviews in progress ({labels})"
             self.timer_label.setText(f"Next review: {summary}")
-            self.set_tray_countdown(
-                "…",
-                f"{repo}\n{summary}\n{detail}",
-            )
+            tooltip = f"{repo}\n{summary}\n{detail}"
+            count = 0
+            # A countdown alongside running reviews adds their count as a badge.
+            if (
+                self.has_queued_reviews
+                and self.next_review_at is not None
+                and QDateTime.currentDateTime().secsTo(self.next_review_at) > 0
+            ):
+                count = len(self.active_reviews)
+                tooltip += f"\nNext review: {self.format_expiry(self.next_review_at)}"
+            self.set_tray_state("reviewing", tooltip, count=count)
             self.waiting_for_review_window = False
             return
 
         if not self.has_queued_reviews:
             self.timer_label.setText("Next review: —")
-            self.set_tray_countdown(None, f"{repo}\nNo reviews waiting")
+            self.set_tray_state("idle", f"{repo}\nNo reviews waiting")
             self.waiting_for_review_window = False
             return
 
         if self.next_review_at is None:
             if self.monitor_pid() is None:
                 self.timer_label.setText("Next review: Availability unknown")
-                self.set_tray_countdown("?", f"{repo}\nReview availability unknown")
+                self.set_tray_state("stopped", f"{repo}\nReview availability unknown")
             else:
                 self.timer_label.setText("Next review: Available now")
-                self.set_tray_countdown("✓", f"{repo}\nReview available now")
+                self.set_tray_state("available", f"{repo}\nReview available now")
                 self.maybe_play_availability_sound()
             return
 
@@ -421,10 +428,10 @@ class StatusMixin:
         if seconds <= 0:
             if self.monitor_pid() is None:
                 self.timer_label.setText("Next review: Availability unknown")
-                self.set_tray_countdown("?", f"{repo}\nReview availability unknown")
+                self.set_tray_state("stopped", f"{repo}\nReview availability unknown")
             else:
                 self.timer_label.setText("Next review: Available now")
-                self.set_tray_countdown("✓", f"{repo}\nReview available now")
+                self.set_tray_state("available", f"{repo}\nReview available now")
                 self.maybe_play_availability_sound()
             return
 
@@ -440,7 +447,7 @@ class StatusMixin:
                 compact = f"{hours}h {minutes}m"
         detail = self.format_expiry(self.next_review_at)
         self.timer_label.setText("Next review: " + detail)
-        self.set_tray_countdown(compact, f"{repo}\nNext review: {detail}")
+        self.set_tray_state("countdown", f"{repo}\nNext review: {detail}", compact)
 
     @preserve_viewport("queue")
     def populate_queue(self, status: str) -> None:

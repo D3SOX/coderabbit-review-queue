@@ -26,7 +26,8 @@ requests.
   approvals, unresolved feedback, and matching agent-task progress. Queue
   order, the last status, and unexpired review windows survive an app restart.
 - Runs separate monitors for separate repositories. The GUI can start and stop
-  them; the tray shows the next window and can show or hide the window.
+  them; the tray icon shows the time to the next window, running reviews,
+  available reviews, and a stopped monitor, and can show or hide the window.
 - Can delegate unresolved feedback to an idle Codex or Claude task, including
   tasks on an SSH host selected from your SSH config. Codex sessions started by
   the CLI or T3 Code are supported. You can delegate one PR or all reachable,

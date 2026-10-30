@@ -14,12 +14,8 @@ from PySide6.QtCore import QDate, QDateTime, QLocale, QProcess, QSignalBlocker, 
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
-    QColor,
     QDesktopServices,
-    QFont,
     QIcon,
-    QPainter,
-    QPixmap,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -58,6 +54,7 @@ from queue_gui_common import (
 )
 from queue_gui_settings import SettingsMixin
 from queue_gui_status import StatusMixin
+from queue_gui_tray import ANIMATED_TRAY_STATES, TRAY_FRAME_MS, render_tray_icon
 
 
 def task_can_delegate(item: QTreeWidgetItem, steering: bool) -> bool:
@@ -463,6 +460,11 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.countdown_timer = QTimer(self)
         self.countdown_timer.timeout.connect(self.update_countdown_display)
         self.countdown_timer.start(1000)
+        self.tray_state: tuple[str, str, int] | None = None
+        self.tray_animation_started = time.monotonic()
+        self.tray_animation_timer = QTimer(self)
+        self.tray_animation_timer.setInterval(TRAY_FRAME_MS)
+        self.tray_animation_timer.timeout.connect(self.draw_tray_icon)
         self.update_monitor_state()
         if not self.load_cached_repos():
             self.load_repos()
@@ -563,26 +565,26 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         ):
             self.toggle_from_tray()
 
-    def set_tray_countdown(self, text: str | None, tooltip: str) -> None:
-        if text is None:
-            self.tray_icon.setIcon(app_icon())
-        else:
-            pixmap = QPixmap(64, 64)
-            pixmap.fill(Qt.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#2563eb"))
-            painter.drawRoundedRect(2, 2, 60, 60, 14, 14)
-            painter.setPen(QColor("white"))
-            font = QFont()
-            font.setBold(True)
-            font.setPixelSize(25 if len(text) <= 2 else 20)
-            painter.setFont(font)
-            painter.drawText(pixmap.rect(), Qt.AlignCenter, text)
-            painter.end()
-            self.tray_icon.setIcon(QIcon(pixmap))
+    def set_tray_state(self, state: str, tooltip: str, label: str = "", count: int = 0) -> None:
         self.tray_icon.setToolTip(tooltip)
+        if (state, label, count) == self.tray_state:
+            return
+        self.tray_state = (state, label, count)
+        if state in ANIMATED_TRAY_STATES:
+            if not self.tray_animation_timer.isActive():
+                self.tray_animation_started = time.monotonic()
+                self.tray_animation_timer.start()
+        else:
+            self.tray_animation_timer.stop()
+        self.draw_tray_icon()
+
+    def draw_tray_icon(self) -> None:
+        state, label, count = self.tray_state
+        if state == "idle":
+            self.tray_icon.setIcon(app_icon())
+            return
+        phase = time.monotonic() - self.tray_animation_started
+        self.tray_icon.setIcon(QIcon(render_tray_icon(state, label, count, phase)))
 
     def load_cached_repos(self) -> bool:
         try:

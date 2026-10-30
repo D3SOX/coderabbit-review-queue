@@ -735,9 +735,51 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.timer_label.setText.assert_called_once_with(
             "Next review: Loading status…"
         )
-        window.set_tray_countdown.assert_called_once_with(
-            "…", "new/repo\nLoading status…"
+        window.set_tray_state.assert_called_once_with(
+            "busy", "new/repo\nLoading status…"
         )
+
+    def test_tray_states_render_distinct_icons(self):
+        app = QApplication.instance() or QApplication([])
+        from queue_gui_tray import render_tray_icon
+        images = {
+            key: render_tray_icon(*key).toImage()
+            for key in [
+                ("countdown", "12m", 0, 0.0),
+                ("countdown", "1h 5m", 0, 0.0),
+                ("available", "", 0, 0.0),
+                ("stopped", "", 0, 0.0),
+                ("busy", "", 0, 0.0),
+                ("busy", "", 0, 0.7),
+                ("reviewing", "", 0, 0.0),
+                ("reviewing", "", 0, 0.3),
+                ("reviewing", "", 2, 0.0),
+            ]
+        }
+        self.assertEqual(len({image.bits().tobytes() for image in images.values()}), len(images))
+        stopped = images[("stopped", "", 0, 0.0)]
+        rabbit = stopped.pixelColor(20, 32)
+        self.assertEqual(rabbit.red(), rabbit.green())
+        self.assertLess(rabbit.alpha(), 255)
+        app.processEvents()
+
+    def test_animated_tray_state_runs_timer_only_while_needed(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.tray_state = None
+        window.tray_animation_timer = queue_gui.QTimer()
+        window.draw_tray_icon = lambda: queue_gui.QueueWindow.draw_tray_icon(window)
+        queue_gui.QueueWindow.set_tray_state(window, "reviewing", "tip", count=2)
+        self.assertTrue(window.tray_animation_timer.isActive())
+        window.tray_icon.setIcon.assert_called_once()
+        queue_gui.QueueWindow.set_tray_state(window, "reviewing", "tip", count=2)
+        window.tray_icon.setIcon.assert_called_once()
+        queue_gui.QueueWindow.set_tray_state(window, "countdown", "tip", "12m")
+        self.assertFalse(window.tray_animation_timer.isActive())
+        queue_gui.QueueWindow.set_tray_state(window, "idle", "tip")
+        idle_icon = window.tray_icon.setIcon.call_args.args[0]
+        self.assertEqual(idle_icon.availableSizes(), queue_gui.app_icon().availableSizes())
+        app.processEvents()
 
     def test_notification_sound_settings_default_to_30_percent(self):
         with tempfile.TemporaryDirectory() as directory:
