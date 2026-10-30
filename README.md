@@ -19,6 +19,8 @@ requests.
   and `dependabot` are excluded by default.
 - Uses CodeRabbit's quota response to time the next request, rechecks before
   posting, and guards against duplicate `@coderabbitai review` comments.
+  Once CodeRabbit accepts a review, the next PR is checked right away, so plans
+  with more reviews can run several at once.
   Oversized PR heads are skipped rather than blocking the queue.
 - Shows pending and in-progress reviews separately from finished reviews,
   approvals, unresolved feedback, and matching agent-task progress. Queue

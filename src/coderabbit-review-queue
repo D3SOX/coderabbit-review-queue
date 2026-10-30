@@ -82,6 +82,7 @@ resolve_merge_conflicts_override=''
 empty_announced=0
 declare -A attempted_route_threads=()
 declare -A completed_review_heads=()
+declare -A review_watchers=()
 declare -A agent_review_decision_cache=()
 deferred_review_count=0
 
@@ -406,6 +407,11 @@ while true; do
       continue
     fi
     write_monitor_state idle
+    # Keep watching in-flight reviews instead of stopping on an empty queue.
+    if (( ${#review_watchers[@]} > 0 )); then
+      sleep 30
+      continue
+    fi
     if wait_on_empty_queue; then
       continue
     fi
@@ -423,7 +429,7 @@ while true; do
   state=$(monitor_snapshot)
   load_stale_rows "$state" 1
   if (( ${#stale[@]} == 0 )); then
-    (( deferred_review_count > 0 )) && continue
+    (( deferred_review_count > 0 || ${#review_watchers[@]} > 0 )) && continue
     if wait_on_empty_queue; then
       continue
     fi
@@ -547,6 +553,10 @@ while true; do
 
   if wait_for_acceptance "$pr" "$triggered_at" "$head_sha" "$title"; then
     write_monitor_state reviewing "$pr" "$title"
+    # Watch completion in the background so another review can start as soon
+    # as CodeRabbit's quota allows, instead of after this one finishes.
+    watch_review_completion "$pr" "$triggered_at" "$head_sha" "$title" &
+    review_watchers["$pr:$head_sha"]=$!
   else
     acceptance_status=$?
     if (( acceptance_status == 2 )); then
@@ -559,42 +569,7 @@ while true; do
     release_dispatch
     exit "$acceptance_status"
   fi
-
-  if wait_for_review_completion "$pr" "$triggered_at" "$head_sha" "$title"; then
-    mark_head_verified "$pr" "$head_sha"
-    clear_review_request "$pr" "$head_sha"
-  else
-    completion_status=$?
-    if (( completion_status == 3 )); then
-      clear_review_request "$pr" "$head_sha"
-      release_dispatch
-      continue
-    fi
-    if (( completion_status == 4 )); then
-      write_monitor_state waiting '' '' 0
-      release_dispatch
-      continue
-    fi
-    if (( completion_status == 2 )); then
-      clear_review_request "$pr" "$head_sha"
-      state=$(monitor_snapshot)
-      remember_shared_expiry "$(latest_expiry "$state")"
-      release_dispatch
-      continue
-    fi
-    release_dispatch
-    exit "$completion_status"
-  fi
   release_dispatch
-
-  state=$(monitor_snapshot)
-  process_approval_actions_async "$state"
-  process_thread_archives_async "$state"
-  route_all_unresolved_async "$state"
-  load_stale_rows "$state" 1
-  if (( ${#stale[@]} == 0 )); then
-    continue
-  fi
 done
 }
 

@@ -1117,22 +1117,18 @@ wait 2>/dev/null || true
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Monitor continued', result.stdout)
 
-    def test_monitor_continues_after_skipped_review(self):
+    def test_monitor_triggers_next_review_while_previous_is_in_progress(self):
         result = self.run_shell(r'''
 claim_monitor() { :; }
 cleanup_monitor() { :; }
 claim_dispatch() { :; }
-release_dispatch() { echo released; }
+release_dispatch() { :; }
 monitor_snapshot() { printf '{}'; }
-route_all_unresolved() { :; }
-route_unresolved_review() { :; }
-load_stale_rows() {
-  if [[ -f $state_root/skipped ]]; then
-    stale=($'2\tnow\tbranch-2\thead-2\tsecond\t-')
-  else
-    stale=($'1\tnow\tbranch-1\thead-1\tfirst\t-')
-  fi
-}
+route_all_unresolved_async() { :; }
+process_approval_actions_async() { :; }
+process_thread_archives_async() { :; }
+# GitHub's snapshot can lag, so the first PR still looks unreviewed.
+stale_rows() { printf '1\tnow\tbranch-1\thead-1\tfirst\t-\n2\tnow\tbranch-2\thead-2\tsecond\t-\n'; }
 latest_expiry() { echo 0; }
 shared_expiry() { echo 0; }
 remember_shared_expiry() { :; }
@@ -1141,66 +1137,67 @@ query_quota() { quota_remaining=1; }
 recent_review_request_expiry() { echo 0; }
 desktop_notify() { :; }
 gh() { :; }
-wait_for_acceptance() { :; }
 wait_for_review_completion() {
-  if [[ $1 == 1 ]]; then
-    touch "$state_root/skipped"
-    return 3
+  until [[ -f $state_root/release ]]; do sleep 0.05; done
+}
+wait_for_acceptance() {
+  echo "Accepted PR #$1"
+  if [[ $1 == 2 ]]; then
+    [[ ! -f $state_root/release ]] || exit 98
+    touch "$state_root/release"
+    wait
+    exit 0
   fi
-  awk -F '\t' '$1 == 1 { ts=$3 } END { exit(ts != 0) }' "$review_requests_file" || exit 98
-  echo 'Reached second PR after clearing skipped request'
-  exit 0
 }
 main --repo example/repo
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('released', result.stdout)
-        self.assertIn('Reached second PR after clearing skipped request', result.stdout)
+        self.assertEqual(
+            result.stdout.count('Accepted PR #1'), 1, result.stdout,
+        )
+        self.assertIn('Accepted PR #2', result.stdout)
+
+    def test_review_watcher_clears_request_and_marks_completed_head(self):
+        for status, verified in [(0, True), (3, False), (4, False)]:
+            with self.subTest(status=status):
+                result = self.run_shell(rf'''
+wait_for_review_completion() {{ return {status}; }}
+monitor_snapshot() {{ printf '{{}}'; }}
+route_all_unresolved_async() {{ :; }}
+process_approval_actions_async() {{ :; }}
+process_thread_archives_async() {{ :; }}
+stale_rows() {{ printf '42\tnow\tbranch\thead\ttitle\t-\n'; }}
+record_review_request 42 head 123
+watch_review_completion 42 now head title &
+review_watchers[42:head]=$!
+load_stale_rows '{{}}'
+echo "while running: ${{#stale[@]}}"
+while kill -0 "${{review_watchers[42:head]}}" 2>/dev/null; do sleep 0.01; done
+load_stale_rows '{{}}'
+echo "after exit: ${{#stale[@]}} watchers=${{#review_watchers[@]}}"
+tail -n 1 "$review_requests_file"
+''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('while running: 0', result.stdout)
+                self.assertIn(
+                    f"after exit: {0 if verified else 1} watchers=0", result.stdout,
+                )
+                if status in (0, 3):
+                    self.assertIn('42\thead\t0', result.stdout)
+                else:
+                    self.assertIn('42\thead\t123', result.stdout)
 
     def test_approved_review_is_merged_immediately_after_completion(self):
         result = self.run_shell(r'''
-claim_monitor() { :; }
-cleanup_monitor() { :; }
-claim_dispatch() { :; }
-release_dispatch() { :; }
-monitor_snapshot() {
-  if [[ -f $state_root/completed ]]; then
-    printf 'approved snapshot\n'
-  else
-    printf 'initial snapshot\n'
-  fi
-}
+wait_for_review_completion() { :; }
+monitor_snapshot() { printf 'approved snapshot\n'; }
 route_all_unresolved() { :; }
-load_stale_rows() {
-  if [[ -f $state_root/completed ]]; then
-    stale=()
-  else
-    stale=($'42\tnow\tbranch-42\thead-42\tapproved change\t-')
-  fi
-}
+queue_approved_thread_archives() { :; }
 merge_approved_reviews() {
-  if [[ $1 == 'approved snapshot' ]]; then
-    touch "$state_root/merged"
-    echo 'Merged approved review immediately'
-    exit 0
-  fi
+  [[ $1 == 'approved snapshot' ]] && echo 'Merged approved review immediately'
 }
-latest_expiry() { echo 0; }
-shared_expiry() { echo 0; }
-remember_shared_expiry() { :; }
-wait_until() { wait; }
-query_quota() { quota_remaining=1; }
-recent_review_request_expiry() { echo 0; }
-desktop_notify() { :; }
-gh() { :; }
-wait_for_acceptance() { :; }
-wait_for_review_completion() { touch "$state_root/completed"; }
-route_unresolved_review() { :; }
-wait_on_empty_queue() {
-  timeout 1 bash -c 'until [[ -f $1 ]]; do sleep 0.01; done' test "$state_root/merged"
-  exit $?
-}
-main --repo example/repo
+watch_review_completion 42 now head-42 'approved change' &
+wait $!
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Merged approved review immediately', result.stdout)

@@ -389,7 +389,6 @@ wait_for_review_completion() {
             and ((.body | contains("rate limited by coderabbit.ai")) | not)
           )
         ' < <(printf '%s\n' "$reviews" "$comments") >/dev/null; then
-        write_monitor_state waiting '' '' 0
         write_review_completion "$pr" "$head_sha" "$title"
         printf 'CodeRabbit finished PR #%s.\n' "$pr"
         approved=$(jq -r --arg since "$triggered_at" --arg head "$head_sha" '
@@ -442,6 +441,34 @@ wait_for_review_completion() {
     fi
     sleep "$github_poll_interval"
   done
+}
+
+# Background job for one accepted review. Its exit status is that of
+# wait_for_review_completion; the monitor reaps it in reap_review_watchers.
+watch_review_completion() {
+  local pr=$1 triggered_at=$2 head_sha=$3 title=$4 status=0 state
+  trap - EXIT
+  [[ -z ${monitor_lock_fd:-} ]] || exec {monitor_lock_fd}>&-
+  [[ -z ${dispatch_lock_fd:-} ]] || exec {dispatch_lock_fd}>&-
+  # Several reviews may run at once; poll less often to spare GitHub quota.
+  github_poll_interval=15
+  completion_delay_notice_attempts=40
+  wait_for_review_completion "$pr" "$triggered_at" "$head_sha" "$title" || status=$?
+  case $status in
+    0|3) clear_review_request "$pr" "$head_sha" ;;
+    2)
+      clear_review_request "$pr" "$head_sha"
+      remember_shared_expiry "$(latest_expiry "$(monitor_snapshot)")"
+      ;;
+  esac
+  if (( status == 0 )); then
+    state=$(monitor_snapshot)
+    process_approval_actions_async "$state"
+    process_thread_archives_async "$state"
+    route_all_unresolved_async "$state"
+    wait
+  fi
+  exit "$status"
 }
 
 unresolved_coderabbit_rows() {

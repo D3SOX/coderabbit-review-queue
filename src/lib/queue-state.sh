@@ -463,12 +463,14 @@ load_stale_rows() {
   local -a ordered=()
 
   deferred_review_count=0
+  reap_review_watchers
 
   while IFS= read -r row; do
     [[ -n $row ]] || continue
     IFS=$'\t' read -r pr _updated_at _branch_name head_sha _title _limit_at <<<"$row"
     completed_key="$pr:$head_sha"
-    if [[ -n ${completed_review_heads[$completed_key]+present} ]]; then
+    if [[ -n ${completed_review_heads[$completed_key]+present} ||
+      -n ${review_watchers[$completed_key]+present} ]]; then
       continue
     fi
     if (( defer_agent_decisions )) && agent_review_decision_pending "$row"; then
@@ -516,6 +518,19 @@ agent_review_decision_pending() {
   progress=${agent_review_decision_cache[$key]}
   [[ $progress == *Running* || $progress == 'Remote agent host unavailable'* ||
     $progress == 'Remote agent status '* ]]
+}
+
+# A watched review stays out of the queue until its watcher exits, even if
+# GitHub's snapshot has not caught up with CodeRabbit's status yet.
+reap_review_watchers() {
+  local key status
+  for key in "${!review_watchers[@]}"; do
+    ! kill -0 "${review_watchers[$key]}" 2>/dev/null || continue
+    status=0
+    wait "${review_watchers[$key]}" || status=$?
+    unset 'review_watchers[$key]'
+    (( status != 0 )) || mark_head_verified "${key%%:*}" "${key#*:}"
+  done
 }
 
 mark_head_verified() {
