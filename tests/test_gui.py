@@ -723,6 +723,29 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.close()
         app.processEvents()
 
+    def test_running_reviews_badge_count_when_parallel(self):
+        app = QApplication.instance() or QApplication([])
+        soon = queue_gui.QDateTime.currentDateTime().addSecs(12 * 60)
+        for active, next_review_at, label, count in [
+            ([("1", "One")], None, "", 0),
+            ([("1", "One"), ("2", "Two")], None, "", 2),
+            ([("1", "One"), ("2", "Two")], soon, "12m", 0),
+        ]:
+            with self.subTest(active=len(active), countdown=bool(next_review_at)):
+                window = Mock()
+                window.base_window_title = "CodeRabbit Review Queue"
+                window.status_loading_repo = None
+                window.monitor_activity = None
+                window.selected_repo.return_value = "example/repo"
+                window.active_reviews = active
+                window.has_queued_reviews = next_review_at is not None
+                window.next_review_at = next_review_at
+                window.format_expiry.return_value = "Today"
+                queue_gui.QueueWindow.update_countdown_display(window)
+                state, _tooltip, drawn_label, drawn_count = window.set_tray_state.call_args.args
+                self.assertEqual((state, drawn_label, drawn_count), ("reviewing", label, count))
+        app.processEvents()
+
     def test_uncached_repository_shows_loading_instead_of_old_availability(self):
         window = Mock()
         window.base_window_title = "CodeRabbit Review Queue"
@@ -754,6 +777,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 ("reviewing", "", 0, 0.0),
                 ("reviewing", "", 0, 0.3),
                 ("reviewing", "", 2, 0.0),
+                ("reviewing", "12m", 0, 0.0),
             ]
         }
         self.assertEqual(len({image.bits().tobytes() for image in images.values()}), len(images))

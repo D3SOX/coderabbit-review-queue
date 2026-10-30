@@ -11,7 +11,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMessageBox, QTreeWidget, QTreeWidgetItem
 
 from queue_gui_common import (
-    SCRIPT, STATE_ROOT, file_signature, live_review_number,
+    SCRIPT, STATE_ROOT, compact_duration, file_signature, live_review_number,
     monitor_is_running, status_belongs_to_repo,
 )
 
@@ -395,16 +395,15 @@ class StatusMixin:
                 summary = f"Reviews in progress ({labels})"
             self.timer_label.setText(f"Next review: {summary}")
             tooltip = f"{repo}\n{summary}\n{detail}"
-            count = 0
-            # A countdown alongside running reviews adds their count as a badge.
-            if (
-                self.has_queued_reviews
-                and self.next_review_at is not None
-                and QDateTime.currentDateTime().secsTo(self.next_review_at) > 0
-            ):
-                count = len(self.active_reviews)
-                tooltip += f"\nNext review: {self.format_expiry(self.next_review_at)}"
-            self.set_tray_state("reviewing", tooltip, count=count)
+            # A pending countdown takes the badge; otherwise count parallel reviews.
+            count = len(self.active_reviews) if len(self.active_reviews) > 1 else 0
+            label = ""
+            if self.has_queued_reviews and self.next_review_at is not None:
+                seconds = QDateTime.currentDateTime().secsTo(self.next_review_at)
+                if seconds > 0:
+                    label, count = compact_duration(seconds), 0
+                    tooltip += f"\nNext review: {self.format_expiry(self.next_review_at)}"
+            self.set_tray_state("reviewing", tooltip, label, count)
             self.waiting_for_review_window = False
             return
 
@@ -436,18 +435,9 @@ class StatusMixin:
             return
 
         self.waiting_for_review_window = True
-        if seconds < 60:
-            compact = f"{seconds}s"
-        else:
-            minutes = (seconds + 59) // 60
-            if minutes < 60:
-                compact = f"{minutes}m"
-            else:
-                hours, minutes = divmod(minutes, 60)
-                compact = f"{hours}h {minutes}m"
         detail = self.format_expiry(self.next_review_at)
         self.timer_label.setText("Next review: " + detail)
-        self.set_tray_state("countdown", f"{repo}\nNext review: {detail}", compact)
+        self.set_tray_state("countdown", f"{repo}\nNext review: {detail}", compact_duration(seconds))
 
     @preserve_viewport("queue")
     def populate_queue(self, status: str) -> None:

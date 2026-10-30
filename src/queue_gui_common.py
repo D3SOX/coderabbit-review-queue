@@ -85,6 +85,16 @@ def status_belongs_to_repo(status: str, repo: str) -> bool:
     return status.splitlines()[0:1] == [f"Repository: {repo}"]
 
 
+def compact_duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = (seconds + 59) // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m"
+
+
 def live_review_number(activity: tuple[str, str, str, int] | None) -> str | None:
     if isinstance(activity, tuple) and activity[0] in {"checking", "triggering", "reviewing"}:
         return activity[1] or None

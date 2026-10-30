@@ -74,6 +74,18 @@ def _spinner(painter: QPainter, phase: float) -> None:
     painter.drawArc(QRectF(3, 3, 58, 58), round(start * 16), -110 * 16)
 
 
+def _time_pill(painter: QPainter, label: str) -> None:
+    pill = QPainterPath()
+    pill.addRoundedRect(QRectF(4, 40, 56, 22), 11, 11)
+    _cut_out(painter, pill)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(BLUE)
+    painter.drawPath(pill)
+    painter.setPen(Qt.white)
+    painter.setFont(_fitted_font(label, 50, 17))
+    painter.drawText(QRectF(4, 40, 56, 22), Qt.AlignCenter, label)
+
+
 def render_tray_icon(state: str, label: str = "", count: int = 0, phase: float = 0.0) -> QPixmap:
     pixmap = QPixmap(SIZE, SIZE)
     pixmap.fill(Qt.transparent)
@@ -81,15 +93,7 @@ def render_tray_icon(state: str, label: str = "", count: int = 0, phase: float =
     painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
     if state == "countdown":
         painter.drawPixmap(QRectF(10, 0, 44, 44), rabbit(), QRectF(0, 0, SIZE, SIZE))
-        pill = QPainterPath()
-        pill.addRoundedRect(QRectF(4, 40, 56, 22), 11, 11)
-        _cut_out(painter, pill)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(BLUE)
-        painter.drawPath(pill)
-        painter.setPen(Qt.white)
-        painter.setFont(_fitted_font(label, 50, 17))
-        painter.drawText(QRectF(4, 40, 56, 22), Qt.AlignCenter, label)
+        _time_pill(painter, label)
     elif state == "available":
         painter.drawPixmap(QRectF(2, 2, 60, 60), rabbit(), QRectF(0, 0, SIZE, SIZE))
         _badge(painter, GREEN)
@@ -108,6 +112,10 @@ def render_tray_icon(state: str, label: str = "", count: int = 0, phase: float =
     elif state == "busy":
         painter.setOpacity(0.7 + 0.3 * math.cos(2 * math.pi * phase / PULSE_PERIOD))
         painter.drawPixmap(QRectF(2, 2, 60, 60), rabbit(), QRectF(0, 0, SIZE, SIZE))
+    elif state == "reviewing" and label:
+        _spinner(painter, phase)
+        painter.drawPixmap(QRectF(14, 6, 36, 36), rabbit(), QRectF(0, 0, SIZE, SIZE))
+        _time_pill(painter, label)
     elif state == "reviewing":
         _spinner(painter, phase)
         painter.drawPixmap(QRectF(10, 10, 44, 44), rabbit(), QRectF(0, 0, SIZE, SIZE))
