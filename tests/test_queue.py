@@ -887,6 +887,65 @@ wait_for_review_completion 1506 2026-09-23T07:43:46Z old-head title
         self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
         self.assertIn('base or head changed', result.stdout)
 
+    def test_no_files_to_review_reply_completes_review(self):
+        result = self.run_shell(r'''
+poll_wait_background_actions() { :; }
+desktop_notify() { :; }
+gh() {
+  case "$*" in
+    *'/status') echo '{"statuses":[]}' ;;
+    *'/check-runs'*) echo '{"check_runs":[]}' ;;
+    *'/comments?'*) jq -cn '[[{user: {login: "coderabbitai[bot]"}, created_at: "2026-10-30T13:50:40Z", body: "<details>\n<summary>⚠️ Action not completed</summary>\n<dl>\n<dd>\n\nNo files to review.\n\n> Note: CodeRabbit is an incremental review system.\n\n</dd>\n</dl>\n</details>"}]]' ;;
+    *) return 99 ;;
+  esac
+}
+wait_for_review_completion 2524 2026-10-30T13:50:31Z head Title
+[[ -s $review_completion_file ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('CodeRabbit has no new files to review on PR #2524.', result.stdout)
+
+    def test_failed_review_action_reason_skips_html_markup(self):
+        result = self.run_shell(r'''
+poll_wait_background_actions() { :; }
+desktop_notify() { :; }
+gh() {
+  case "$*" in
+    *'/status') echo '{"statuses":[]}' ;;
+    *'/check-runs'*) echo '{"check_runs":[]}' ;;
+    *'/comments?'*) jq -cn '[[{user: {login: "coderabbitai[bot]"}, created_at: "2026-10-30T13:50:40Z", body: "<details>\n<summary>⚠️ Action not completed</summary>\n<dl>\n<dd>\n\n  Pull request base or head changed.\n\n</dd>\n</dl>\n</details>"}]]' ;;
+    *) return 99 ;;
+  esac
+}
+wait_for_review_completion 2524 2026-10-30T13:50:31Z head Title
+''')
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn('did not complete PR #2524: Pull request base or head changed. Rechecking',
+                      result.stdout)
+
+    def test_no_files_to_review_check_run_is_not_queued_or_active(self):
+        pr = self.pr(2524)
+        pr['commits']['nodes'][0]['commit']['statusCheckRollup']['contexts']['nodes'] = [{
+            'name': 'CodeRabbit', 'status': 'COMPLETED', 'conclusion': 'SKIPPED',
+            'checkSuite': {'app': {'slug': 'coderabbitai'}},
+            'startedAt': '2026-10-30T13:50:55Z', 'title': 'No files to review',
+            'summary': 'Result: Skipped - No files to review',
+        }]
+        self.assertEqual(self.rows('stale_rows', [pr]), [])
+        self.assertEqual(self.rows('active_review_rows "$(cat)"', [pr]), [])
+
+    def test_deferred_recent_request_reports_waiting_state(self):
+        result = self.run_shell(r'''
+recent_review_request_expiry() { echo 4102444800; }
+desktop_notify() { :; }
+release_dispatch() { :; }
+sleep() { cat "$monitor_state_file"; }
+write_monitor_state checking 2524 Title
+defer_recent_review_request 2524 head Title
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('waiting\t\t\t4102444800', result.stdout)
+
     @staticmethod
     def pr(number, author='human', description='', head='head'):
         return {

@@ -116,6 +116,7 @@ defer_recent_review_request() {
   wake=$(human_expiry "$request_expiry")
   printf 'A recent review request already exists for PR #%s; rechecking %s.\n' \
     "$pr" "$wake"
+  write_monitor_state waiting '' '' "$request_expiry"
   desktop_notify \
     'CodeRabbit duplicate prevented' \
     "PR #$pr — $title"$'\n'"A review was already requested recently. Rechecking $wake."

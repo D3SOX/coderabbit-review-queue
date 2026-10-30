@@ -452,9 +452,15 @@ wait_for_review_completion() {
           | select(.user.login == "coderabbitai[bot]"
               and .created_at >= $since
               and (.body | contains("Action not completed")))
-          | {at: .created_at, reason: ((.body | split("</summary>") | .[1] // "") | split("\n") | map(select(length > 0)) | first // "CodeRabbit could not complete the action.")}
+          | {at: .created_at, reason: ((.body | split("</summary>") | .[1] // "") | gsub("<[^>]*>"; "") | split("\n") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0)) | first // "CodeRabbit could not complete the action.")}
         ] | sort_by(.at) | last | .reason // empty
       ' <<<"$comments")
+      # Re-requesting a head without new files gets the same reply forever.
+      if [[ $failure_reason == 'No files to review.' ]]; then
+        write_review_completion "$pr" "$head_sha" "$title"
+        printf 'CodeRabbit has no new files to review on PR #%s.\n' "$pr"
+        return 0
+      fi
       if [[ -n $failure_reason ]]; then
         printf 'CodeRabbit did not complete PR #%s: %s Rechecking the queue.\n' "$pr" "$failure_reason"
         return 4
