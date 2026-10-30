@@ -786,6 +786,10 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertFalse(queue_gui.proc_stat_is_running("1040817 (bash) Z 1 2 3"))
         self.assertTrue(queue_gui.proc_stat_is_running("1040817 (bash) S 1 2 3"))
 
+    def test_reused_monitor_pid_is_not_considered_running(self):
+        # This test process is alive but is not the queue script.
+        self.assertFalse(queue_gui.monitor_is_running(os.getpid()))
+
     def test_tray_click_hides_visible_window(self):
         window = Mock()
         window.window_is_shown.return_value = True

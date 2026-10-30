@@ -92,6 +92,11 @@ resolve_merge_conflicts_enabled() {
     [[ $(head -n 1 "$resolve_merge_conflicts_file") != 0 ]]
 }
 
+# How agents on this host invoke the queue in prompts; mirrors install.sh.
+installed_command() {
+  printf '%s/coderabbit-review-queue\n' "${XDG_BIN_HOME:-~/.local/bin}"
+}
+
 auto_merge_instruction() {
   auto_merge_enabled || return 0
   local pr=${1:-PR} method review_mode decision_text='' delete_text=' Keep the branch after merging.' delete_branch=0 admin=0 refusal_text='If it refuses, stop and report the blocker.'
@@ -113,8 +118,8 @@ auto_merge_instruction() {
     refusal_text='If it refuses because of conflicts, follow the conflict-resolution instructions above and retry the guard. For other blockers, stop and report them.'
     printf '\n\nIf the merge guard reports merge conflicts, fetch the current base, resolve the conflicts while preserving unrelated work, validate and push the resolution, wait for CI and review bots, and run the same guard again with the new live head SHA. Do not bypass the guard or trigger CodeRabbit yourself. For other blockers, stop and report them.\n'
   fi
-  printf '\n\n%sAfter the task work is complete, wait for CI and every review bot to finish. Before invoking the merge guard, fetch all unresolved review threads, including non-CodeRabbit bots. Verify each finding; fix valid ones or explain and resolve dismissals according to repository rules. Do not merge while any thread remains unresolved; report its author and path if it cannot be addressed. Use the queue merge guard on this agent host: `~/.local/bin/coderabbit-review-queue --repo %s --merge-now %s "$(gh pr view %s --repo %s --json headRefOid --jq .headRefOid)" %s %s %s --local-agents`. The command uses the selected merge method without GitHub auto-merge and checks the live head, reviews, checks, and threads before merging.%s %s\n' \
-    "$decision_text" "$repo" "$pr" "$pr" "$repo" "$method" "$delete_branch" "$admin" "$delete_text" "$refusal_text"
+  printf '\n\n%sAfter the task work is complete, wait for CI and every review bot to finish. Before invoking the merge guard, fetch all unresolved review threads, including non-CodeRabbit bots. Verify each finding; fix valid ones or explain and resolve dismissals according to repository rules. Do not merge while any thread remains unresolved; report its author and path if it cannot be addressed. Use the queue merge guard on this agent host: `%s --repo %s --merge-now %s "$(gh pr view %s --repo %s --json headRefOid --jq .headRefOid)" %s %s %s --local-agents`. The command uses the selected merge method without GitHub auto-merge and checks the live head, reviews, checks, and threads before merging.%s %s\n' \
+    "$decision_text" "$(installed_command)" "$repo" "$pr" "$pr" "$repo" "$method" "$delete_branch" "$admin" "$delete_text" "$refusal_text"
 }
 
 default_delegation_prompt() {
@@ -479,6 +484,7 @@ resume_codex_via_daemon() {
   pid_file="/tmp/coderabbit-review-queue-codex-$session_id.pid"
   rm -f -- "$pid_file"
   setsid -f bash -c '
+    umask 077
     printf "%s\n" "$$" >"$1"
     tail -f /dev/null | script -qefc "$2" "$3"
   ' _ "$pid_file" "$command" "$log_path" </dev/null >/dev/null 2>&1
@@ -575,11 +581,14 @@ resume_codex_via_exec() {
   pid_file="/tmp/coderabbit-review-queue-codex-$session_id-exec.pid"
   log_path="/tmp/coderabbit-review-queue-codex-$session_id-exec.log"
   rm -f -- "$pid_file"
-  setsid -f bash -c '
-    printf "%s\n" "$$" >"$1"
-    shift
-    "$@"
-  ' _ "$pid_file" codex "$@" </dev/null >"$log_path" 2>&1
+  (
+    umask 077
+    setsid -f bash -c '
+      printf "%s\n" "$$" >"$1"
+      shift
+      "$@"
+    ' _ "$pid_file" codex "$@" </dev/null >"$log_path" 2>&1
+  )
   for attempt in {1..20}; do
     [[ -s $pid_file ]] && break
     sleep 0.05
@@ -601,6 +610,44 @@ resume_codex_via_exec() {
   kill -- -"$client_pid" 2>/dev/null || true
   printf 'Codex CLI did not start a new turn for task %s.\n' "$session_id" >&2
   return 1
+}
+
+# Run `claude -p` detached like Codex exec, so a whole agent turn neither
+# blocks the routing scan nor dies with a dropped SSH connection. A turn that
+# fails at startup still reports failure.
+resume_claude_via_cli() {
+  local session_id=$1 pid_file status_file log_path client_pid attempt
+  shift
+  pid_file="/tmp/coderabbit-review-queue-claude-$session_id-cli.pid"
+  status_file="/tmp/coderabbit-review-queue-claude-$session_id-cli.status"
+  log_path="/tmp/coderabbit-review-queue-claude-$session_id-cli.log"
+  rm -f -- "$pid_file" "$status_file"
+  (
+    umask 077
+    setsid -f bash -c '
+      printf "%s\n" "$$" >"$1"
+      status_file=$2
+      shift 2
+      "$@"
+      printf "%s\n" "$?" >"$status_file"
+    ' _ "$pid_file" "$status_file" claude -p "$@" </dev/null >"$log_path" 2>&1
+  )
+  for attempt in {1..20}; do
+    [[ -s $pid_file ]] && break
+    sleep 0.05
+  done
+  [[ -s $pid_file ]] || return 1
+  client_pid=$(<"$pid_file")
+  rm -f -- "$pid_file"
+  for attempt in {1..20}; do
+    if [[ -s $status_file ]]; then
+      [[ $(<"$status_file") == 0 ]]
+      return
+    fi
+    kill -0 "$client_pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  [[ ! -s $status_file || $(<"$status_file") == 0 ]]
 }
 
 route_unresolved_review() {
@@ -641,9 +688,6 @@ route_unresolved_review() {
         rg -q --fixed-strings --line-regexp "$thread_id" "$routed_threads_file"; then
         continue
       fi
-      if [[ -n ${attempted_route_threads[$thread_id]+present} ]]; then
-        continue
-      fi
     fi
     new_threads+=("$thread_id ($path:$line, outdated=$outdated)")
     new_ids+=("$thread_id")
@@ -677,10 +721,7 @@ route_unresolved_review() {
           queue_pending_archive "$pr" "$branch_name" "$head_sha" "$title" \
             "$archive_session_id"
         fi
-        for thread_id in "${new_ids[@]}"; do
-          attempted_route_threads["$thread_id"]=1
-          printf '%s\n' "$thread_id" >>"$routed_threads_file"
-        done
+        printf '%s\n' "${new_ids[@]}" >>"$routed_threads_file"
       fi
       return 0
     fi
@@ -778,11 +819,10 @@ resume_codex_session() {
   local task_sandbox_policy task_approval_mode
   local originator is_t3=0 native_steering=0
   local routing_lock_path routing_lock_fd
-  local thread_id
   local -a codex_args
 
   python3 "$script_dir/t3-delegate.py" --is-top-level "$session_id" || return 1
-  git -C "$session_cwd" rev-parse --git-common-dir >/dev/null
+  git -C "$session_cwd" rev-parse --git-common-dir >/dev/null || return 1
   routing_lock_path="/tmp/coderabbit-review-queue-$repo_key-codex-$session_id.lock"
   exec {routing_lock_fd}>"$routing_lock_path"
   if ! flock -n "$routing_lock_fd"; then
@@ -840,8 +880,10 @@ resume_codex_session() {
     fi
     codex_args+=(resume --all "$session_id" "$prompt")
   fi
+  # Callers run this inside `if !`, where set -e is off: check cd explicitly
+  # so that an agent never resumes in the monitor's working directory.
   if (
-    cd "$session_cwd"
+    cd "$session_cwd" || exit 1
     if (( is_t3 )); then
       resume_codex_via_t3 "$session_id" "$prompt"
       exit $?
@@ -859,10 +901,7 @@ resume_codex_session() {
     resume_codex_via_exec "$session_id" "${codex_args[@]}"
   ); then
     mark_pr_delegated "$pr"
-    for thread_id in "${thread_ids[@]}"; do
-      attempted_route_threads["$thread_id"]=1
-      printf '%s\n' "$thread_id" >>"$routed_threads_file"
-    done
+    printf '%s\n' "${thread_ids[@]}" >>"$routed_threads_file"
     printf 'Delegation confirmed for PR #%s.\n' "$pr"
     clear_routing_failure "$pr"
     desktop_notify \
@@ -874,9 +913,6 @@ resume_codex_session() {
       printf 'Codex task %s for PR #%s was no longer verifiably idle; deferring review routing.\n' \
         "$session_id" "$pr"
     else
-      for thread_id in "${thread_ids[@]}"; do
-        attempted_route_threads["$thread_id"]=1
-      done
       printf 'Codex task resume failed for PR #%s; leaving it eligible for retry.\n' "$pr" >&2
       dispatch_result=1
       notify_routing_failure_once "$pr" "$head_sha" "$title"
@@ -896,13 +932,12 @@ resume_claude_session() {
   local head_sha=$7
   local git_common_dir session_state resume_status session_file dispatch_result=0
   local routing_lock_path routing_lock_fd
-  local thread_id
 
   python3 "$script_dir/t3-delegate.py" --is-top-level "$session_id" --provider claudeAgent || return 1
   session_file=$(claude_session_file "$session_id" 2>/dev/null || true)
   git_common_dir=$(
     git -C "$session_cwd" rev-parse --path-format=absolute --git-common-dir
-  )
+  ) || return 1
   routing_lock_path="/tmp/coderabbit-review-queue-$repo_key-claude-$session_id.lock"
   exec {routing_lock_fd}>"$routing_lock_path"
   if ! flock -n "$routing_lock_fd"; then
@@ -938,7 +973,7 @@ resume_claude_session() {
   printf 'Routing unresolved CodeRabbit review on PR #%s to Claude session %s.\n' \
     "$pr" "$session_id"
   if (
-    cd "$session_cwd"
+    cd "$session_cwd" || exit 1
     if python3 "$script_dir/t3-delegate.py" --can-steer "$session_id" --provider claudeAgent >/dev/null 2>&1; then
       local -a args=("$script_dir/t3-delegate.py" "$session_id" --provider claudeAgent)
       steer_running_agents_enabled || args+=(--wait-idle)
@@ -952,16 +987,11 @@ resume_claude_session() {
       exit $?
     fi
     [[ $(claude_session_state "$session_id" "$session_file") == idle ]] || exit 75
-    claude -p \
-      --resume "$session_id" \
-      --add-dir "$git_common_dir" \
-      "$prompt"
+    resume_claude_via_cli "$session_id" --resume "$session_id" \
+      --add-dir "$git_common_dir" "$prompt"
   ); then
     mark_pr_delegated "$pr"
-    for thread_id in "${thread_ids[@]}"; do
-      attempted_route_threads["$thread_id"]=1
-      printf '%s\n' "$thread_id" >>"$routed_threads_file"
-    done
+    printf '%s\n' "${thread_ids[@]}" >>"$routed_threads_file"
     printf 'Delegation confirmed for PR #%s.\n' "$pr"
     clear_routing_failure "$pr"
     desktop_notify \
@@ -973,9 +1003,6 @@ resume_claude_session() {
       printf 'Claude session %s for PR #%s was no longer verifiably idle; deferring review routing.\n' \
         "$session_id" "$pr"
     else
-      for thread_id in "${thread_ids[@]}"; do
-        attempted_route_threads["$thread_id"]=1
-      done
       printf 'Claude session resume failed for PR #%s; leaving it eligible for retry.\n' \
         "$pr" >&2
       dispatch_result=1
@@ -1022,6 +1049,6 @@ route_all_unresolved() {
         "$pr" >&2
       notify_routing_failure_once "$pr" "$head_sha" "$title"
     fi
-  done < <(reviewed_rows <<<"$state")
+  done < <(reviewed_rows own <<<"$state")
   return 0
 }

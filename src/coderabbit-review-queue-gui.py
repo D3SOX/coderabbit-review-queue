@@ -52,7 +52,8 @@ from queue_gui_common import (
     APP_ICON_PATH, BABYSIT_DELEGATION_PROMPT, DEFAULT_DELEGATION_PROMPT,
     REPOSITORY_CACHE_FILE, SCRIPT, SELECTED_REPO_FILE, SHORT_DELEGATION_PROMPT,
     STATE_ROOT, STATUS_CACHE_MAX_AGE, app_icon, file_signature,
-    live_review_number, proc_stat_is_running, process_is_running,
+    live_review_number, monitor_is_running, monitor_pid_files, proc_stat_is_running,
+    process_is_running,
     ssh_config_hosts, status_belongs_to_repo,
 )
 from queue_gui_settings import SettingsMixin
@@ -544,14 +545,14 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.repo_changed(repo)
 
     def any_monitor_running(self) -> bool:
-        for pid_file in Path("/tmp").glob("coderabbit-review-queue-*.pid"):
+        for pid_file in monitor_pid_files():
             try:
                 if pid_file.stat().st_uid != os.getuid():
                     continue
                 pid = int(pid_file.read_text().strip())
             except (OSError, ValueError):
                 continue
-            if process_is_running(pid):
+            if monitor_is_running(pid):
                 return True
         return False
 
@@ -1034,13 +1035,13 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         if answer != QMessageBox.Yes:
             return
         failed: list[int] = []
-        for pid_file in Path("/tmp").glob("coderabbit-review-queue-*.pid"):
+        for pid_file in monitor_pid_files():
             pid = 0
             try:
                 if pid_file.stat().st_uid != os.getuid():
                     continue
                 pid = int(pid_file.read_text().strip())
-                if not Path(f"/proc/{pid}").exists():
+                if not monitor_is_running(pid):
                     continue
                 process_group = os.getpgid(pid)
                 if process_group == pid:

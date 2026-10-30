@@ -12,13 +12,18 @@ status_quota_available() {
 }
 
 read -r -d '' query <<'GRAPHQL' || true
-query($owner: String!, $name: String!) {
+query($owner: String!, $name: String!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
-    pullRequests(first: 50, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    pullRequests(first: 50, after: $endCursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
       nodes {
         number
         title
         isDraft
+        isCrossRepository
         author {
           login
         }
@@ -88,10 +93,13 @@ query($owner: String!, $name: String!) {
 GRAPHQL
 
 snapshot_remote() {
-  gh api graphql \
+  local pages
+  pages=$(gh api graphql --paginate --slurp \
     -f query="$query" \
     -F owner="$owner" \
-    -F name="$name"
+    -F name="$name") || return 1
+  jq -c '{data: {repository: {pullRequests: {nodes: [.[].data.repository.pullRequests.nodes[]]}}}}' \
+    <<<"$pages"
 }
 
 snapshot() {
@@ -130,13 +138,29 @@ configure_repo() {
   fi
 
   repo=$selected
+  repo_key=${repo//\//__}
+  mkdir -p "$state_root"
+  # GitHub names are case-insensitive. Reuse the casing that already owns this
+  # repository's settings so that differently cased input cannot start a second
+  # monitor with its own locks and defaults.
+  local existing
+  existing=$(
+    shopt -s nullglob nocaseglob
+    for file in "$state_root/$repo_key"-*; do
+      file=${file##*/}
+      printf '%s\n' "${file:0:${#repo_key}}"
+    done | sort -u
+  )
+  if [[ -n $existing ]] && ! grep -qxF -- "$repo_key" <<<"$existing" &&
+    (( $(wc -l <<<"$existing") == 1 )); then
+    repo_key=$existing
+    repo="${repo_key%%__*}/${repo_key#*__}"
+  fi
   owner=${repo%%/*}
   name=${repo#*/}
-  repo_key=${repo//\//__}
   monitor_pid_file="/tmp/coderabbit-review-queue-$repo_key.pid"
   monitor_lock_file="/tmp/coderabbit-review-queue-$repo_key.lock"
   dispatch_lock_file="/tmp/coderabbit-review-queue-$repo_key-dispatch.lock"
-  mkdir -p "$state_root"
   routed_threads_file="$state_root/$repo_key-routed-threads.txt"
   queue_order_file="$state_root/$repo_key-order.txt"
   quota_expiry_file="$state_root/$repo_key-quota-expiry.txt"
@@ -195,7 +219,7 @@ remote_agent_command() {
   }
   [[ -n $host ]] || return 2
   printf -v arguments '%q ' --repo "$repo" "$@"
-  command="exec ~/.local/bin/coderabbit-review-queue $arguments"
+  command="exec \"\${XDG_BIN_HOME:-\$HOME/.local/bin}/coderabbit-review-queue\" $arguments"
   [[ -z ${remote_command_timeout:-} ]] || timeout_args=(timeout "$remote_command_timeout")
   "${timeout_args[@]}" ssh \
     -n \
@@ -549,9 +573,11 @@ eligible_rows() {
   '
 }
 
+# Pass "own" to skip fork PRs, whose branch names can collide with local tasks.
 reviewed_rows() {
-  eligible_state | jq -r '
+  eligible_state | jq -r --arg scope "${1:-all}" '
     .data.repository.pullRequests.nodes[]
+    | select($scope != "own" or (.isCrossRepository | not))
     | . as $pr
     | select(
         any(
@@ -589,6 +615,7 @@ approved_review_rows() {
 approved_merge_rows() {
   eligible_state <<<"$1" | jq -r '
     .data.repository.pullRequests.nodes[]
+    | select(.isCrossRepository | not)
     | . as $pr
     | select(any(.reviews.nodes[]?;
         (.author.login // "") == "coderabbitai"
@@ -602,6 +629,7 @@ approved_merge_rows() {
 approved_archive_rows() {
   eligible_state <<<"$1" | jq -r '
     .data.repository.pullRequests.nodes[]
+    | select(.isCrossRepository | not)
     | . as $pr
     | select(any(.reviews.nodes[]?;
         (.author.login // "") == "coderabbitai"
@@ -781,7 +809,6 @@ timer_rows() {
       | last // null;
 
     .data.repository.pullRequests.nodes[]
-    | select((.title | startswith("[pull] ")) | not)
     | (latest_rate_limit) as $rate_limit
     | (
         if $rate_limit == null then null
@@ -891,6 +918,28 @@ record_review_request() {
   fi
 }
 
+# Request and delegation logs only grow. At monitor start, drop PRs whose
+# requests are all past every window and delegations of PRs no longer open.
+prune_state_files() {
+  local state=$1 temporary now
+  now=$(date -u +%s)
+  if [[ -f $review_requests_file ]]; then
+    temporary=$(mktemp "$review_requests_file.XXXXXX")
+    awk -F '\t' -v now="$now" -v max_age="$((review_request_window > 900 ? review_request_window : 900))" '
+      FNR == NR { if ($3 + 0 > 0 && now - $3 <= max_age) recent[$1] = 1; next }
+      $1 in recent
+    ' "$review_requests_file" "$review_requests_file" >"$temporary"
+    mv "$temporary" "$review_requests_file"
+  fi
+  if [[ -f $delegated_prs_file ]]; then
+    temporary=$(mktemp "$delegated_prs_file.XXXXXX")
+    jq -r '.data.repository.pullRequests.nodes[].number' <<<"$state" |
+      awk 'FNR == NR { open[$1] = 1; next } $1 in open' - "$delegated_prs_file" \
+        >"$temporary"
+    mv "$temporary" "$delegated_prs_file"
+  fi
+}
+
 clear_review_request() {
   local pr=$1
   local head_sha=$2
@@ -920,11 +969,7 @@ recent_review_request_expiry() {
     expiry=$((local_epoch + review_request_window))
   fi
 
-  if ! comments=$(
-    gh api --paginate "repos/$repo/issues/$pr/comments"
-  ); then
-    return 1
-  fi
+  comments=$(issue_comments "$pr") || return 1
   github_at=$(
     jq -r --arg cutoff "$cutoff_iso" '
       . as $comments

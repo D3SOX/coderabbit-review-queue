@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QMessageBox, QTreeWidget, QTreeWidgetItem
 
 from queue_gui_common import (
     SCRIPT, STATE_ROOT, file_signature, live_review_number,
-    process_is_running, status_belongs_to_repo,
+    monitor_is_running, status_belongs_to_repo,
 )
 
 
@@ -66,7 +66,7 @@ class StatusMixin:
             pid = int(pid_file.read_text().strip())
         except (OSError, ValueError):
             return None
-        return pid if process_is_running(pid) else None
+        return pid if monitor_is_running(pid) else None
 
     def update_monitor_state(self) -> None:
         repo = self.selected_repo()

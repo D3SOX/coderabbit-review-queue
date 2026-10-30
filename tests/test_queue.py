@@ -296,7 +296,7 @@ python3() {
   if [[ $is_native == 1 ]]; then printf 'NATIVE %s\n' "$*"; else printf 'T3 %s\n' "$*"; fi
   cat
 }
-claude() { printf 'CLI %s\n' "$*"; }
+resume_claude_via_cli() { printf 'CLI %s\n' "$*"; }
 ids=(thread-1)
 resume_claude_session 42 Title session "$session_cwd" 'Resolve review' ids head
 if [[ -f $routed_threads_file ]]; then cat "$routed_threads_file"; fi
@@ -565,6 +565,7 @@ printf 'codex\n' >"$auto_delegate_file"
 wait_for_github_quota() { :; }
 gh() { if [[ $* == *'/status'* ]]; then echo '{"statuses":[]}'; else echo '[]'; fi; }
 process_approval_actions_async() { touch "$state_root/routed"; }
+snapshot() { return 1; }
 sleep() { [[ -f $state_root/routed ]] || exit 99; exit 0; }
 wait_for_review_completion 43 now head 'Other PR'
 ''')
@@ -690,6 +691,7 @@ git -C "$worktree" init -q
 codex_session_state() { echo running; }
 codex_session_originator() { echo codex-tui; }
 python3() {
+  [[ $2 != --is-top-level ]] || return 0
   [[ $1 == */codex-steer.py ]] || return 1
   [[ $2 == --can-steer ]] || echo 'native steer delivered'
 }
@@ -1085,7 +1087,7 @@ query_quota() {
 }
 recent_review_request_expiry() { echo 0; }
 desktop_notify() { :; }
-gh() { :; }
+gh() { echo 2026-10-27T11:04:04Z; }
 wait_for_acceptance() {
   echo "Dispatched PR #$1"
   exit 0
@@ -1136,7 +1138,7 @@ wait_until() { :; }
 query_quota() { quota_remaining=1; }
 recent_review_request_expiry() { echo 0; }
 desktop_notify() { :; }
-gh() { :; }
+gh() { echo 2026-10-27T11:04:04Z; }
 wait_for_review_completion() {
   until [[ -f $state_root/release ]]; do sleep 0.05; done
 }
@@ -2196,7 +2198,7 @@ gh() {
 merge_pr_now 42 head squash 1
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('pr merge 42 --repo example/repo --squash --delete-branch', result.stdout)
+        self.assertIn('pr merge 42 --repo example/repo --squash --match-head-commit head --delete-branch', result.stdout)
         self.assertNotIn('--auto', result.stdout)
 
     def test_merge_retries_transient_unstable_rollup(self):
@@ -2290,7 +2292,7 @@ gh() {
 merge_pr_now 42 head squash 0 1
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('pr merge 42 --repo example/repo --squash --admin', result.stdout)
+        self.assertIn('pr merge 42 --repo example/repo --squash --match-head-commit head --admin', result.stdout)
 
     def test_admin_merge_accepts_resolved_current_head_changes_requested(self):
         result = self.run_shell(r'''
@@ -2306,7 +2308,7 @@ gh() {
 merge_pr_now 42 head squash 0 1
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('pr merge 42 --repo example/repo --squash --admin', result.stdout)
+        self.assertIn('pr merge 42 --repo example/repo --squash --match-head-commit head --admin', result.stdout)
 
     def test_admin_merge_ignores_superseded_failed_check_attempt(self):
         result = self.run_shell(r'''
@@ -2322,7 +2324,7 @@ gh() {
 merge_pr_now 42 head squash 0 1
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('pr merge 42 --repo example/repo --squash --admin', result.stdout)
+        self.assertIn('pr merge 42 --repo example/repo --squash --match-head-commit head --admin', result.stdout)
 
     def test_merge_rechecks_transient_pending_rollup_before_refusing(self):
         result = self.run_shell(r'''
@@ -2344,7 +2346,7 @@ sleep() { :; }
 merge_pr_now 42 head squash 0 1
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('pr merge 42 --repo example/repo --squash --admin', result.stdout)
+        self.assertIn('pr merge 42 --repo example/repo --squash --match-head-commit head --admin', result.stdout)
 
     def test_admin_merge_refuses_newer_pending_check_attempt(self):
         result = self.run_shell(r'''
@@ -2799,6 +2801,88 @@ auto_merge_instruction
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('--admin', result.stdout)
 
+
+    def test_issue_comments_merge_every_page_into_one_array(self):
+        result = self.run_shell(r'''
+gh() { echo '[[{"id":1}],[{"id":2}]]'; }
+issue_comments 42 | jq -c 'map(.id)'
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '[1,2]')
+
+    def test_persistent_reasonless_skip_ends_completion_wait(self):
+        result = self.run_shell(r'''
+poll_wait_background_actions() { :; }
+snapshot() { return 1; }
+review_skipped_polls=3
+gh() {
+  case "$*" in
+    *'/status') echo '{"statuses":[{"context":"CodeRabbit","created_at":"2026-10-27T11:05:00Z","state":"error","description":"Review skipped"}]}' ;;
+    *'/comments'*) echo '[[]]' ;;
+    *) return 99 ;;
+  esac
+}
+sleep() { :; }
+wait_for_review_completion 42 2026-10-27T11:04:04Z head Title
+''')
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+
+    def test_completion_wait_stops_for_closed_pr_or_new_head(self):
+        for nodes in ([], [{'number': 42, 'headRefOid': 'newer'}]):
+            with self.subTest(nodes=nodes):
+                result = self.run_shell(r'''
+poll_wait_background_actions() { :; }
+snapshot() { cat; }
+gh() { return 99; }
+sleep() { exit 97; }
+wait_for_review_completion 42 2026-10-27T11:04:04Z head Title
+''', {'data': {'repository': {'pullRequests': {'nodes': nodes}}}})
+                self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+
+    def test_fork_prs_are_never_merged_or_delegated(self):
+        fork = self.pr(1)
+        fork['isCrossRepository'] = True
+        fork['reviews']['nodes'] = [{'author': {'login': 'coderabbitai'}, 'state': 'APPROVED',
+                                     'commit': {'oid': 'head'}, 'body': 'Looks good'}]
+        own = json.loads(json.dumps(fork))
+        own['number'] = 2
+        own['isCrossRepository'] = False
+        setup = "printf '' >\"$excluded_authors_file\""
+        self.assertEqual(self.rows('approved_merge_rows "$(cat)"', [fork, own], setup), [2])
+        self.assertEqual(self.rows('reviewed_rows own', [fork, own], setup), [2])
+        self.assertEqual(self.rows('reviewed_rows', [fork, own], setup), [1, 2])
+        result = self.run_shell(r'''
+gh() {
+  if [[ $1 == pr && $2 == view ]]; then
+    echo '{"state":"OPEN","isCrossRepository":true,"headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviews":[]}'
+  else
+    printf 'UNSAFE MERGE: %s\n' "$*"
+  fi
+}
+merge_pr_now 1 head squash 0 1
+''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('UNSAFE MERGE', result.stdout)
+
+    def test_repository_casing_reuses_existing_state(self):
+        result = self.run_shell(r'''
+touch "$state_root/Example__Repo-auto-merge"
+configure_repo example/repo
+printf '%s %s %s\n' "$repo" "$owner" "$repo_key"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'Example/Repo Example Example__Repo')
+
+    def test_routing_scan_lock_is_not_inherited_by_started_agents(self):
+        result = self.run_shell(r'''
+route_all_unresolved() { ls -l /proc/self/fd/ >"$state_root/fds"; }
+route_all_unresolved_async snapshot
+wait
+cat "$state_root/fds"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('/proc/', result.stdout)
+        self.assertNotIn('routing.lock', result.stdout)
 
 if __name__ == '__main__':
     unittest.main()

@@ -4,11 +4,11 @@ route_all_unresolved_async() {
   local state=$1
   (
     trap - EXIT
-    if [[ -n ${monitor_lock_fd:-} ]]; then
-      exec {monitor_lock_fd}>&-
-    fi
+    close_inherited_locks
     exec {routing_scan_fd}>"/tmp/coderabbit-review-queue-$repo_key-routing.lock"
     flock -n "$routing_scan_fd" || exit 0
+    # Detached agent turns must not keep blocking later scans.
+    set_cloexec "$routing_scan_fd" || true
     route_all_unresolved "$state"
   ) &
 }

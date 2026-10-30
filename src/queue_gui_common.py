@@ -102,3 +102,19 @@ def process_is_running(pid: int) -> bool:
     except OSError:
         return False
     return proc_stat_is_running(stat)
+
+
+def monitor_is_running(pid: int) -> bool:
+    """A stale pid file can name a reused pid; require the queue script itself."""
+    if not process_is_running(pid):
+        return False
+    try:
+        arguments = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    return any(Path(os.fsdecode(argument)).name == "coderabbit-review-queue" for argument in arguments)
+
+
+def monitor_pid_files() -> list[Path]:
+    """Monitor pid files only; agent helper pid files share the prefix but have no OWNER__NAME key."""
+    return list(Path("/tmp").glob("coderabbit-review-queue-*__*.pid"))

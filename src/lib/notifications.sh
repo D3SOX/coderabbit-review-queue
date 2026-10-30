@@ -21,7 +21,8 @@ play_notification_sound() {
   percent=$((volume * 65536 / 100))
   volume_scalar=$(awk -v volume="$volume" 'BEGIN { printf "%.2f", volume / 100 }')
 
-  if [[ -n $sound_path_override ]]; then
+  # Previewing "Automatic" passes an empty path; do not fall back to the saved one.
+  if (( sound_path_overridden )) || [[ -n $sound_path_override ]]; then
     sound_file=$sound_path_override
   elif [[ -s $notify_sound_path_file ]]; then
     sound_file=$(head -n 1 "$notify_sound_path_file")

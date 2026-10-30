@@ -61,7 +61,11 @@ merge_pr_now() {
   local pr=$1 expected_head=$2 method=$3 delete_branch=$4 bypass_approval=${5:-0} data attempt
   for attempt in 1 2 3; do
     data=$(gh pr view "$pr" --repo "$repo" \
-      --json state,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,reviews) || return 1
+      --json state,isCrossRepository,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,reviews) || return 1
+    if jq -e '.isCrossRepository == true' <<<"$data" >/dev/null; then
+      printf 'PR #%s comes from a fork; merge guard refused.\n' "$pr" >&2
+      return 1
+    fi
     if jq -e --arg head "$expected_head" '
       .state == "OPEN" and .headRefOid == $head
       and (.mergeable == "CONFLICTING" or .mergeStateStatus == "DIRTY")
@@ -85,7 +89,7 @@ merge_pr_now() {
       | all(.[];
           if .__typename == "StatusContext" then .state == "SUCCESS"
           else .status == "COMPLETED"
-            and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED", "CANCELLED")) end))
+            and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED")) end))
     and (.reviews | type == "array")
     and ([.reviews[] | select(.commit.oid == $head and .state != "DISMISSED")]
       | group_by(.author.login)
@@ -122,7 +126,7 @@ merge_pr_now() {
        failedChecks: [.statusCheckRollup[]? | select(
          if .__typename == "StatusContext" then .state == "FAILURE"
          else .status == "COMPLETED" and
-           ((.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED", "CANCELLED")) | not) end)
+           ((.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED")) | not) end)
          | (.name // .context // "unknown")],
        currentHeadChangeRequests: [.reviews[]? | select(
          .commit.oid == $head and .state == "CHANGES_REQUESTED")
@@ -131,7 +135,8 @@ merge_pr_now() {
     return 1
   done
   merge_review_threads_clear "$pr" || return 1
-  local -a args=(pr merge "$pr" --repo "$repo" "--$method")
+  # Merge only the head that passed the guard, even if a push lands meanwhile.
+  local -a args=(pr merge "$pr" --repo "$repo" "--$method" --match-head-commit "$expected_head")
   [[ $delete_branch == 1 ]] && args+=(--delete-branch)
   [[ $bypass_approval == 1 ]] && args+=(--admin)
   gh "${args[@]}"
@@ -186,7 +191,7 @@ resolve_merge_conflicts() {
     return 1
   fi
   prompt="PR #$pr ($title), https://github.com/$repo/pull/$pr, could not merge because it has merge conflicts. Fetch the current PR and base branch. Stop if closed or merged. Resolve the conflicts in the PR branch, preserve unrelated work, validate and push the resolution. Wait for CI and all review bots to finish and resolve all actionable review threads. Do not trigger CodeRabbit yourself. Then rerun the merge guard on this host with the new live head SHA:"
-  prompt+=" \`~/.local/bin/coderabbit-review-queue --repo $repo --merge-now $pr \"\$(gh pr view $pr --repo $repo --json headRefOid --jq .headRefOid)\" $method $delete_branch $admin --local-agents\`. Never bypass the guard; report any remaining blocker."
+  prompt+=" \`$(installed_command) --repo $repo --merge-now $pr \"\$(gh pr view $pr --repo $repo --json headRefOid --jq .headRefOid)\" $method $delete_branch $admin --local-agents\`. Never bypass the guard; report any remaining blocker."
   local -a conflict_ids=("$token")
   resume_codex_session "$pr" "$title" "$head" "$session_id" "$session_cwd" "$prompt" conflict_ids 'merge conflict resolution'
 }
@@ -213,10 +218,10 @@ process_thread_archives_async() {
   archive_after_merge_enabled || return 0
   (
     trap - EXIT
-    [[ -z ${monitor_lock_fd:-} ]] || exec {monitor_lock_fd}>&-
-    [[ -z ${dispatch_lock_fd:-} ]] || exec {dispatch_lock_fd}>&-
+    close_inherited_locks
     exec {archive_scan_fd}>"$pending_archives_file.scan.lock"
     flock -n "$archive_scan_fd" || exit 0
+    set_cloexec "$archive_scan_fd" || true
     process_pending_thread_archives "$state"
   ) &
 }
@@ -225,10 +230,10 @@ process_approval_actions_async() {
   local state=${1:-}
   (
     trap - EXIT
-    [[ -z ${monitor_lock_fd:-} ]] || exec {monitor_lock_fd}>&-
-    [[ -z ${dispatch_lock_fd:-} ]] || exec {dispatch_lock_fd}>&-
+    close_inherited_locks
     exec {approval_scan_fd}>"$state_root/$repo_key-approval-actions.lock"
     flock -n "$approval_scan_fd" || exit 0
+    set_cloexec "$approval_scan_fd" || true
     # Quota waits have no current snapshot. Fetch inside the locked worker so
     # slow GitHub/agent lookups cannot block the review timer or overlap scans.
     [[ -n $state ]] || state=$(monitor_snapshot) || exit 1
@@ -358,8 +363,10 @@ process_pending_thread_archives() {
         >>"$temporary"
       continue
     fi
-    if [[ $pr_state == MERGED && $current_head == "$head_sha" ]]; then
-      if route_archive_codex_thread "$branch_name" "$head_sha" "$session_id"; then
+    # An agent may push fixes and merge without another review, so the merged
+    # head can differ from the one recorded at delegation.
+    if [[ $pr_state == MERGED ]]; then
+      if route_archive_codex_thread "$branch_name" "$current_head" "$session_id"; then
         printf '%s\n' "$marker" >>"$archived_heads_file"
         printf 'Archived the matching Codex task for merged PR #%s.\n' "$pr"
         continue

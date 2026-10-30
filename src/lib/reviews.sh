@@ -75,6 +75,13 @@ human_expiry() {
   fi
 }
 
+# All issue comments as one array. Without --slurp, gh emits one array per
+# page and jq would answer once per page.
+issue_comments() {
+  gh api --paginate --slurp "repos/$repo/issues/$1/comments?per_page=100" |
+    jq -c 'add // []'
+}
+
 quota_row_from_comments() {
   local since=$1
 
@@ -164,12 +171,14 @@ query_quota() {
   command=$(
     gh api -X POST "repos/$repo/issues/$pr/comments" \
       -f body='@coderabbitai rate limit'
-  )
-  command_at=$(jq -r .created_at <<<"$command")
+  ) || return 1
+  command_at=$(jq -r '.created_at // empty' <<<"$command")
+  # An empty cutoff would accept every old quota reply on the PR.
+  [[ -n $command_at ]] || return 1
 
   for ((attempt = 1; attempt <= quota_response_attempts; attempt++)); do
     poll_wait_background_actions "$attempt"
-    comments=$(gh api --paginate "repos/$repo/issues/$pr/comments")
+    comments=$(issue_comments "$pr")
     row=$(quota_row_from_comments "$command_at" <<<"$comments")
     if [[ -n $row ]]; then
       IFS=$'\t' read -r quota_remaining response_at amount unit <<<"$row"
@@ -233,7 +242,7 @@ wait_for_acceptance() {
 
   for ((attempt = 1; attempt <= acceptance_response_attempts; attempt++)); do
     poll_wait_background_actions "$attempt"
-    comments=$(gh api --paginate "repos/$repo/issues/$pr/comments")
+    comments=$(issue_comments "$pr")
     statuses=$(coderabbit_commit_statuses "$head_sha" "$triggered_at")
     result=$(
       jq -r \
@@ -312,11 +321,10 @@ wait_for_acceptance() {
     sleep "$github_poll_interval"
   done
 
-  printf 'Timed out waiting for CodeRabbit to accept PR #%s; stopping safely.\n' "$pr" >&2
+  printf 'Timed out waiting for CodeRabbit to accept PR #%s; retrying later.\n' "$pr" >&2
   desktop_notify \
-    'CodeRabbit queue stopped' \
-    "PR #$pr — $title"$'\n'"Timed out waiting for CodeRabbit to accept the request." \
-    'critical'
+    'CodeRabbit request unconfirmed' \
+    "PR #$pr — $title"$'\n'"CodeRabbit has not accepted the request yet. The duplicate guard stays active; the queue retries later."
   return 1
 }
 
@@ -326,9 +334,18 @@ wait_for_review_completion() {
   local head_sha=$3
   local title=$4
   local attempt statuses result reviews comments failure_reason approved feedback
+  local skipped_polls=0 snapshot_state
 
   for ((attempt = 1; ; attempt++)); do
     poll_wait_background_actions "$attempt"
+    if (( attempt % 12 == 1 )) && snapshot_state=$(snapshot 60) &&
+      ! jq -e --argjson pr "$pr" --arg head "$head_sha" '
+        any(.data.repository.pullRequests.nodes[]; .number == $pr and .headRefOid == $head)
+      ' <<<"$snapshot_state" >/dev/null; then
+      printf 'PR #%s was closed or received a new head; no longer watching %s.\n' \
+        "$pr" "${head_sha:0:7}"
+      return 5
+    fi
     statuses=$(coderabbit_commit_statuses "$head_sha" "$triggered_at")
     result=$(
       jq -r --arg since "$triggered_at" '
@@ -345,10 +362,22 @@ wait_for_review_completion() {
           elif .description == "Review rate limited" then "limited"
           elif ((.description // "") | test("^Review skipped: [0-9]+ files exceed the limit of [0-9]+")) then .description
           elif ((.description // "") | startswith("Review failed:")) then .description
+          elif .description == "Review skipped" then .description
           else "waiting"
           end
       ' <<<"$statuses"
     )
+    # A check run that ends without a reason (neutral, skipped) can still be
+    # superseded by the real run. Treat it as final once it persists.
+    if [[ $result == 'Review skipped' ]]; then
+      ((skipped_polls+=1))
+      if (( skipped_polls >= review_skipped_polls )); then
+        printf 'CodeRabbit skipped PR #%s without a reason; rechecking the queue.\n' "$pr"
+        return 4
+      fi
+    else
+      skipped_polls=0
+    fi
     if [[ $result == "Review skipped:"* ]]; then
       printf 'Skipping PR #%s: %s. Continuing with the queue.\n' "$pr" "$result"
       desktop_notify 'CodeRabbit review skipped' "PR #$pr: $title"$'\n'"$result"
@@ -439,6 +468,11 @@ wait_for_review_completion() {
       printf 'CodeRabbit has not finished PR #%s after ten minutes; continuing to wait.\n' \
         "$pr" >&2
     fi
+    if (( attempt >= completion_timeout_attempts )); then
+      printf 'CodeRabbit has not finished PR #%s after two hours; rechecking the queue.\n' \
+        "$pr" >&2
+      return 4
+    fi
     sleep "$github_poll_interval"
   done
 }
@@ -448,14 +482,15 @@ wait_for_review_completion() {
 watch_review_completion() {
   local pr=$1 triggered_at=$2 head_sha=$3 title=$4 status=0 state
   trap - EXIT
-  [[ -z ${monitor_lock_fd:-} ]] || exec {monitor_lock_fd}>&-
-  [[ -z ${dispatch_lock_fd:-} ]] || exec {dispatch_lock_fd}>&-
+  close_inherited_locks
   # Several reviews may run at once; poll less often to spare GitHub quota.
   github_poll_interval=15
   completion_delay_notice_attempts=40
+  completion_timeout_attempts=480
+  review_skipped_polls=8
   wait_for_review_completion "$pr" "$triggered_at" "$head_sha" "$title" || status=$?
   case $status in
-    0|3) clear_review_request "$pr" "$head_sha" ;;
+    0|3|5) clear_review_request "$pr" "$head_sha" ;;
     2)
       clear_review_request "$pr" "$head_sha"
       remember_shared_expiry "$(latest_expiry "$(monitor_snapshot)")"

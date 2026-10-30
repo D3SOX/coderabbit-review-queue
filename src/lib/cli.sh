@@ -12,6 +12,7 @@ show_status() {
   local -A finished_prs=()
   local -A queued_prs=()
   local -A approved_prs=()
+  local -A unresolved_counts=()
 
   status_quota_available || return $?
   state=$(snapshot "$snapshot_max_age")
@@ -49,6 +50,7 @@ show_status() {
       unresolved_coderabbit_rows "$pr" |
         awk 'NF { count++ } END { print count + 0 }'
     )
+    unresolved_counts[$pr]=$count
     if (( count > 0 )); then
       unresolved_prs[$pr]=1
       finished_prs[$pr]=1
@@ -71,7 +73,8 @@ show_status() {
       [[ -n $row ]] || continue
       [[ -z ${active_prs[$pr]:-} ]] || continue
       IFS=$'\t' read -r branch_name head_sha title <<<"$row"
-      count=$(unresolved_coderabbit_rows "$pr" |
+      count=${unresolved_counts[$pr]:-}
+      [[ -n $count ]] || count=$(unresolved_coderabbit_rows "$pr" |
         awk 'NF { count++ } END { print count + 0 }')
       # In agent-decision mode, an idle task with a still-unreviewed head
       # means the monitor can request another review. Show the same queue
@@ -245,7 +248,7 @@ delegate_pr_now() {
         failed=1
       fi
       break
-    done < <(reviewed_rows <<<"$state")
+    done < <(reviewed_rows own <<<"$state")
 
     if (( ! found )); then
       printf 'PR #%s is not an eligible open pull request.\n' "$requested_pr" >&2
@@ -265,7 +268,7 @@ delegate_all_now() {
       failed=1
       break
     fi
-  done < <(reviewed_rows <<<"$state")
+  done < <(reviewed_rows own <<<"$state")
   return "$failed"
 }
 
@@ -300,6 +303,16 @@ ensure_fdflags() {
 set_cloexec() {
   local fd=$1
   ensure_fdflags && fdflags -s +cloexec "$fd"
+}
+
+# Background workers must not keep the monitor's or another scan's lock alive.
+close_inherited_locks() {
+  local name
+  for name in monitor_lock_fd dispatch_lock_fd routing_scan_fd approval_scan_fd archive_scan_fd; do
+    [[ -n ${!name:-} ]] || continue
+    eval "exec ${!name}>&-"
+    printf -v "$name" ''
+  done
 }
 
 monitor_pid_alive() {
