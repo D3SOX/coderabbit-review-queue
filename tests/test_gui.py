@@ -491,6 +491,31 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual({item.data(0, Qt.UserRole) for item in window.queue.selectedItems()}, {"1", "3"})
         app.processEvents()
 
+    def test_idle_monitor_keeps_active_reviews_in_progress(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.tasks = queue_gui.QTreeWidget()
+        window.monitor_activity = ("idle", "", "", 0)
+        window.selected_repo.return_value = ""
+        window.apply_monitor_activity_to_queue = lambda: queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        status = "Active reviews:\n  #1 First\nQueued PRs:\n  #1 First (in progress)\n  #2 Second\n"
+        queue_gui.QueueWindow.populate_queue(window, status)
+        self.assertEqual(
+            [window.queue.topLevelItem(index).text(2) for index in range(2)],
+            ["In progress", "Queued"],
+        )
+        window.monitor_activity = ("checking", "2", "Second", 0)
+        queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        window.monitor_activity = ("idle", "", "", 0)
+        queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        statuses = {
+            window.queue.topLevelItem(index).data(0, Qt.UserRole): window.queue.topLevelItem(index).text(2)
+            for index in range(window.queue.topLevelItemCount())
+        }
+        self.assertEqual(statuses, {"1": "In progress", "2": "Queued"})
+        app.processEvents()
+
     def test_requeue_setting_inherits_old_choice_once_then_stays_independent(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as directory:

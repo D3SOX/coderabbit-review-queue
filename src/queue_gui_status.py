@@ -522,6 +522,8 @@ class StatusMixin:
             item = QTreeWidgetItem([f"#{number}", title, review_status])
             item.setData(0, Qt.UserRole, number)
             item.setData(0, Qt.UserRole + 1, review_status)
+            # Live monitor phases overlay this; an idle monitor restores it.
+            item.setData(0, Qt.UserRole + 2, review_status)
             self.queue.addTopLevelItem(item)
             if number == selected_number:
                 self.queue.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
