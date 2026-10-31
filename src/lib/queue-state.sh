@@ -55,7 +55,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
                       completedAt
                       title
                       summary
-                      checkSuite { app { slug } }
+                      checkSuite { app { slug } workflowRun { workflow { name } } }
                     }
                   }
                 }

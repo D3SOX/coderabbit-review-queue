@@ -2019,6 +2019,11 @@ cat "$state_root/snapshot-age"
 snapshot() { cat <<'JSON'
 {"data":{"repository":{"pullRequests":{"nodes":[{"number":42,"title":"fix review","commits":{"nodes":[{"commit":{"statusCheckRollup":{"contexts":{"nodes":[
   {"name":"build","status":"COMPLETED","conclusion":"SUCCESS"},
+  {"name":"notes","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-10-31T09:20:54Z","checkSuite":{"workflowRun":{"workflow":{"name":"Release Note"}}}},
+  {"name":"notes","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-31T09:21:24Z","checkSuite":{"workflowRun":{"workflow":{"name":"Release Note"}}}},
+  {"name":"notes","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-31T09:20:00Z","checkSuite":{"workflowRun":{"workflow":{"name":"Other"}}}},
+  {"name":"rerun","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-31T09:20:00Z"},
+  {"name":"rerun","status":"QUEUED","conclusion":null},
   {"name":"docs","status":"COMPLETED","conclusion":"SKIPPED"},
   {"name":"lint","status":"COMPLETED","conclusion":"FAILURE"},
   {"name":"test","status":"IN_PROGRESS","conclusion":null},
@@ -2039,7 +2044,7 @@ show_status 60
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
             '  #42 fix review\n    Result: Approved\n'
-            '    Checks: 3/7 passed, 2 failed, 2 pending\n    Agent task: —\n'
+            '    Checks: 4/10 passed, 3 failed, 3 pending\n    Agent task: —\n'
             '  #43 no checks\n    Result: Approved\n    Agent task: —',
             result.stdout,
         )

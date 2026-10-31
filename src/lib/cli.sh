@@ -185,7 +185,11 @@ check_summary_rows() {
       elif (.state // "" | ascii_upcase) | IN("PENDING", "EXPECTED") then "pending"
       else "failed" end;
     .data.repository.pullRequests.nodes[]
-    | [.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]? | select(length > 0) | outcome] as $outcomes
+    # A re-run supersedes earlier attempts of the same check, as on GitHub.
+    # A run that has not started yet is the newest attempt.
+    | ([.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]? | select(length > 0)]
+      | group_by([(.checkSuite.workflowRun.workflow.name // ""), (.name // .context // "")])
+      | map(max_by(.startedAt // .createdAt // "~") | outcome)) as $outcomes
     | select($outcomes | length > 0)
     | ($outcomes | map(select(. == "failed")) | length) as $failed
     | ($outcomes | map(select(. == "pending")) | length) as $pending
