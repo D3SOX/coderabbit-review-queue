@@ -17,7 +17,7 @@ STATE_ROOT = (
 )
 # Mirrors runtime_root in the CLI: locks and pid files stay out of shared /tmp.
 RUNTIME_ROOT = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
-if not (RUNTIME_ROOT.is_dir() and os.access(RUNTIME_ROOT, os.W_OK)):
+if not (RUNTIME_ROOT.is_dir() and os.access(RUNTIME_ROOT, os.W_OK | os.X_OK)):
     RUNTIME_ROOT = STATE_ROOT
 SELECTED_REPO_FILE = STATE_ROOT / "selected-repo"
 REPOSITORY_CACHE_FILE = STATE_ROOT / "repositories.txt"
