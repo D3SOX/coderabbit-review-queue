@@ -751,6 +751,27 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                     self.assertTrue(status_line.startswith("Next review: Today · Reviews in progress"), status_line)
         app.processEvents()
 
+    def test_live_monitor_phase_keeps_other_running_reviews_in_status(self):
+        for activity, expected, tray in [
+            (("reviewing", "3", "Three", 0), "Next review: Reviews in progress (#3, #1, #2)", "reviewing"),
+            (("reviewing", "1", "One", 0), "Next review: Reviews in progress (#1, #2)", "reviewing"),
+            (("checking", "4", "Four", 0),
+             "Next review: Checking availability for #4 · Reviews in progress (#1, #2)", "busy"),
+            (("triggering", "2", "Two", 0),
+             "Next review: Triggering review on #2 · Review in progress on #1", "busy"),
+        ]:
+            with self.subTest(activity=activity):
+                window = Mock()
+                window.base_window_title = "CodeRabbit Review Queue"
+                window.status_loading_repo = None
+                window.monitor_activity = activity
+                window.selected_repo.return_value = "example/repo"
+                window.active_reviews = [("1", "One"), ("2", "Two")]
+                window.has_queued_reviews = False
+                queue_gui.QueueWindow.update_countdown_display(window)
+                window.timer_label.setText.assert_called_once_with(expected)
+                self.assertEqual(window.set_tray_state.call_args.args[0], tray)
+
     def test_running_reviews_status_mentions_available_queue(self):
         for pid, expected in [(123, "Available now"), (None, "Availability unknown")]:
             with self.subTest(monitor=pid):
@@ -774,6 +795,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.status_loading_repo = "new/repo"
         window.monitor_activity = None
         window.selected_repo.return_value = "new/repo"
+        window.active_reviews = []
 
         queue_gui.QueueWindow.update_countdown_display(window)
 

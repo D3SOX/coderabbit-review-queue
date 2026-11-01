@@ -52,6 +52,12 @@ def preserve_viewport(table_name):
     return decorate
 
 
+def reviews_summary(active: list[tuple[str, str]]) -> str:
+    if len(active) == 1:
+        return f"Review in progress on #{active[0][0]}"
+    return "Reviews in progress (" + ", ".join(f"#{number}" for number, _title in active) + ")"
+
+
 class StatusMixin:
     def monitor_pid_file(self, repo: str | None = None) -> Path | None:
         repo = repo or self.selected_repo()
@@ -350,53 +356,53 @@ class StatusMixin:
     def update_countdown_display(self) -> None:
         self.setWindowTitle(self.base_window_title)
         repo = self.selected_repo() or self.base_window_title
+        # The monitor writes one phase at a time, but several reviews can run
+        # alongside it; keep every running review in the summary.
+        active = list(self.active_reviews)
+        live_number = ""
+        live_phase = ""
+        busy = ""
+        detail = ""
         if self.monitor_activity is not None:
-            phase, number, title, activity_expiry = self.monitor_activity
+            phase, live_number, title, activity_expiry = self.monitor_activity
+            live_phase = phase
             if phase == "dispatch_wait":
-                summary = "Waiting for this repository's review slot"
-                self.timer_label.setText(f"Next review: {summary}")
-                self.set_tray_state("busy", f"{repo}\n{summary}")
-                self.waiting_for_review_window = False
-                return
-            if (
+                busy = "Waiting for this repository's review slot"
+            elif (
                 phase == "waiting"
                 and activity_expiry <= QDateTime.currentSecsSinceEpoch()
             ):
-                summary = "Preparing availability check"
-                self.timer_label.setText(f"Next review: {summary}")
-                self.set_tray_state("busy", f"{repo}\n{summary}")
-                self.waiting_for_review_window = False
-                return
-            if phase in {"checking", "triggering"}:
-                if phase == "checking":
-                    summary = f"Checking availability for #{number}"
-                else:
-                    summary = f"Triggering review on #{number}"
-                self.timer_label.setText(f"Next review: {summary}")
-                self.set_tray_state("busy", f"{repo}\n{summary}\n{title}")
-                self.waiting_for_review_window = False
-                return
-            if phase == "reviewing":
-                summary = f"Review in progress on #{number}"
-                self.timer_label.setText(f"Next review: {summary}")
-                self.set_tray_state("reviewing", f"{repo}\n{summary}\n{title}")
-                self.waiting_for_review_window = False
-                return
-        if self.status_loading_repo and self.status_loading_repo == self.selected_repo():
+                busy = "Preparing availability check"
+            elif phase == "checking":
+                busy, detail = f"Checking availability for #{live_number}", title
+            elif phase == "triggering":
+                busy, detail = f"Triggering review on #{live_number}", title
+            elif phase == "reviewing" and live_number and all(
+                number != live_number for number, _title in active
+            ):
+                active.insert(0, (live_number, title))
+        if busy:
+            running = [(number, title) for number, title in active if number != live_number]
+            if running:
+                busy += f" · {reviews_summary(running)}"
+            self.timer_label.setText(f"Next review: {busy}")
+            self.set_tray_state("busy", "\n".join(filter(None, [repo, busy, detail])))
+            self.waiting_for_review_window = False
+            return
+        if (
+            live_phase != "reviewing"
+            and self.status_loading_repo
+            and self.status_loading_repo == self.selected_repo()
+        ):
             self.timer_label.setText("Next review: Loading status…")
             self.set_tray_state("busy", f"{repo}\nLoading status…")
             self.waiting_for_review_window = False
             return
-        if self.active_reviews:
-            labels = ", ".join(f"#{number}" for number, _title in self.active_reviews)
-            detail = self.active_reviews[0][1]
-            if len(self.active_reviews) == 1:
-                summary = f"Review in progress on #{self.active_reviews[0][0]}"
-            else:
-                summary = f"Reviews in progress ({labels})"
-            tooltip = f"{repo}\n{summary}\n{detail}"
+        if active:
+            summary = reviews_summary(active)
+            tooltip = f"{repo}\n{summary}\n{active[0][1]}"
             # A pending countdown takes the badge; otherwise count parallel reviews.
-            count = len(self.active_reviews) if len(self.active_reviews) > 1 else 0
+            count = len(active) if len(active) > 1 else 0
             label = ""
             next_review = ""
             if self.has_queued_reviews:
