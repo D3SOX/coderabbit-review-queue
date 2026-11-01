@@ -846,12 +846,37 @@ resolve_merge_conflicts 42 head squash 1 1
         result = self.run_shell(r'''
 auto_merge_enabled() { return 0; }
 merge_after_approval_enabled() { return 0; }
-approved_merge_rows() { printf '42\thead\tTitle\n'; }
+approved_merge_rows() { printf '42\thead\tbranch\tTitle\n'; }
+agent_task_progress() { echo 'Claude Idle'; }
 route_merge_pr() { return 42; }
 desktop_notify() { echo 'unexpected merged notification'; }
 merge_approved_reviews '{}'
 ''')
         self.assertNotIn('unexpected merged notification', result.stdout)
+
+    def test_auto_merge_waits_for_running_agents(self):
+        result = self.run_shell(r'''
+auto_merge_enabled() { return 0; }
+merge_after_approval_enabled() { return 0; }
+approved_merge_rows() { printf '1\thead1\tbusy\tBusy\n2\thead2\tsteer\tSteer\n3\thead3\tidle\tIdle\n4\thead4\tnone\tNone\n'; }
+agent_task_progress() {
+  case $1 in
+    busy) printf 'Codex Running\tTask\tWorking\n' ;;
+    steer) printf 'Claude Running (steerable)\tTask\tWorking\n' ;;
+    idle) printf 'Claude Idle\tTask\tDone\n' ;;
+    *) echo 'No matching task' ;;
+  esac
+}
+route_merge_pr() { echo "merged $1 $2"; }
+desktop_notify() { :; }
+merge_approved_reviews '{}'
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('merged 1', result.stdout)
+        self.assertNotIn('merged 2', result.stdout)
+        self.assertIn('merged 3 head3', result.stdout)
+        self.assertIn('merged 4 head4', result.stdout)
+        self.assertIn('PR #1 is approved, but its agent task is still running', result.stdout)
 
     def test_agent_merge_prompt_respects_conflict_repair_setting(self):
         for enabled in (False, True):

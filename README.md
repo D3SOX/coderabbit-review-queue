@@ -170,7 +170,8 @@ merge guard checks the live PR head, CI (including workflow runs that have not
 started yet), review states, and unresolved review threads, including feedback
 from other bots. CodeRabbit nitpicks and outside-diff findings in a review body
 can't be resolved like threads, so they count as handled once someone answers
-with a PR comment after that review. If those checks fail, it does not merge. Archiving waits until a merge is confirmed and the matching Codex task
+with a PR comment after that review. If those checks fail, it does not merge.
+An approved PR whose agent task is still running merges after the agent stops. Archiving waits until a merge is confirmed and the matching Codex task
 is idle.
 
 ## Privacy

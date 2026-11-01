@@ -224,11 +224,16 @@ resolve_merge_conflicts() {
 }
 
 merge_approved_reviews() {
-  local state=$1 pr head_sha title
+  local state=$1 pr head_sha branch_name title
   auto_merge_enabled || return 0
   merge_after_approval_enabled || return 0
-  while IFS=$'\t' read -r pr head_sha title; do
+  while IFS=$'\t' read -r pr head_sha branch_name title; do
     [[ -n ${pr:-} ]] || continue
+    # A running agent may still push or answer reviews; merge once it stops.
+    if [[ $(agent_task_progress "$branch_name" "$head_sha") =~ ^(Claude|Codex)\ Running ]]; then
+      printf 'PR #%s is approved, but its agent task is still running; merging later.\n' "$pr"
+      continue
+    fi
     if route_merge_pr "$pr" "$head_sha"; then
       desktop_notify 'CodeRabbit PR merged' "PR #$pr — $title"
     fi

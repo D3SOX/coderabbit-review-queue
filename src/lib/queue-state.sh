@@ -629,7 +629,7 @@ approved_merge_rows() {
         (.author.login // "") == "coderabbitai"
         and (.commit.oid // "") == $pr.headRefOid
         and (.state // "") == "APPROVED"))
-    | [.number, .headRefOid, .title]
+    | [.number, .headRefOid, .headRefName, .title]
     | @tsv
   '
 }
