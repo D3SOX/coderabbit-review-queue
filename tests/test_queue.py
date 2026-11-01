@@ -2198,6 +2198,25 @@ ls "$state_root" | grep -c task-progress || true
         )
         self.assertEqual(result.stdout.splitlines()[-1], '0')
 
+    def test_approved_pr_under_review_again_shows_only_in_the_queue(self):
+        result = self.run_shell(r'''
+snapshot() { printf '%s\n' '{"data":{"repository":{"pullRequests":{"nodes":[
+  {"number":2573,"title":"queued","headRefName":"a","headRefOid":"aaa"},
+  {"number":2574,"title":"active","headRefName":"b","headRefOid":"bbb"},
+  {"number":2575,"title":"done","headRefName":"c","headRefOid":"ccc"}]}}}}'; }
+status_quota_available() { :; }
+load_stale_rows() { stale=($'2573\tupdated\ta\taaa\tqueued\t-'); }
+active_review_rows() { printf '2574\tactive\n'; }
+approved_review_rows() { printf '2573\tqueued\n2574\tactive\n2575\tdone\n'; }
+reviewed_rows() { :; }
+agent_task_progress() { printf 'Claude Idle\tTask\tDone\n'; }
+show_status 60
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('  #2575 done\n    Result: Approved', result.stdout)
+        for pr in ('2573 queued', '2574 active'):
+            self.assertNotIn(f'#{pr}\n    Result:', result.stdout)
+
     def test_running_delegation_stays_finished_after_agent_push(self):
         result = self.run_shell(r'''
 printf '42\n' >"$delegated_prs_file"

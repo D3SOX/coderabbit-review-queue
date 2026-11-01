@@ -115,6 +115,9 @@ show_status() {
   for row in "${approved[@]}"; do
     IFS=$'\t' read -r pr title <<<"$row"
     [[ -z ${unresolved_prs[$pr]:-} ]] || continue
+    # An approval can land on a head pushed after the reviewed one; that head
+    # is queued or under review again, so show it only in the queue.
+    [[ -z ${active_prs[$pr]:-} && -z ${queued_prs[$pr]:-} ]] || continue
     unresolved_prs[$pr]=1
     finished_prs[$pr]=1
     approved_left+=("$row")
