@@ -989,6 +989,20 @@ ls -A | sort
             'example__repo-pending-archives.tsv', 'example__repo-pending-archives.tsv.Fresh1',
             'other__repo-snapshot.json.Zz9Yy8']))
 
+    def test_prune_removes_routing_failures_of_closed_prs(self):
+        result = self.run_shell(r'''
+cd "$state_root"
+touch example__repo-routing-failure-{1,2,3}.lock example__repo-routing-failure-3 \
+  other__repo-routing-failure-3.lock
+prune_state_files 'not json'
+ls -A | wc -l
+prune_state_files '{"data":{"repository":{"pullRequests":{"nodes":[{"number":1},{"number":12}]}}}}'
+ls -A | sort
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), [
+            '5', 'example__repo-routing-failure-1.lock', 'other__repo-routing-failure-3.lock'])
+
     def test_no_actionable_summary_counts_only_for_the_reviewed_head(self):
         # CodeRabbit keeps the last review's result in the summary and links the
         # new head in a "Review skipped" notice above it (PR #2573).

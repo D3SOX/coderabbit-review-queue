@@ -942,6 +942,15 @@ prune_state_files() {
   find "$state_root" -maxdepth 1 -mtime +0 \( \
     \( -type f \( -name "$repo_key-*.??????" -o -name "$repo_key-*.tmp.*" \) \) -o \
     \( -type d -name 'task-progress.??????' \) \) -exec rm -rf -- {} + 2>/dev/null || true
+  # Routing-failure markers and their locks are only needed while the PR is open.
+  local failure open_prs
+  if open_prs=$(jq -er '.data.repository.pullRequests.nodes | map(.number) | join(" ")' \
+    <<<"$state" 2>/dev/null); then
+    for failure in "$state_root/$repo_key"-routing-failure-*; do
+      [[ $failure =~ -routing-failure-([0-9]+)(\.lock)?$ ]] || continue
+      [[ " $open_prs " == *" ${BASH_REMATCH[1]} "* ]] || rm -f -- "$failure"
+    done
+  fi
   if [[ -f $review_requests_file ]]; then
     temporary=$(mktemp "$review_requests_file.XXXXXX")
     awk -F '\t' -v now="$now" -v max_age="$((review_request_window > 900 ? review_request_window : 900))" '
