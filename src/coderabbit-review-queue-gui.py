@@ -2,15 +2,15 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 import os
-import fcntl
 import re
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, QLocale, QProcess, QSignalBlocker, QSize, QTimer, Qt, QUrl
+from PySide6.QtCore import QDateTime, QProcess, QSignalBlocker, QSize, QTimer, Qt, QUrl
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -21,21 +21,15 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDialog,
-    QDialogButtonBox,
-    QFileDialog,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPushButton,
-    QSlider,
     QSystemTrayIcon,
-    QTextEdit,
     QSplitter,
     QStyledItemDelegate,
     QTreeWidget,
@@ -47,12 +41,9 @@ from PySide6.QtWidgets import (
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from queue_gui_common import (
-    APP_ICON_PATH, BABYSIT_DELEGATION_PROMPT, DEFAULT_DELEGATION_PROMPT,
-    REPOSITORY_CACHE_FILE, SCRIPT, SELECTED_REPO_FILE, SHORT_DELEGATION_PROMPT,
-    STATE_ROOT, STATUS_CACHE_MAX_AGE, app_icon, file_signature,
-    live_review_number, monitor_is_running, monitor_pid_files, proc_stat_is_running,
-    process_is_running,
-    ssh_config_hosts, status_belongs_to_repo,
+    REPOSITORY_CACHE_FILE, SCRIPT, SELECTED_REPO_FILE, STATE_ROOT,
+    STATUS_CACHE_MAX_AGE, app_icon, monitor_is_running, monitor_pid_files,
+    process_is_running, status_belongs_to_repo,
 )
 from queue_gui_settings import SettingsMixin
 from queue_gui_status import StatusMixin
@@ -90,7 +81,7 @@ def fit_columns(
 
 def write_state(path: Path, lines: list[str]) -> None:
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
+    temporary = path.with_name(path.name + ".tmp")
     temporary.write_text("".join(f"{line}\n" for line in lines))
     os.replace(temporary, path)
 
@@ -148,6 +139,18 @@ def enable_column_menu(tree: QTreeWidget, name: str, stretch: int) -> None:
     header.sectionMoved.connect(save_order)
 
 
+def connect_process(process: QProcess, finished: Callable[[int], None]) -> None:
+    process.finished.connect(finished)
+
+    # A program that fails to start never emits finished; report it as a
+    # failure so the handler restores the controls it disabled.
+    def failed_to_start(error: QProcess.ProcessError) -> None:
+        if error == QProcess.ProcessError.FailedToStart:
+            finished(-1)
+
+    process.errorOccurred.connect(failed_to_start)
+
+
 class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -164,7 +167,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.active_reviews: list[tuple[str, str]] = []
         self.monitor_activity: tuple[str, str, str, int] | None = None
         self.status_process = QProcess(self)
-        self.status_process.finished.connect(self.status_finished)
+        connect_process(self.status_process, self.status_finished)
         self.status_repo = ""
         self.displayed_repo = ""
         self.status_loading_repo = ""
@@ -172,6 +175,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.status_completion_signature: tuple[int, int, int] | None = None
         self.status_failures = 0
         self.status_manual = False
+        self.status_refresh_pending = False
         self.review_requests_signature: (
             tuple[
                 str,
@@ -185,14 +189,14 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.status_retry_timer.setSingleShot(True)
         self.status_retry_timer.timeout.connect(self.retry_status)
         self.repo_process = QProcess(self)
-        self.repo_process.finished.connect(self.repos_finished)
+        connect_process(self.repo_process, self.repos_finished)
         self.repo_validation_process = QProcess(self)
-        self.repo_validation_process.finished.connect(
-            self.repository_validation_finished
+        connect_process(
+            self.repo_validation_process, self.repository_validation_finished
         )
         self.pending_repository = ""
         self.delegate_process = QProcess(self)
-        self.delegate_process.finished.connect(self.delegate_finished)
+        connect_process(self.delegate_process, self.delegate_finished)
         self.delegate_repo = ""
         self.delegate_pr = ""
         self.delegate_prs: list[str] = []
@@ -699,8 +703,8 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.repo_process.start()
 
     def repos_finished(self, exit_code: int) -> None:
-        stdout = bytes(self.repo_process.readAllStandardOutput()).decode()
-        stderr = bytes(self.repo_process.readAllStandardError()).decode().strip()
+        stdout = bytes(self.repo_process.readAllStandardOutput()).decode(errors="replace")
+        stderr = bytes(self.repo_process.readAllStandardError()).decode(errors="replace").strip()
         self.repo_refresh_button.setEnabled(True)
         if exit_code != 0:
             self.show_transient_status(
@@ -716,7 +720,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
 
         repos = list(dict.fromkeys(line.strip() for line in stdout.splitlines() if line.strip()))
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
-        temporary = REPOSITORY_CACHE_FILE.with_suffix(".tmp")
+        temporary = REPOSITORY_CACHE_FILE.with_name(REPOSITORY_CACHE_FILE.name + ".tmp")
         temporary.write_text("\n".join(repos) + ("\n" if repos else ""))
         os.replace(temporary, REPOSITORY_CACHE_FILE)
         self.set_repositories(repos)
@@ -765,12 +769,21 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             )
             self.restore_selected_repo()
             return
-        listed = any(
-            self.repo_combo.itemText(index) == repo
-            for index in range(self.repo_combo.count())
+        # GitHub names are case-insensitive; reuse the listed spelling.
+        listed = next(
+            (
+                self.repo_combo.itemText(index)
+                for index in range(self.repo_combo.count())
+                if self.repo_combo.itemText(index).lower() == repo.lower()
+            ),
+            None,
         )
-        if listed:
-            self.activate_repo(repo)
+        if listed is not None:
+            if listed != repo:
+                self.repo_combo.blockSignals(True)
+                self.repo_combo.setCurrentText(listed)
+                self.repo_combo.blockSignals(False)
+            self.activate_repo(listed)
             return
         if self.repo_validation_process.state() != QProcess.NotRunning:
             return
@@ -784,9 +797,12 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.repo_validation_process.start()
 
     def repository_validation_finished(self, exit_code: int) -> None:
+        stdout = bytes(
+            self.repo_validation_process.readAllStandardOutput()
+        ).decode(errors="replace").strip()
         stderr = bytes(
             self.repo_validation_process.readAllStandardError()
-        ).decode().strip()
+        ).decode(errors="replace").strip()
         repo = self.pending_repository
         self.pending_repository = ""
         self.repo_combo.setEnabled(True)
@@ -798,6 +814,8 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             )
             self.restore_selected_repo()
             return
+        # The CLI prints the name with the casing that owns existing state.
+        repo = stdout or repo
         if self.repo_combo.findText(repo) < 0:
             self.repo_combo.blockSignals(True)
             self.repo_combo.addItem(repo)
@@ -833,7 +851,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.status_retry_timer.stop()
         self.status_failures = 0
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
-        temporary = SELECTED_REPO_FILE.with_suffix(".tmp")
+        temporary = SELECTED_REPO_FILE.with_name(SELECTED_REPO_FILE.name + ".tmp")
         temporary.write_text(repo + "\n")
         os.replace(temporary, SELECTED_REPO_FILE)
         self.load_auto_delegate(repo)
@@ -891,7 +909,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.status_cache_file(repo)
-        temporary = target.with_suffix(".tmp")
+        temporary = target.with_name(target.name + ".tmp")
         temporary.write_text(status.rstrip() + "\n")
         os.replace(temporary, target)
 
@@ -976,8 +994,8 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.update_delegate_button()
 
     def delegate_finished(self, exit_code: int) -> None:
-        stdout = bytes(self.delegate_process.readAllStandardOutput()).decode()
-        stderr = bytes(self.delegate_process.readAllStandardError()).decode().strip()
+        stdout = bytes(self.delegate_process.readAllStandardOutput()).decode(errors="replace")
+        stderr = bytes(self.delegate_process.readAllStandardError()).decode(errors="replace").strip()
         self.delegate_button.setText("Delegate selected")
         self.delegate_all_button.setText("Delegate all idle")
         confirmed = set(re.findall(r"Delegation confirmed for PR #(\d+)\.", stdout))
@@ -1094,8 +1112,8 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             self.refresh()
 
     def stop_monitor(self) -> None:
-        pid = self.monitor_pid()
-        if pid is None:
+        repo = self.selected_repo()
+        if self.monitor_pid(repo) is None:
             self.update_monitor_state()
             return
         answer = QMessageBox.question(
@@ -1103,7 +1121,10 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             "Stop monitor",
             "Stop the running CodeRabbit queue monitor?",
         )
-        if answer == QMessageBox.Yes:
+        # Read the pid again: the monitor may have exited while the dialog was
+        # open, and its pid could now belong to an unrelated process.
+        pid = self.monitor_pid(repo)
+        if answer == QMessageBox.Yes and pid is not None:
             try:
                 # Monitors are started in a new session, so kill the whole group
                 # and any waiting sleep children that inherited the lock fd.

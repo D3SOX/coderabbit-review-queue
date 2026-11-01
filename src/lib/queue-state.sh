@@ -130,6 +130,9 @@ snapshot() {
   return 1
 }
 
+# Every per-repository file name after "$repo_key-"; see configure_repo.
+repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor\.log|monitor-state\.tsv|new-items-at-top|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
+
 configure_repo() {
   local selected=$1
 
@@ -143,12 +146,14 @@ configure_repo() {
   mkdir -p "$state_root"
   # GitHub names are case-insensitive. Reuse the casing that already owns this
   # repository's settings so that differently cased input cannot start a second
-  # monitor with its own locks and defaults.
+  # monitor with its own locks and defaults. Accept only known file names: the
+  # glob also matches a longer sibling repository such as NAME-pro.
   local existing
   existing=$(
     shopt -s nullglob nocaseglob
     for file in "$state_root/$repo_key"-*; do
       file=${file##*/}
+      [[ ${file:${#repo_key}+1} =~ ^($repo_state_suffixes)$ ]] || continue
       printf '%s\n' "${file:0:${#repo_key}}"
     done | sort -u
   )
@@ -159,9 +164,8 @@ configure_repo() {
   fi
   owner=${repo%%/*}
   name=${repo#*/}
-  monitor_pid_file="/tmp/coderabbit-review-queue-$repo_key.pid"
-  monitor_lock_file="/tmp/coderabbit-review-queue-$repo_key.lock"
-  dispatch_lock_file="/tmp/coderabbit-review-queue-$repo_key-dispatch.lock"
+  monitor_pid_file="$runtime_root/coderabbit-review-queue-$repo_key.pid"
+  monitor_lock_file="$runtime_root/coderabbit-review-queue-$repo_key.lock"
   routed_threads_file="$state_root/$repo_key-routed-threads.txt"
   queue_order_file="$state_root/$repo_key-order.txt"
   quota_expiry_file="$state_root/$repo_key-quota-expiry.txt"
@@ -222,11 +226,14 @@ remote_agent_command() {
   printf -v arguments '%q ' --repo "$repo" "$@"
   command="exec \"\${XDG_BIN_HOME:-\$HOME/.local/bin}/coderabbit-review-queue\" $arguments"
   [[ -z ${remote_command_timeout:-} ]] || timeout_args=(timeout "$remote_command_timeout")
+  # Feed the command to bash on stdin: printf %q quoting is bash syntax, and
+  # the remote login shell (fish, for example) only has to run `bash -s`.
   "${timeout_args[@]}" ssh \
-    -n \
     -o BatchMode=yes \
     -o ConnectTimeout=5 \
-    -- "$host" "$command"
+    -o ServerAliveInterval=15 \
+    -o ServerAliveCountMax=2 \
+    -- "$host" bash -s <<<"$command"
 }
 
 mark_pr_delegated() {
@@ -887,7 +894,11 @@ remember_shared_expiry() {
   [[ $expiry =~ ^[0-9]+$ ]] || return 0
   current=$(shared_expiry)
   (( expiry > current )) || return 0
-  printf '%s\n' "$expiry" >"$quota_expiry_file"
+  # Replace atomically: concurrent readers must never see an empty file.
+  local temporary
+  temporary=$(mktemp "$quota_expiry_file.XXXXXX")
+  printf '%s\n' "$expiry" >"$temporary"
+  mv -- "$temporary" "$quota_expiry_file"
 }
 
 record_review_request() {

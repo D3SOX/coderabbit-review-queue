@@ -868,22 +868,23 @@ auto_merge_enabled() { return 0; }
                  'test', str(SCRIPT)],
                 input=json.dumps(data) if data is not None else '',
                 text=True, capture_output=True, timeout=5,
-                env={**os.environ, 'XDG_STATE_HOME': state, 'CODEX_HOME': f'{state}/codex'},
+                env={**os.environ, 'XDG_STATE_HOME': state, 'XDG_RUNTIME_DIR': state,
+                     'CODEX_HOME': f'{state}/codex'},
             )
 
-    def test_dispatch_and_quota_are_isolated_between_repositories_of_same_owner(self):
+    def test_monitor_and_quota_are_isolated_between_repositories_of_same_owner(self):
         result = self.run_shell(r'''
 configure_repo example/first
-first_dispatch=$dispatch_lock_file
+first_monitor=$monitor_lock_file
 first_quota=$quota_expiry_file
-exec {first_fd}>"$first_dispatch"
+exec {first_fd}>"$first_monitor"
 flock -n "$first_fd"
 printf '9999999999\n' >"$first_quota"
 configure_repo example/second
-[[ $dispatch_lock_file != "$first_dispatch" ]] || exit 41
+[[ $monitor_lock_file != "$first_monitor" ]] || exit 41
 [[ $quota_expiry_file != "$first_quota" ]] || exit 42
 [[ $(shared_expiry) == 0 ]] || exit 43
-exec {second_fd}>"$dispatch_lock_file"
+exec {second_fd}>"$monitor_lock_file"
 flock -n "$second_fd" || exit 44
 printf 'Second repository has an independent review slot.\n'
 ''')
@@ -975,7 +976,6 @@ wait_for_review_completion 2524 2026-10-30T13:50:31Z head Title
         result = self.run_shell(r'''
 recent_review_request_expiry() { echo 4102444800; }
 desktop_notify() { :; }
-release_dispatch() { :; }
 sleep() { cat "$monitor_state_file"; }
 write_monitor_state checking 2524 Title
 defer_recent_review_request 2524 head Title
@@ -1146,7 +1146,7 @@ cat "$queue_order_file"
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    env={**os.environ, 'XDG_STATE_HOME': state},
+                    env={**os.environ, 'XDG_STATE_HOME': state, 'XDG_RUNTIME_DIR': state},
                 )
                 order.write_text('3\n2\n1\n')
                 fcntl.flock(lock, fcntl.LOCK_UN)
@@ -1158,8 +1158,6 @@ cat "$queue_order_file"
         result = self.run_shell(r'''
 claim_monitor() { :; }
 cleanup_monitor() { :; }
-claim_dispatch() { :; }
-release_dispatch() { :; }
 monitor_snapshot() { printf 'snapshot\n'; }
 route_all_unresolved() { :; }
 merge_approved_reviews() { :; }
@@ -1193,17 +1191,6 @@ main --repo example/repo
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Dispatched PR #2', result.stdout)
 
-    def test_waiting_for_shared_dispatch_lock_has_distinct_monitor_state(self):
-        result = self.run_shell(r'''
-flock() {
-  if [[ $1 == -n ]]; then return 1; fi
-  head -n 1 "$monitor_state_file"
-}
-claim_dispatch
-''')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('dispatch_wait\t\t\t0', result.stdout)
-
     def test_agent_routing_does_not_block_monitor(self):
         result = self.run_shell(r'''
 route_all_unresolved() { while true; do :; done; }
@@ -1219,8 +1206,6 @@ wait 2>/dev/null || true
         result = self.run_shell(r'''
 claim_monitor() { :; }
 cleanup_monitor() { :; }
-claim_dispatch() { :; }
-release_dispatch() { :; }
 monitor_snapshot() { printf '{}'; }
 route_all_unresolved_async() { :; }
 process_approval_actions_async() { :; }
@@ -1259,7 +1244,11 @@ main --repo example/repo
         for status, verified in [(0, True), (3, False), (4, False)]:
             with self.subTest(status=status):
                 result = self.run_shell(rf'''
-wait_for_review_completion() {{ return {status}; }}
+# Hold the watcher until the first check so it cannot finish too early.
+wait_for_review_completion() {{
+  until [[ -f $state_root/release ]]; do sleep 0.01; done
+  return {status}
+}}
 monitor_snapshot() {{ printf '{{}}'; }}
 route_all_unresolved_async() {{ :; }}
 process_approval_actions_async() {{ :; }}
@@ -1267,10 +1256,12 @@ process_thread_archives_async() {{ :; }}
 stale_rows() {{ printf '42\tnow\tbranch\thead\ttitle\t-\n'; }}
 record_review_request 42 head 123
 watch_review_completion 42 now head title &
-review_watchers[42:head]=$!
+watcher=$!
+review_watchers[42:head]=$watcher
 load_stale_rows '{{}}'
 echo "while running: ${{#stale[@]}}"
-while kill -0 "${{review_watchers[42:head]}}" 2>/dev/null; do sleep 0.01; done
+touch "$state_root/release"
+while kill -0 "$watcher" 2>/dev/null; do sleep 0.01; done
 load_stale_rows '{{}}'
 echo "after exit: ${{#stale[@]}} watchers=${{#review_watchers[@]}}"
 tail -n 1 "$review_requests_file"
@@ -1354,7 +1345,7 @@ cat "$monitor_state_file"
         result = self.run_shell(r'''
 printf '%s\n' desktop >"$agent_host_file"
 timeout() { shift; "$@"; }
-ssh() { printf '%s\n' "$*"; printf 'Codex Idle (12345678)\n'; }
+ssh() { printf '%s\n' "$*"; cat; printf 'Codex Idle (12345678)\n'; }
 agent_task_progress feature abc123
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1840,6 +1831,30 @@ if resume_codex_session 42 Title head session "$worktree" prompt threads; then e
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertNotIn('Delegation confirmed', result.stdout)
 
+    def test_codex_task_turning_busy_never_counts_as_delivered(self):
+        result = self.run_shell(r'''
+worktree="$state_root/worktree"
+mkdir -p "$worktree"
+git -C "$worktree" init -q
+# Idle at both pre-dispatch checks, then busy with someone else's turn.
+codex_session_state() {
+  local calls
+  calls=$(( $(cat "$state_root/calls" 2>/dev/null || echo 0) + 1 ))
+  echo "$calls" >"$state_root/calls"
+  (( calls <= 2 )) && echo idle || echo running
+}
+codex_session_originator() { echo codex-tui; }
+codex_thread_metadata() { printf 'Task\tmodel\tmedium\t{"type":"disabled"}\tnever\n'; }
+resume_codex_via_exec() { echo 'prompt sent'; }
+gh() { echo OPEN; }
+desktop_notify() { :; }
+sleep() { :; }
+threads=(thread-1)
+resume_codex_session 42 Title head session "$worktree" prompt threads
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('prompt sent', result.stdout)
+
     def test_validate_repo_rejects_missing_repository(self):
         result = self.run_shell(r'''
 gh() { return 1; }
@@ -1861,7 +1876,8 @@ claim_monitor() { :; }
 cleanup_monitor() { :; }
 monitor_snapshot() { echo 'current snapshot'; }
 route_all_unresolved_async() { :; }
-merge_approved_reviews() {
+# Run synchronously: the real worker is a background subshell.
+process_approval_actions_async() {
   [[ $1 == 'current snapshot' ]] || exit 99
   touch "$state_root/refreshed"
 }
@@ -2251,6 +2267,177 @@ render_delegation_prompt 42 'title & details' 'thread-1 (src/app.py:7)'
         self.assertIn('https://github.com/example/repo/pull/42', result.stdout)
         self.assertIn('thread-1 (src/app.py:7)', result.stdout)
 
+    def test_pr_title_cannot_inject_prompt_placeholders(self):
+        result = self.run_shell(r'''
+delegation_prompt_mode_override=custom
+delegation_prompt_template_override='Title: {pr_title}
+Threads: {threads}'
+render_delegation_prompt 42 'Use {threads} and {repo}' 'thread-1'
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Title: Use {threads} and {repo}', result.stdout)
+        self.assertIn('Threads: thread-1', result.stdout)
+
+    def test_merge_guard_keeps_change_request_after_later_comment(self):
+        for reviews, merges in [
+            ([('CHANGES_REQUESTED', 'Please fix'), ('COMMENTED', 'One more note')], False),
+            ([('CHANGES_REQUESTED', 'Please fix'), ('APPROVED', 'Fixed'), ('COMMENTED', 'Nit')], True),
+        ]:
+            with self.subTest(reviews=reviews):
+                data = {
+                    'state': 'OPEN', 'headRefOid': 'head', 'mergeable': 'MERGEABLE',
+                    'mergeStateStatus': 'CLEAN', 'statusCheckRollup': [],
+                    'reviews': [{'author': {'login': 'alice'}, 'state': state,
+                                 'commit': {'oid': 'head'}, 'body': body}
+                                for state, body in reviews],
+                }
+                result = self.run_shell(r'''
+fixture=$(cat)
+gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '%s\n' "$fixture"
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  else
+    printf 'MERGE: %s\n' "$*"
+  fi
+}
+sleep() { :; }
+merge_pr_now 42 head squash 0 0
+''', data)
+                if merges:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn('MERGE: pr merge 42', result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertNotIn('MERGE:', result.stdout)
+
+    def test_delegation_lists_triggering_threads_with_comma_and_space(self):
+        result = self.run_shell(r'''
+agent_mode_override=auto
+agent_host() { :; }
+python3() { [[ $2 == --owner ]] && echo claudeAgent; }
+unresolved_coderabbit_rows() { printf 'thread-1\tsrc/a.py\t1\tfalse\nthread-2\tsrc/b.py\t2\tfalse\n'; }
+matching_claude_session() { printf 'session\t/worktree\n'; }
+claude_session_state() { echo idle; }
+render_delegation_prompt() { printf 'threads=%s\n' "$3"; }
+auto_merge_instruction() { :; }
+resume_claude_session() { printf '%s\n' "$5"; }
+route_unresolved_review 42 branch head Title
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r'threads=thread-1 [^\n]*, thread-2 ')
+
+    def test_successful_delegation_leaves_no_routing_failure_lock(self):
+        result = self.run_shell(r'''
+clear_routing_failure 42
+compgen -G "$state_root/*routing-failure*" || echo clean
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'clean')
+
+    def test_repository_casing_ignores_longer_sibling_repository(self):
+        result = self.run_shell(r'''
+touch "$state_root/Acme__Widget-Pro-snapshot.lock" "$state_root/Acme__Widget-Pro-auto-merge"
+configure_repo acme/widget
+printf '%s %s\n' "$repo" "$repo_key"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'acme/widget acme__widget')
+
+    def test_repository_state_suffixes_cover_every_state_file(self):
+        result = self.run_shell('printf "%s\\n" "$repo_state_suffixes"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        import re
+        pattern = re.compile(f'^({result.stdout.strip()})$')
+        sources = '\n'.join(path.read_text() for path in (SCRIPT.parent / 'lib').glob('*.sh'))
+        sources += '\n'.join(path.read_text() for path in SCRIPT.parent.glob('*.py'))
+        suffixes = set(re.findall(r'\$state_root/\$repo_key-([a-z][a-z0-9.-]*[a-z])', sources))
+        suffixes |= set(re.findall(r"replace\('/', '__'\)\}-([a-z][a-z0-9.-]*[a-z])", sources))
+        suffixes.discard('routing-failure')
+        self.assertGreater(len(suffixes), 20)
+        self.assertEqual(sorted(name for name in suffixes if not pattern.match(name)), [])
+
+    def test_locks_and_pid_files_use_the_runtime_directory(self):
+        result = self.run_shell(r'''
+printf '%s\n' "$monitor_pid_file" "$monitor_lock_file"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for path in result.stdout.split():
+            self.assertFalse(path.startswith('/tmp/'), path)
+        source = '\n'.join(path.read_text() for path in (SCRIPT.parent / 'lib').glob('*.sh'))
+        self.assertNotRegex(source, r'"/tmp/[^"]*\.(lock|pid|status)"')
+
+    def test_remote_command_runs_under_bash_whatever_the_login_shell(self):
+        result = self.run_shell(r'''
+agent_host() { echo desktop; }
+ssh() { printf 'args: %s\n' "$*"; cat; }
+remote_agent_command --task-progress $'multi\nline'
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('-o ServerAliveInterval=15', result.stdout)
+        self.assertTrue(result.stdout.splitlines()[0].endswith('-- desktop bash -s'), result.stdout)
+        command = result.stdout.split('\n', 1)[1]
+        check = subprocess.run(
+            ['bash', '-c', 'coderabbit-review-queue() { printf "<%s>" "$@"; }\n'
+             + command.replace('exec "${XDG_BIN_HOME:-$HOME/.local/bin}/coderabbit-review-queue"',
+                               'coderabbit-review-queue')],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(check.stdout, '<--repo><example/repo><--task-progress><multi\nline>')
+
+    def test_claude_session_running_a_long_tool_is_not_idle(self):
+        result = self.run_shell(r'''
+python3() { return 1; }
+claude_agents_json() { echo '[]'; }
+file="$state_root/session.jsonl"
+cat >"$file" <<'JSON'
+{"type":"user","message":{"content":"run the tests"}}
+{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"a"}]}}
+{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"b"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a"}]}}
+JSON
+touch -d '-10 minutes' "$file"
+echo "long tool: $(claude_session_state session "$file")"
+touch -d '-1 hour' "$file"
+echo "dead tool: $(claude_session_state session "$file")"
+echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b","is_error":true}]}}' >>"$file"
+echo 'partial' >>"$file"
+touch -d '-10 minutes' "$file"
+echo "interrupted: $(claude_session_state session "$file")"
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            'long tool: running', 'dead tool: idle', 'interrupted: idle'])
+
+    def test_bulk_delegation_continues_after_a_failed_pr(self):
+        result = self.run_shell(r'''
+snapshot() { echo '{}'; }
+reviewed_rows() { printf '41\tfirst\thead\tFirst\n42\tsecond\thead\tSecond\n'; }
+route_unresolved_review() { printf 'routed %s\n' "$1"; [[ $1 != 41 ]]; }
+main --repo example/repo --delegate-all
+''')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['routed 41', 'routed 42'])
+
+    def test_gui_prompts_match_cli_prompts(self):
+        import sys
+        sys.path.insert(0, str(SCRIPT.parent))
+        try:
+            import queue_gui_common
+        finally:
+            sys.path.remove(str(SCRIPT.parent))
+        for mode, expected in [
+            ('default', queue_gui_common.DEFAULT_DELEGATION_PROMPT),
+            ('short', queue_gui_common.SHORT_DELEGATION_PROMPT),
+            ('babysit', queue_gui_common.BABYSIT_DELEGATION_PROMPT),
+        ]:
+            with self.subTest(mode=mode):
+                result = self.run_shell(f'delegation_prompt_mode_override={mode}\ndelegation_prompt_template\n')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.rstrip('\n'), expected)
+
     def test_babysit_delegation_prompt_keeps_monitoring(self):
         result = self.run_shell(r'''
 delegation_prompt_mode_override=babysit
@@ -2297,8 +2484,6 @@ load_stale_rows() { stale=($'42\tnow\tbranch\thead\ttitle\t-'); }
 latest_expiry() { echo 0; }
 shared_expiry() { echo 0; }
 remember_shared_expiry() { :; }
-claim_dispatch() { :; }
-release_dispatch() { :; }
 query_quota() {
   quota_remaining=0
   quota_expiry=$(( $(date +%s) + 600 ))
@@ -2673,7 +2858,7 @@ printf '%s\n' desktop >"$agent_host_file"
 printf '%s\n' rebase >"$merge_method_file"
 printf '%s\n' 0 >"$delete_branch_file"
 printf '%s\n' 1 >"$merge_admin_file"
-ssh() { printf '%s\n' "$*"; }
+ssh() { printf '%s\n' "$*"; cat; }
 route_merge_pr 42 head
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -2716,7 +2901,9 @@ archive_matching_codex_thread feature head
 
     def test_archive_uses_desktop_daemon_when_available(self):
         result = self.run_shell(r'''
-codex_home="$state_root/codex"
+# A long $TMPDIR would exceed the AF_UNIX socket path limit.
+codex_home=$(mktemp -d /tmp/crq.XXXXXX)
+trap 'rm -rf -- "$codex_home"' EXIT
 mkdir -p "$codex_home/app-server-control"
 python3 - "$codex_home/app-server-control/app-server-control.sock" <<'PY'
 import socket, sys

@@ -210,7 +210,7 @@ class SettingsMixin:
             ),
         )
         for target, value in values:
-            temporary = target.with_suffix(".tmp")
+            temporary = target.with_name(target.name + ".tmp")
             temporary.write_text(value)
             os.replace(temporary, target)
         self.show_transient_status("Approval action settings saved")
@@ -306,16 +306,16 @@ class SettingsMixin:
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         mode_target = self.delegation_prompt_mode_file(repo)
-        mode_temporary = mode_target.with_suffix(".tmp")
+        mode_temporary = mode_target.with_name(mode_target.name + ".tmp")
         mode_temporary.write_text(mode + "\n")
         os.replace(mode_temporary, mode_target)
         steering_target = self.steer_running_agents_file(repo)
-        steering_temporary = steering_target.with_suffix(".tmp")
+        steering_temporary = steering_target.with_name(steering_target.name + ".tmp")
         steering_temporary.write_text("1\n" if steering.isChecked() else "0\n")
         os.replace(steering_temporary, steering_target)
         if mode == "custom":
             template_target = self.delegation_prompt_template_file(repo)
-            template_temporary = template_target.with_suffix(".tmp")
+            template_temporary = template_target.with_name(template_target.name + ".tmp")
             template_temporary.write_text(custom.rstrip() + "\n")
             os.replace(template_temporary, template_target)
         self.update_delegate_button()
@@ -367,7 +367,7 @@ class SettingsMixin:
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.agent_host_file(repo)
-        temporary = target.with_suffix(".tmp")
+        temporary = target.with_name(target.name + ".tmp")
         temporary.write_text(host + "\n")
         os.replace(temporary, target)
         self.load_agent_host(repo)
@@ -410,7 +410,7 @@ class SettingsMixin:
             mode = "disabled"
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.auto_delegate_file(repo)
-        temporary = target.with_suffix(".tmp")
+        temporary = target.with_name(target.name + ".tmp")
         temporary.write_text(f"{mode}\n")
         os.replace(temporary, target)
         labels = {
@@ -443,7 +443,7 @@ class SettingsMixin:
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.stop_when_empty_file(repo)
-        temporary = target.with_suffix(".tmp")
+        temporary = target.with_name(target.name + ".tmp")
         temporary.write_text("1\n" if enabled else "0\n")
         os.replace(temporary, target)
         self.show_transient_status(
@@ -474,7 +474,7 @@ class SettingsMixin:
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.ignore_drafts_file(repo)
-        temporary = target.with_suffix(".tmp")
+        temporary = target.with_name(target.name + ".tmp")
         temporary.write_text("1\n" if enabled else "0\n")
         os.replace(temporary, target)
         self.show_transient_status(
@@ -515,7 +515,7 @@ class SettingsMixin:
                 branches.append(branch)
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.excluded_branches_file(repo)
-        temporary = target.with_suffix(".tmp")
+        temporary = target.with_name(target.name + ".tmp")
         temporary.write_text("".join(f"{branch}\n" for branch in branches))
         os.replace(temporary, target)
         self.excluded_branches.blockSignals(True)
@@ -560,7 +560,7 @@ class SettingsMixin:
                 authors.append(author)
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.excluded_authors_file(repo)
-        temporary = target.with_suffix(".tmp")
+        temporary = target.with_name(target.name + ".tmp")
         temporary.write_text("".join(f"{author}\n" for author in authors))
         os.replace(temporary, target)
         self.excluded_authors.setText(", ".join(authors))
@@ -681,7 +681,7 @@ class SettingsMixin:
             (self.notify_sound_volume_file(repo), f"{volume_slider.value()}\n"),
         )
         for target, value in values:
-            temporary = target.with_suffix(".tmp")
+            temporary = target.with_name(target.name + ".tmp")
             temporary.write_text(value)
             os.replace(temporary, target)
         self.show_transient_status("Notification sound settings saved")
@@ -707,7 +707,7 @@ class SettingsMixin:
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.notify_sound_file(repo)
-        temporary = target.with_suffix(".tmp")
+        temporary = target.with_name(target.name + ".tmp")
         temporary.write_text("1\n" if enabled else "0\n")
         os.replace(temporary, target)
         self.show_transient_status(
@@ -742,7 +742,7 @@ class SettingsMixin:
             self.save_order()
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.new_items_at_top_file(repo)
-        temporary = target.with_suffix(".tmp")
+        temporary = target.with_name(target.name + ".tmp")
         temporary.write_text("1\n" if enabled else "0\n")
         os.replace(temporary, target)
         self.show_transient_status(
@@ -782,7 +782,7 @@ class SettingsMixin:
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.requeued_items_at_top_file(repo)
-        temporary = target.with_suffix(".tmp")
+        temporary = target.with_name(target.name + ".tmp")
         temporary.write_text("1\n" if enabled else "0\n")
         os.replace(temporary, target)
         self.show_transient_status(

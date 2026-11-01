@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QProcess, Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 import importlib.util
 
@@ -18,6 +18,7 @@ SPEC = importlib.util.spec_from_file_location("queue_gui", GUI_PATH)
 assert SPEC and SPEC.loader
 queue_gui = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(queue_gui)
+import queue_gui_common
 import queue_gui_settings
 import queue_gui_status
 
@@ -236,6 +237,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
 
     def test_monitor_activity_does_not_starve_successful_status_updates(self):
         window = Mock()
+        window.status_refresh_pending = False
         window.status_repo = "example/repo"
         window.displayed_repo = "example/repo"
         window.selected_repo.return_value = "example/repo"
@@ -587,7 +589,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             app.processEvents()
 
     def test_source_checkout_finds_moved_app_icon(self):
-        self.assertTrue(queue_gui.APP_ICON_PATH.is_file())
+        self.assertTrue(queue_gui_common.APP_ICON_PATH.is_file())
         self.assertFalse(queue_gui.app_icon().isNull())
 
     def test_delegated_review_mode_preserves_saved_choice(self):
@@ -646,9 +648,9 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 )
                 self.assertEqual(review_select.count(), 3)
                 review_select.setCurrentIndex(review_select.findData("agent"))
-                return queue_gui.QDialog.Accepted
+                return QDialog.Accepted
 
-            with patch.object(queue_gui.QDialog, "exec", choose_agent):
+            with patch.object(QDialog, "exec", choose_agent):
                 queue_gui.QueueWindow.configure_auto_merge(window)
 
             self.assertEqual(
@@ -686,6 +688,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
 
     def test_old_repository_refresh_cannot_fill_new_repository_tables(self):
         window = Mock()
+        window.status_refresh_pending = False
         window.status_repo = "old/repo"
         window.selected_repo.return_value = "new/repo"
         window.status_process.readAllStandardOutput.return_value = (
@@ -701,6 +704,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
 
     def test_refresh_during_repository_switch_cannot_fill_previous_tables(self):
         window = Mock()
+        window.status_refresh_pending = False
         window.status_repo = "new/repo"
         window.displayed_repo = "old/repo"
         window.status_monitor_signature = None
@@ -720,6 +724,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
 
     def test_status_result_for_other_repository_is_never_cached_or_displayed(self):
         window = Mock()
+        window.status_refresh_pending = False
         window.status_repo = "new/repo"
         window.displayed_repo = "new/repo"
         window.selected_repo.return_value = "new/repo"
@@ -737,6 +742,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
 
     def test_finished_status_applies_before_monitor_update_can_start_new_refresh(self):
         window = Mock()
+        window.status_refresh_pending = False
         window.status_repo = "old/repo"
         window.displayed_repo = "old/repo"
         window.selected_repo.return_value = "old/repo"
@@ -944,8 +950,8 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             self.assertEqual(custom, "")
 
     def test_zombie_monitor_is_not_considered_running(self):
-        self.assertFalse(queue_gui.proc_stat_is_running("1040817 (bash) Z 1 2 3"))
-        self.assertTrue(queue_gui.proc_stat_is_running("1040817 (bash) S 1 2 3"))
+        self.assertFalse(queue_gui_common.proc_stat_is_running("1040817 (bash) Z 1 2 3"))
+        self.assertTrue(queue_gui_common.proc_stat_is_running("1040817 (bash) S 1 2 3"))
 
     def test_reused_monitor_pid_is_not_considered_running(self):
         # This test process is alive but is not the queue script.
@@ -1166,9 +1172,88 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 "Host laptop desktop\n"
             )
             self.assertEqual(
-                queue_gui.ssh_config_hosts(config),
+                queue_gui_common.ssh_config_hosts(config),
                 ["desktop", "laptop"],
             )
+
+    def test_helper_that_fails_to_start_still_reports_completion(self):
+        QApplication.instance() or QApplication([])
+        process = QProcess()
+        finished = Mock()
+        queue_gui.connect_process(process, finished)
+        process.setProgram("/nonexistent/coderabbit-review-queue")
+        process.start()
+        process.waitForStarted(1000)
+        QApplication.processEvents()
+        finished.assert_called_once_with(-1)
+
+    def test_differently_cased_listed_repository_reuses_listed_name(self):
+        window = Mock()
+        window.repo_combo.count.return_value = 1
+        window.repo_combo.itemText.return_value = "Example/Repo"
+
+        queue_gui.QueueWindow.repo_changed(window, "example/repo")
+
+        window.activate_repo.assert_called_once_with("Example/Repo")
+        window.repo_validation_process.start.assert_not_called()
+
+    def test_status_ownership_ignores_repository_casing(self):
+        self.assertTrue(queue_gui_common.status_belongs_to_repo(
+            "Repository: example/repo\n", "Example/Repo"))
+        self.assertFalse(queue_gui_common.status_belongs_to_repo(
+            "Repository: example/other\n", "Example/Repo"))
+
+    def test_validated_repository_uses_canonical_name_from_cli(self):
+        window = Mock()
+        window.pending_repository = "example/repo"
+        window.repo_validation_process.readAllStandardOutput.return_value = b"Example/Repo\n"
+        window.repo_validation_process.readAllStandardError.return_value = b""
+        window.repo_combo.findText.return_value = -1
+
+        queue_gui.QueueWindow.repository_validation_finished(window, 0)
+
+        window.repo_combo.addItem.assert_called_once_with("Example/Repo")
+        window.activate_repo.assert_called_once_with("Example/Repo")
+
+    def test_manual_refresh_during_running_refresh_runs_afterwards(self):
+        window = Mock()
+        window.status_refresh_pending = False
+        window.status_process.state.return_value = QProcess.Running
+
+        queue_gui.QueueWindow.refresh(window, manual=True)
+        self.assertTrue(window.status_refresh_pending)
+
+        window.status_process.readAllStandardOutput.return_value = b""
+        window.status_process.readAllStandardError.return_value = b""
+        queue_gui.QueueWindow.status_finished(window, 0)
+
+        self.assertFalse(window.status_refresh_pending)
+        window.refresh.assert_called_once_with(manual=True)
+        window.populate_queue.assert_not_called()
+
+    def test_stop_monitor_rechecks_pid_after_confirmation(self):
+        window = Mock()
+        window.monitor_pid.side_effect = [1234, None]
+        with patch.object(queue_gui.QMessageBox, "question", return_value=queue_gui.QMessageBox.Yes), \
+             patch.object(queue_gui.os, "killpg") as killpg, \
+             patch.object(queue_gui.os, "kill") as kill:
+            queue_gui.QueueWindow.stop_monitor(window)
+        killpg.assert_not_called()
+        kill.assert_not_called()
+
+    def test_settings_temp_file_is_unique_for_dotted_repository_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "example__site.js-column-state"
+            # A suffix-based temp name would be shared by every file of the repo.
+            (Path(directory) / "example__site.tmp").mkdir()
+            with patch.object(queue_gui, "STATE_ROOT", Path(directory)):
+                queue_gui.write_state(target, ["one"])
+            self.assertEqual(target.read_text(), "one\n")
+        source = "".join(
+            (GUI_PATH.parent / name).read_text()
+            for name in ("coderabbit-review-queue-gui.py", "queue_gui_settings.py", "queue_gui_status.py")
+        )
+        self.assertNotIn('with_suffix(".tmp")', source)
 
     def test_unlisted_repository_is_validated_before_activation(self):
         window = Mock()
@@ -1207,21 +1292,6 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             "Next review: Preparing availability check"
         )
 
-    def test_dispatch_wait_is_scoped_to_current_repository(self):
-        window = Mock()
-        window.monitor_activity = ("dispatch_wait", "", "", 0)
-        window.active_reviews = []
-        window.has_queued_reviews = True
-        window.next_review_at = None
-        window.status_loading_repo = ""
-        window.selected_repo.return_value = "example/repo"
-
-        queue_gui.QueueWindow.update_countdown_display(window)
-
-        window.timer_label.setText.assert_called_once_with(
-            "Next review: Waiting for this repository's review slot"
-        )
-
     def test_stopped_monitor_does_not_claim_review_is_available(self):
         window = Mock()
         window.monitor_activity = None
@@ -1249,7 +1319,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             window.monitor_pid.return_value = None
             window.review_requests_signature = (
                 "example/repo",
-                queue_gui.file_signature(request_file),
+                queue_gui_common.file_signature(request_file),
                 None,
                 None,
             )
@@ -1261,7 +1331,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             window.refresh.assert_called_once_with()
             self.assertEqual(
                 window.review_requests_signature,
-                ("example/repo", queue_gui.file_signature(request_file), None, None),
+                ("example/repo", queue_gui_common.file_signature(request_file), None, None),
             )
 
     def test_completion_marker_moves_stale_active_row_immediately(self):
@@ -1306,7 +1376,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
 
             self.assertEqual(
                 window.status_monitor_signature,
-                queue_gui.file_signature(monitor),
+                queue_gui_common.file_signature(monitor),
             )
 
     def test_tables_are_separated_by_vertical_splitter(self):

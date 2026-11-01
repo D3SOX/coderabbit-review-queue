@@ -174,6 +174,7 @@ render_delegation_prompt() {
   local pr=$1 title=$2 threads=$3 template
   template=$(delegation_prompt_template)
   python3 -c '
+import re
 import sys
 template = sys.stdin.read()
 values = {
@@ -183,9 +184,12 @@ values = {
     "{pr_url}": f"https://github.com/{sys.argv[3]}/pull/{sys.argv[1]}",
     "{threads}": sys.argv[4],
 }
-for placeholder, value in values.items():
-    template = template.replace(placeholder, value)
-sys.stdout.write(template)
+# One pass, so a PR title containing "{threads}" is not expanded again.
+sys.stdout.write(re.sub(
+    r"\{(?:pr_number|pr_title|repo|pr_url|threads)\}",
+    lambda match: values[match.group(0)],
+    template,
+))
 ' "$pr" "$title" "$repo" "$threads" <<<"$template"
 }
 
@@ -481,12 +485,13 @@ resume_codex_via_daemon() {
   log_path="/tmp/coderabbit-review-queue-codex-$session_id.log"
   printf -v command '%q ' env TERM=xterm-256color codex \
     --remote "unix://$socket_path" --no-alt-screen resume "$session_id" "$prompt"
-  pid_file="/tmp/coderabbit-review-queue-codex-$session_id.pid"
+  pid_file="$runtime_root/coderabbit-review-queue-codex-$session_id.pid"
   rm -f -- "$pid_file"
   setsid -f bash -c '
     umask 077
     printf "%s\n" "$$" >"$1"
-    tail -f /dev/null | script -qefc "$2" "$3"
+    # script runs the command with $SHELL; printf %q quoting needs bash.
+    tail -f /dev/null | SHELL=$BASH script -qefc "$2" "$3"
   ' _ "$pid_file" "$command" "$log_path" </dev/null >/dev/null 2>&1
   for attempt in {1..20}; do
     [[ -s $pid_file ]] && break
@@ -507,7 +512,7 @@ resume_codex_via_daemon() {
     kill -- -"$client_pid" 2>/dev/null || true
     return 1
   fi
-  watcher_pid_file="/tmp/coderabbit-review-queue-codex-$session_id-watcher.pid"
+  watcher_pid_file="$runtime_root/coderabbit-review-queue-codex-$session_id-watcher.pid"
   rm -f -- "$watcher_pid_file"
   setsid -f bash -c '
     printf "%s\n" "$$" >"$1"
@@ -578,7 +583,7 @@ claude_can_receive_review() {
 resume_codex_via_exec() {
   local session_id=$1 client_pid pid_file log_path attempt
   shift
-  pid_file="/tmp/coderabbit-review-queue-codex-$session_id-exec.pid"
+  pid_file="$runtime_root/coderabbit-review-queue-codex-$session_id-exec.pid"
   log_path="/tmp/coderabbit-review-queue-codex-$session_id-exec.log"
   rm -f -- "$pid_file"
   (
@@ -618,8 +623,8 @@ resume_codex_via_exec() {
 resume_claude_via_cli() {
   local session_id=$1 pid_file status_file log_path client_pid attempt
   shift
-  pid_file="/tmp/coderabbit-review-queue-claude-$session_id-cli.pid"
-  status_file="/tmp/coderabbit-review-queue-claude-$session_id-cli.status"
+  pid_file="$runtime_root/coderabbit-review-queue-claude-$session_id-cli.pid"
+  status_file="$runtime_root/coderabbit-review-queue-claude-$session_id-cli.status"
   log_path="/tmp/coderabbit-review-queue-claude-$session_id-cli.log"
   rm -f -- "$pid_file" "$status_file"
   (
@@ -783,7 +788,7 @@ route_unresolved_review() {
   fi
 
   prompt=$(render_delegation_prompt \
-    "$pr" "$title" "$(IFS=', '; printf '%s' "${new_threads[*]}")")
+    "$pr" "$title" "$(printf '%s, ' "${new_threads[@]}" | sed 's/, $//')")
   for thread_id in "${new_ids[@]}"; do
     if [[ $thread_id == nitpick:* || $thread_id == outside-diff:* ]]; then
       prompt+=$'\n\nCodeRabbit also left review-body feedback (nitpicks or outside-diff findings) on the current PR head. Fetch that review with gh, verify and address its findings; these findings are not resolvable review threads.'
@@ -823,7 +828,7 @@ resume_codex_session() {
 
   python3 "$script_dir/t3-delegate.py" --is-top-level "$session_id" || return 1
   git -C "$session_cwd" rev-parse --git-common-dir >/dev/null || return 1
-  routing_lock_path="/tmp/coderabbit-review-queue-$repo_key-codex-$session_id.lock"
+  routing_lock_path="$runtime_root/coderabbit-review-queue-$repo_key-codex-$session_id.lock"
   exec {routing_lock_fd}>"$routing_lock_path"
   if ! flock -n "$routing_lock_fd"; then
     printf 'Codex routing for PR #%s is already being dispatched; skipping duplicate.\n' \
@@ -893,11 +898,11 @@ resume_codex_session() {
       exit $?
     fi
     [[ $(codex_session_state "$session_id") == idle ]] || exit 75
-    if [[ $originator == 'Codex Desktop' ]] && \
-      resume_codex_via_daemon "$session_id" "$prompt"; then
-      exit 0
+    if [[ $originator == 'Codex Desktop' ]]; then
+      resume_codex_via_daemon "$session_id" "$prompt" && exit 0
+      # The daemon client can deliver the prompt and still exit early.
+      [[ $(codex_session_state "$session_id") != running ]] || exit 0
     fi
-    [[ $(codex_session_state "$session_id") != running ]] || exit 0
     resume_codex_via_exec "$session_id" "${codex_args[@]}"
   ); then
     mark_pr_delegated "$pr"
@@ -938,7 +943,7 @@ resume_claude_session() {
   git_common_dir=$(
     git -C "$session_cwd" rev-parse --path-format=absolute --git-common-dir
   ) || return 1
-  routing_lock_path="/tmp/coderabbit-review-queue-$repo_key-claude-$session_id.lock"
+  routing_lock_path="$runtime_root/coderabbit-review-queue-$repo_key-claude-$session_id.lock"
   exec {routing_lock_fd}>"$routing_lock_path"
   if ! flock -n "$routing_lock_fd"; then
     printf 'Claude routing for PR #%s is already being dispatched; skipping duplicate.\n' \
@@ -1015,6 +1020,8 @@ resume_claude_session() {
 
 clear_routing_failure() {
   local failure_file="$state_root/$repo_key-routing-failure-$1" failure_lock_fd
+  # Most deliveries never failed; skip creating a lock file for them.
+  [[ -f $failure_file ]] || return 0
   exec {failure_lock_fd}>"$failure_file.lock"
   flock -x "$failure_lock_fd"
   [[ ! -f $failure_file ]] || rm -f -- "$failure_file"

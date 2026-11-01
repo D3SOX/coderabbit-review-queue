@@ -121,7 +121,9 @@ merge_pr_now() {
           else .status == "COMPLETED"
             and (.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED")) end))
     and (.reviews | type == "array")
-    and ([.reviews[] | select(.commit.oid == $head and .state != "DISMISSED")]
+    # A later COMMENTED review must not hide an earlier change request.
+    and ([.reviews[] | select(.commit.oid == $head
+        and (.state | IN("APPROVED", "CHANGES_REQUESTED")))]
       | group_by(.author.login)
       | all(.[]; $admin == 1 or .[-1].state != "CHANGES_REQUESTED"))
   ' <<<"$data" >/dev/null; then

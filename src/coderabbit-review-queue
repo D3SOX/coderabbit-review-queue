@@ -15,12 +15,15 @@ claude_home=${CLAUDE_CONFIG_DIR:-${CLAUDE_HOME:-"$HOME/.claude"}}
 claude_projects_root="$claude_home/projects"
 _claude_agents_json=''
 state_root="${XDG_STATE_HOME:-"$HOME/.local/state"}/coderabbit-review-queue"
+# Locks and pid files belong in the private runtime directory, not shared /tmp.
+# Default to the systemd path so processes without XDG_RUNTIME_DIR agree.
+runtime_root=${XDG_RUNTIME_DIR:-/run/user/$UID}
+[[ -d $runtime_root && -w $runtime_root && -x $runtime_root ]] ||
+  runtime_root=$state_root
 gui_script="$script_dir/coderabbit-review-queue-gui.py"
 monitor_pid_file=''
 monitor_lock_file=''
 monitor_lock_fd=''
-dispatch_lock_file=''
-dispatch_lock_fd=''
 routed_threads_file=''
 queue_order_file=''
 quota_expiry_file=''
@@ -97,8 +100,8 @@ source "$script_dir/lib/agent-progress.sh"
 source "$script_dir/lib/merging.sh"
 source "$script_dir/lib/cli.sh"
 
-# Returns 0 after waiting out a recent request for this head, with dispatch
-# released; the caller then restarts its loop iteration.
+# Returns 0 after waiting out a recent request for this head; the caller then
+# restarts its loop iteration.
 defer_recent_review_request() {
   local pr=$1 head_sha=$2 title=$3 request_expiry now wake
   if ! request_expiry=$(recent_review_request_expiry "$pr" "$head_sha"); then
@@ -107,7 +110,6 @@ defer_recent_review_request() {
     desktop_notify \
       'CodeRabbit duplicate check delayed' \
       "PR #$pr — $title"$'\n''Could not verify recent requests. Retrying in two minutes; no review was triggered.'
-    release_dispatch
     sleep "$quota_retry_delay"
     return 0
   fi
@@ -120,7 +122,6 @@ defer_recent_review_request() {
   desktop_notify \
     'CodeRabbit duplicate prevented' \
     "PR #$pr — $title"$'\n'"A review was already requested recently. Rechecking $wake."
-  release_dispatch
   sleep "$((request_expiry - now))"
 }
 
@@ -474,7 +475,6 @@ while true; do
     continue
   fi
 
-  claim_dispatch
   IFS=$'\t' read -r quota_pr _updated_at _branch_name _head_sha quota_title _limit_at \
     <<<"${stale[0]}"
   write_monitor_state checking "$quota_pr" "$quota_title"
@@ -482,7 +482,6 @@ while true; do
   state=$(monitor_snapshot)
   load_stale_rows "$state" 1
   if (( ${#stale[@]} == 0 )); then
-    release_dispatch
     continue
   fi
 
@@ -491,7 +490,6 @@ while true; do
   (( quota_expiry > current_expiry )) && current_expiry=$quota_expiry
   now=$(date -u +%s)
   if (( current_expiry > now )); then
-    release_dispatch
     write_monitor_state waiting '' '' "$current_expiry"
     wait_until "$current_expiry"
     continue
@@ -505,7 +503,6 @@ while true; do
     continue
   fi
   if ! query_quota "$quota_pr" "$quota_title"; then
-    release_dispatch
     sleep "$quota_retry_delay"
     continue
   fi
@@ -515,13 +512,11 @@ while true; do
   agent_review_decision_cache=()
   load_stale_rows "$state" 1
   if (( ${#stale[@]} == 0 )); then
-    release_dispatch
     continue
   fi
 
   if (( quota_remaining == 0 )); then
     now=$(date -u +%s)
-    release_dispatch
     if (( quota_expiry > now )); then
       remember_shared_expiry "$quota_expiry"
       write_monitor_state waiting '' '' "$quota_expiry"
@@ -561,7 +556,6 @@ while true; do
     desktop_notify \
       'CodeRabbit request delayed' \
       "PR #$pr — $title"$'\n''The post result was uncertain. A duplicate guard remains active.'
-    release_dispatch
     sleep "$quota_retry_delay"
     continue
   fi
@@ -578,15 +572,12 @@ while true; do
       clear_review_request "$pr" "$head_sha"
       state=$(monitor_snapshot)
       remember_shared_expiry "$(latest_expiry "$state")"
-      release_dispatch
       continue
     fi
     # Keep the request guard: CodeRabbit may still accept it late.
-    release_dispatch
     sleep "$quota_retry_delay"
     continue
   fi
-  release_dispatch
 done
 }
 
