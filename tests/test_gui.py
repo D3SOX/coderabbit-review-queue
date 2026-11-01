@@ -56,6 +56,48 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 queue_gui.QueueWindow.delegate_finished(window, 0)
                 self.assertEqual(window.mark_delegation_running.called, confirmed)
 
+    def test_header_menu_hides_columns_and_remembers_them(self):
+        app = QApplication.instance() or QApplication([])
+        from PySide6.QtCore import QPoint
+
+        def pick(window, tree, label):
+            before = set(tree.findChildren(queue_gui.QMenu))
+            tree.header().customContextMenuRequested.emit(QPoint(0, 0))
+            [menu] = [m for m in tree.findChildren(queue_gui.QMenu) if m not in before]
+            action = next(a for a in menu.actions() if a.text() == label)
+            if action.isEnabled():
+                action.trigger()
+            menu.close()
+            app.processEvents()
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(queue_gui, 'STATE_ROOT', Path(directory)), \
+                patch.object(queue_gui.QueueWindow, 'load_cached_repos', return_value=True):
+            window = queue_gui.QueueWindow()
+            header = window.tasks.header()
+            pick(window, window.tasks, 'Checks')
+            pick(window, window.tasks, 'Latest progress')
+            self.assertTrue(header.isSectionHidden(3))
+            self.assertTrue(header.isSectionHidden(6))
+            self.assertTrue(header.stretchLastSection())
+            self.assertFalse(window.queue.header().isSectionHidden(2))
+            window.close()
+
+            window = queue_gui.QueueWindow()
+            header = window.tasks.header()
+            self.assertEqual([header.isSectionHidden(c) for c in range(7)],
+                             [False, False, False, True, False, False, True])
+            pick(window, window.tasks, 'Latest progress')
+            self.assertFalse(header.isSectionHidden(6))
+            self.assertFalse(header.stretchLastSection())
+
+            for label in ['PR', 'Title']:
+                pick(window, window.queue, label)
+            pick(window, window.queue, 'Status')
+            self.assertEqual([window.queue.header().isSectionHidden(c) for c in range(3)],
+                             [True, True, False])
+            window.close()
+
     def test_finished_reviews_support_ctrl_and_shift_selection(self):
         app = QApplication.instance() or QApplication([])
         from PySide6.QtTest import QTest

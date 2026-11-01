@@ -88,6 +88,50 @@ def fit_columns(
         header.resizeSection(column, width)
 
 
+def enable_column_menu(tree: QTreeWidget, name: str, stretch: int) -> None:
+    """Right-clicking the header shows or hides columns; the choice is saved."""
+    header = tree.header()
+    labels = [tree.headerItem().text(column) for column in range(tree.columnCount())]
+    state_file = STATE_ROOT / f"hidden-columns-{name}"
+
+    def apply(hidden: set[str]) -> None:
+        for column, label in enumerate(labels):
+            header.setSectionHidden(column, label in hidden)
+        # Without its stretching column, the last visible one fills the width.
+        header.setStretchLastSection(header.isSectionHidden(stretch))
+
+    def toggle(label: str, visible: bool) -> None:
+        hidden = {labels[c] for c in range(len(labels)) if header.isSectionHidden(c)}
+        hidden = hidden - {label} if visible else hidden | {label}
+        apply(hidden)
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        temporary = state_file.with_suffix(".tmp")
+        temporary.write_text("".join(f"{label}\n" for label in labels if label in hidden))
+        os.replace(temporary, state_file)
+
+    def show_menu(position) -> None:
+        menu = QMenu(tree)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
+        visible_count = sum(not header.isSectionHidden(c) for c in range(len(labels)))
+        for column, label in enumerate(labels):
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(not header.isSectionHidden(column))
+            # Keep at least one column visible.
+            action.setEnabled(not (action.isChecked() and visible_count == 1))
+            action.toggled.connect(lambda visible, label=label: toggle(label, visible))
+        menu.popup(header.mapToGlobal(position))
+
+    try:
+        saved = set(state_file.read_text().splitlines())
+    except OSError:
+        saved = set()
+    hidden = saved & set(labels)
+    apply(set() if hidden == set(labels) else hidden)
+    header.setContextMenuPolicy(Qt.CustomContextMenu)
+    header.customContextMenuRequested.connect(show_menu)
+
+
 class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -331,7 +375,11 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.queue.setAlternatingRowColors(True)
         self.queue.setSelectionMode(QTreeWidget.ExtendedSelection)
         self.queue.setToolTip("Select multiple PRs with Ctrl-click or Shift-click to move them together.")
-        fit_columns(self.queue, fitted=(0, 2), stretch=1)
+        # Status follows the title instead of sitting at the far right; the
+        # cap keeps a very long title from pushing it out of view.
+        fit_columns(self.queue, fitted=(0, 1), stretch=2)
+        self.queue.header().setMaximumSectionSize(800)
+        enable_column_menu(self.queue, "queue", stretch=2)
         self.queue.itemDoubleClicked.connect(
             lambda item, _column: self.open_pr_number(item.data(0, Qt.UserRole))
         )
@@ -350,6 +398,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             "Delegate / steer selected acts on eligible selected PRs only."
         )
         fit_columns(self.tasks, fitted=(0, 2, 3, 4), stretch=6, widths={1: 380, 5: 280})
+        enable_column_menu(self.tasks, "finished", stretch=6)
         self.tasks.itemDoubleClicked.connect(
             lambda item, _column: self.open_pr_number(item.data(0, Qt.UserRole))
         )
