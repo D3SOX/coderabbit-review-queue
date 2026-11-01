@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QTextEdit,
     QSplitter,
+    QStyledItemDelegate,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -64,12 +66,39 @@ def task_can_delegate(item: QTreeWidgetItem, steering: bool) -> bool:
     )
 
 
+class PaddedDelegate(QStyledItemDelegate):
+    """Keeps columns sized to their content from touching the next column."""
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        return QSize(size.width() + 12, size.height())
+
+
+def fit_columns(
+    tree: QTreeWidget, fitted: tuple[int, ...], stretch: int, widths: dict[int, int] | None = None
+) -> None:
+    """Size short columns to their content and give the rest to one column."""
+    tree.setItemDelegate(PaddedDelegate(tree))
+    header = tree.header()
+    header.setStretchLastSection(False)
+    header.setSectionResizeMode(stretch, QHeaderView.Stretch)
+    for column in fitted:
+        header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+    for column, width in (widths or {}).items():
+        header.resizeSection(column, width)
+
+
 class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.base_window_title = "CodeRabbit Review Queue"
         self.setWindowTitle(self.base_window_title)
-        self.resize(1100, 820)
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        self.resize(
+            min(1440, available.width()) if available else 1440,
+            min(820, available.height()) if available else 820,
+        )
         self.next_review_at: QDateTime | None = None
         self.has_queued_reviews = False
         self.active_reviews: list[tuple[str, str]] = []
@@ -302,9 +331,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.queue.setAlternatingRowColors(True)
         self.queue.setSelectionMode(QTreeWidget.ExtendedSelection)
         self.queue.setToolTip("Select multiple PRs with Ctrl-click or Shift-click to move them together.")
-        self.queue.header().resizeSection(0, 90)
-        self.queue.header().resizeSection(1, 520)
-        self.queue.header().resizeSection(2, 120)
+        fit_columns(self.queue, fitted=(0, 2), stretch=1)
         self.queue.itemDoubleClicked.connect(
             lambda item, _column: self.open_pr_number(item.data(0, Qt.UserRole))
         )
@@ -322,12 +349,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             "Select multiple PRs with Ctrl-click or Shift-click. "
             "Delegate / steer selected acts on eligible selected PRs only."
         )
-        self.tasks.header().resizeSection(0, 90)
-        self.tasks.header().resizeSection(1, 300)
-        self.tasks.header().resizeSection(2, 120)
-        self.tasks.header().resizeSection(3, 110)
-        self.tasks.header().resizeSection(4, 130)
-        self.tasks.header().resizeSection(5, 260)
+        fit_columns(self.tasks, fitted=(0, 2, 3, 4), stretch=6, widths={1: 380, 5: 280})
         self.tasks.itemDoubleClicked.connect(
             lambda item, _column: self.open_pr_number(item.data(0, Qt.UserRole))
         )
