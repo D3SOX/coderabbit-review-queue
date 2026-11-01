@@ -107,13 +107,31 @@ show_status() {
     done <"$delegated_prs_file"
   fi
 
+  # PRs approved without delegation still have agent tasks. Each lookup scans
+  # agent sessions or asks the agent host, so run them in parallel.
+  local progress_dir
+  local -a approved_left=() lookups=()
+  progress_dir=$(mktemp -d "$state_root/task-progress.XXXXXX")
   for row in "${approved[@]}"; do
     IFS=$'\t' read -r pr title <<<"$row"
     [[ -z ${unresolved_prs[$pr]:-} ]] || continue
     unresolved_prs[$pr]=1
     finished_prs[$pr]=1
-    add_finished "$pr" "$title" Approved —
+    approved_left+=("$row")
+    IFS=$'\t' read -r branch_name head_sha <<<"$(jq -r --argjson pr "$pr" '
+      .data.repository.pullRequests.nodes[] | select(.number == $pr)
+      | [.headRefName, .headRefOid] | @tsv' <<<"$state")"
+    [[ -n ${branch_name:-} ]] || continue
+    agent_task_progress "$branch_name" "$head_sha" >"$progress_dir/$pr" &
+    lookups+=("$!")
   done
+  (( ${#lookups[@]} == 0 )) || wait "${lookups[@]}" || true
+  for row in "${approved_left[@]}"; do
+    IFS=$'\t' read -r pr title <<<"$row"
+    task_progress=$(cat "$progress_dir/$pr" 2>/dev/null || true)
+    add_finished "$pr" "$title" Approved "${task_progress:-—}"
+  done
+  rm -rf "$progress_dir"
 
   if [[ -s $review_completion_file ]]; then
     IFS=$'\t' read -r completed_pr completed_head completed_title \

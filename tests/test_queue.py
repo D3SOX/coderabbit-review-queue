@@ -2072,6 +2072,36 @@ show_status 60
             result.stdout,
         )
 
+    def test_approved_reviews_show_their_agent_task(self):
+        result = self.run_shell(r'''
+snapshot() { printf '%s\n' '{"data":{"repository":{"pullRequests":{"nodes":[
+  {"number":2580,"title":"sliders","headRefName":"caption-style-sliders","headRefOid":"aaa"},
+  {"number":2576,"title":"tooltips","headRefName":"fix-tooltip-positioning","headRefOid":"bbb"},
+  {"number":2577,"title":"no task","headRefName":"other","headRefOid":"ccc"}]}}}}'; }
+status_quota_available() { :; }
+load_stale_rows() { stale=(); }
+active_review_rows() { :; }
+approved_review_rows() { printf '2580\tsliders\n2576\ttooltips\n2577\tno task\n'; }
+reviewed_rows() { :; }
+agent_task_progress() {
+  case $1 in
+    caption-style-sliders) printf 'Claude Idle\tCaption sliders\tWaiting on CI\n' ;;
+    fix-tooltip-positioning) printf 'Claude Running\tTooltip fix\tFixing lint\n' ;;
+    *) printf 'No matching task\n' ;;
+  esac
+}
+show_status 60
+ls "$state_root" | grep -c task-progress || true
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            '  #2580 sliders\n    Result: Approved\n    Agent task: Claude Idle\tCaption sliders\tWaiting on CI\n'
+            '  #2576 tooltips\n    Result: Approved\n    Agent task: Claude Running\tTooltip fix\tFixing lint\n'
+            '  #2577 no task\n    Result: Approved\n    Agent task: No matching task',
+            result.stdout,
+        )
+        self.assertEqual(result.stdout.splitlines()[-1], '0')
+
     def test_running_delegation_stays_finished_after_agent_push(self):
         result = self.run_shell(r'''
 printf '42\n' >"$delegated_prs_file"
