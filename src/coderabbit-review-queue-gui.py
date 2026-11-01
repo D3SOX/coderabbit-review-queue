@@ -88,11 +88,27 @@ def fit_columns(
         header.resizeSection(column, width)
 
 
+def write_state(path: Path, lines: list[str]) -> None:
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text("".join(f"{line}\n" for line in lines))
+    os.replace(temporary, path)
+
+
+def read_state(path: Path) -> list[str]:
+    try:
+        return path.read_text().splitlines()
+    except OSError:
+        return []
+
+
 def enable_column_menu(tree: QTreeWidget, name: str, stretch: int) -> None:
-    """Right-clicking the header shows or hides columns; the choice is saved."""
+    """Right-clicking the header shows or hides columns. Hidden columns and the
+    column order are saved by label, so they survive added or renamed columns."""
     header = tree.header()
     labels = [tree.headerItem().text(column) for column in range(tree.columnCount())]
     state_file = STATE_ROOT / f"hidden-columns-{name}"
+    order_file = STATE_ROOT / f"column-order-{name}"
 
     def apply(hidden: set[str]) -> None:
         for column, label in enumerate(labels):
@@ -104,10 +120,7 @@ def enable_column_menu(tree: QTreeWidget, name: str, stretch: int) -> None:
         hidden = {labels[c] for c in range(len(labels)) if header.isSectionHidden(c)}
         hidden = hidden - {label} if visible else hidden | {label}
         apply(hidden)
-        STATE_ROOT.mkdir(parents=True, exist_ok=True)
-        temporary = state_file.with_suffix(".tmp")
-        temporary.write_text("".join(f"{label}\n" for label in labels if label in hidden))
-        os.replace(temporary, state_file)
+        write_state(state_file, [label for label in labels if label in hidden])
 
     def show_menu(position) -> None:
         menu = QMenu(tree)
@@ -122,14 +135,17 @@ def enable_column_menu(tree: QTreeWidget, name: str, stretch: int) -> None:
             action.toggled.connect(lambda visible, label=label: toggle(label, visible))
         menu.popup(header.mapToGlobal(position))
 
-    try:
-        saved = set(state_file.read_text().splitlines())
-    except OSError:
-        saved = set()
-    hidden = saved & set(labels)
+    def save_order() -> None:
+        write_state(order_file, [labels[header.logicalIndex(v)] for v in range(len(labels))])
+
+    known = [label for label in read_state(order_file) if label in labels]
+    for visual, label in enumerate(dict.fromkeys(known)):
+        header.moveSection(header.visualIndex(labels.index(label)), visual)
+    hidden = set(read_state(state_file)) & set(labels)
     apply(set() if hidden == set(labels) else hidden)
     header.setContextMenuPolicy(Qt.CustomContextMenu)
     header.customContextMenuRequested.connect(show_menu)
+    header.sectionMoved.connect(save_order)
 
 
 class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):

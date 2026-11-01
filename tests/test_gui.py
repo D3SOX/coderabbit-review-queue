@@ -90,6 +90,15 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             pick(window, window.tasks, 'Latest progress')
             self.assertFalse(header.isSectionHidden(6))
             self.assertFalse(header.stretchLastSection())
+            header.moveSection(header.visualIndex(3), 1)
+            header.moveSection(header.visualIndex(5), 2)
+            window.close()
+
+            window = queue_gui.QueueWindow()
+            header = window.tasks.header()
+            self.assertEqual([window.tasks.headerItem().text(header.logicalIndex(v)) for v in range(7)],
+                             ['PR', 'Checks', 'Task', 'Title', 'Result', 'Agent status', 'Latest progress'])
+            self.assertTrue(header.isSectionHidden(3))
 
             for label in ['PR', 'Title']:
                 pick(window, window.queue, label)
