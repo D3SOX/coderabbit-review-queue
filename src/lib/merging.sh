@@ -7,6 +7,13 @@ merge_review_threads_clear() {
 query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
   repository(owner:$owner,name:$name) {
     pullRequest(number:$number) {
+      headRefOid
+      reviews(last:100) {
+        nodes { id state body submittedAt author { login } commit { oid } }
+      }
+      comments(last:100) {
+        nodes { createdAt body author { __typename login } }
+      }
       reviewThreads(first:100,after:$cursor) {
         nodes {
           id
@@ -34,6 +41,13 @@ GRAPHQL
         (.isResolved | type) == "boolean"))
     ' <<<"$page" >/dev/null; then
       printf 'PR #%s review thread status is unavailable.\n' "$pr" >&2
+      return 1
+    fi
+    if [[ -z $cursor ]] && jq -L "$script_dir/lib" -e '
+      include "review-feedback";
+      first(.data.repository.pullRequest | unanswered_body_feedback)
+    ' <<<"$page" >/dev/null; then
+      printf 'PR #%s has unanswered CodeRabbit review-body feedback on its head.\n' "$pr" >&2
       return 1
     fi
     unresolved=$(jq -r '
@@ -110,11 +124,6 @@ merge_pr_now() {
     and ([.reviews[] | select(.commit.oid == $head and .state != "DISMISSED")]
       | group_by(.author.login)
       | all(.[]; $admin == 1 or .[-1].state != "CHANGES_REQUESTED"))
-    and (all(.reviews[];
-      .author.login != "coderabbitai"
-      or .commit.oid != $head
-      or .state == "DISMISSED"
-      or ((.body // "") | test("(Nitpick comments|Outside diff range comments)\\s*\\([1-9][0-9]*\\)"; "i") | not)))
   ' <<<"$data" >/dev/null; then
       break
     fi

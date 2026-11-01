@@ -395,21 +395,58 @@ route_unresolved_review 1913 branch head Title
         self.assertIn('outside-diff:outside-review', result.stdout)
         self.assertIn('outside-diff', result.stdout.lower())
 
-    def test_merge_refuses_current_head_outside_diff_feedback_even_with_admin(self):
-        result = self.run_shell(r'''
+    def test_merge_guard_requires_an_answer_to_review_body_feedback(self):
+        review = {'id': 'review-1', 'state': 'COMMENTED', 'submittedAt': '2026-11-01T10:32:14Z',
+                  'body': '> **⚠️ Outside diff range comments (1)**',
+                  'author': {'login': 'coderabbitai'}, 'commit': {'oid': 'head'}}
+        approval = {**review, 'id': 'review-2', 'state': 'APPROVED', 'body': '',
+                    'submittedAt': '2026-11-01T10:32:22Z'}
+        user = {'__typename': 'User', 'login': 'D3SOX'}
+        bot = {'__typename': 'Bot', 'login': 'greptile-apps'}
+        cases = [
+            ('unanswered', [], False),
+            ('answered before the review', [('2026-11-01T10:00:00Z', user, 'Declining this.')], False),
+            ('bot comment', [('2026-11-01T10:40:00Z', bot, 'Summary updated.')], False),
+            ('review command', [('2026-11-01T10:40:00Z', user, '@coderabbitai review')], False),
+            ('answered', [('2026-11-01T10:33:52Z', user, 'Declining the outside-diff finding.')], True),
+            ('answered to CodeRabbit', [('2026-11-01T10:33:52Z', user, '@coderabbitai this cannot happen because the tab bar mounts later.')], True),
+        ]
+        for name, comments, merges in cases:
+            with self.subTest(name):
+                page = {'data': {'repository': {'pullRequest': {
+                    'headRefOid': 'head',
+                    'reviews': {'nodes': [review, approval]},
+                    'comments': {'nodes': [{'createdAt': t, 'author': a, 'body': body} for t, a, body in comments]},
+                    'reviewThreads': {'nodes': [], 'pageInfo': {'hasNextPage': False, 'endCursor': None}},
+                }}}}
+                result = self.run_shell(r'''
+fixture_page=$(cat)
 gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
   if [[ $1 == pr && $2 == view ]]; then
-    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviews":[{"author":{"login":"coderabbitai"},"state":"COMMENTED","commit":{"oid":"head"},"body":"> **⚠️ Outside diff range comments (1)**"},{"author":{"login":"coderabbitai"},"state":"APPROVED","commit":{"oid":"head"},"body":""}]}'
+    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviews":[]}'
   elif [[ $1 == api && $2 == graphql ]]; then
-    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+    printf '%s\n' "$fixture_page"
   else
-    printf 'UNSAFE MERGE: %s\n' "$*"
+    printf 'MERGED: %s\n' "$*"
   fi
 }
 merge_pr_now 1913 head squash 1 1
-''')
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn('UNSAFE MERGE', result.stdout)
+''', page)
+                if merges:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn('MERGED: pr merge 1913', result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertNotIn('MERGED', result.stdout)
+                    self.assertIn('unanswered CodeRabbit review-body feedback', result.stderr)
+                rows = self.run_shell(r'''
+fixture_page=$(cat)
+gh() { printf '%s\n' "$fixture_page"; }
+unresolved_coderabbit_rows 1913
+''', page)
+                self.assertEqual(rows.returncode, 0, rows.stderr)
+                self.assertEqual('outside-diff:review-1' in rows.stdout, not merges)
 
     def test_outside_diff_feedback_ignores_zero_old_dismissed_and_other_authors(self):
         for count, head, state, author in [
@@ -1945,22 +1982,6 @@ unresolved_coderabbit_rows 1527
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('nitpick:review-1', result.stdout)
-
-    def test_merge_refuses_current_head_review_body_nitpick(self):
-        result = self.run_shell(r'''
-gh() {
-  if [[ $1 == pr && $2 == view ]]; then
-    printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviews":[{"author":{"login":"coderabbitai"},"state":"COMMENTED","commit":{"oid":"head"},"body":"<summary>🧹 Nitpick comments (1)</summary>"},{"author":{"login":"coderabbitai"},"state":"APPROVED","commit":{"oid":"head"},"body":""}]}'
-  elif [[ $1 == api && $2 == graphql ]]; then
-    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
-  else
-    printf 'UNSAFE MERGE: %s\n' "$*"
-  fi
-}
-merge_pr_now 1527 head squash 1
-''')
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn('UNSAFE MERGE', result.stdout)
 
     def test_empty_body_approval_is_routed_for_feedback(self):
         approved = self.pr(4)

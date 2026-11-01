@@ -533,8 +533,16 @@ query(
           id
           state
           body
+          submittedAt
           author { login }
           commit { oid }
+        }
+      }
+      comments(last: 100) {
+        nodes {
+          createdAt
+          body
+          author { __typename login }
         }
       }
       reviewThreads(first: 100, after: $cursor) {
@@ -574,15 +582,10 @@ GRAPHQL
     [[ -z $cursor ]] || args+=(-F cursor="$cursor")
     page=$(gh "${args[@]}") || return 1
     if [[ -z $cursor ]]; then
-      jq -r '
-        .data.repository.pullRequest as $pr
-        | $pr.reviews.nodes[]?
-        | select(
-            .author.login == "coderabbitai"
-            and .commit.oid == $pr.headRefOid
-            and .state != "DISMISSED"
-            and ((.body // "") | test("(Nitpick comments|Outside diff range comments)\\s*\\([1-9][0-9]*\\)"; "i"))
-          )
+      jq -r -L "$script_dir/lib" '
+        include "review-feedback";
+        .data.repository.pullRequest
+        | unanswered_body_feedback
         | (if ((.body // "") | test("Nitpick comments\\s*\\([1-9][0-9]*\\)"; "i"))
            then ["nitpick:" + .id, "CodeRabbit review-body feedback", 0, false]
            else ["outside-diff:" + .id, "CodeRabbit outside-diff feedback", 0, false]

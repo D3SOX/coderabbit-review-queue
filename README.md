@@ -168,7 +168,9 @@ Automatic merging and task archiving are off by default. Configure them per
 repository in **Configure approval actions**. Before merging, the queue's
 merge guard checks the live PR head, CI (including workflow runs that have not
 started yet), review states, and unresolved review threads, including feedback
-from other bots. If those checks fail, it does not merge. Archiving waits until a merge is confirmed and the matching Codex task
+from other bots. CodeRabbit nitpicks and outside-diff findings in a review body
+can't be resolved like threads, so they count as handled once someone answers
+with a PR comment after that review. If those checks fail, it does not merge. Archiving waits until a merge is confirmed and the matching Codex task
 is idle.
 
 ## Privacy
