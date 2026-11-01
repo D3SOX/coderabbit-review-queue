@@ -39,9 +39,11 @@ def git(cwd, *args):
     if key not in git_results:
         try:
             result = subprocess.run(['git', '-C', cwd, *args], capture_output=True, text=True, timeout=3)
-        except subprocess.SubprocessError:
-            result = None
-        git_results[key] = result.stdout.strip() if result and result.returncode == 0 else ''
+        except subprocess.TimeoutExpired:
+            # A hung worktree might be a second match; leave the decision to
+            # the full scan instead of picking the other one as unique.
+            sys.exit(0)
+        git_results[key] = result.stdout.strip() if result.returncode == 0 else ''
     return git_results[key]
 
 try:

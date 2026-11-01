@@ -16,7 +16,9 @@ claude_projects_root="$claude_home/projects"
 _claude_agents_json=''
 state_root="${XDG_STATE_HOME:-"$HOME/.local/state"}/coderabbit-review-queue"
 # Locks and pid files belong in the private runtime directory, not shared /tmp.
-runtime_root=${XDG_RUNTIME_DIR:-$state_root}
+# Default to the systemd path so processes without XDG_RUNTIME_DIR agree.
+runtime_root=${XDG_RUNTIME_DIR:-/run/user/$UID}
+[[ -d $runtime_root && -w $runtime_root ]] || runtime_root=$state_root
 gui_script="$script_dir/coderabbit-review-queue-gui.py"
 monitor_pid_file=''
 monitor_lock_file=''

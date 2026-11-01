@@ -10,17 +10,15 @@ SCRIPT = str(Path(__file__).with_name("coderabbit-review-queue"))
 APP_ICON_PATH = Path(__file__).with_name("coderabbit-logomark.svg")
 if not APP_ICON_PATH.is_file():
     APP_ICON_PATH = Path(__file__).resolve().parent.parent / "assets/icons/coderabbit-logomark.svg"
+# Like the CLI, treat empty XDG variables as unset.
 STATE_ROOT = (
-    Path(
-        os.environ.get(
-            "XDG_STATE_HOME",
-            str(Path.home() / ".local" / "state"),
-        )
-    )
+    Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
     / "coderabbit-review-queue"
 )
 # Mirrors runtime_root in the CLI: locks and pid files stay out of shared /tmp.
-RUNTIME_ROOT = Path(os.environ.get("XDG_RUNTIME_DIR") or STATE_ROOT)
+RUNTIME_ROOT = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+if not (RUNTIME_ROOT.is_dir() and os.access(RUNTIME_ROOT, os.W_OK)):
+    RUNTIME_ROOT = STATE_ROOT
 SELECTED_REPO_FILE = STATE_ROOT / "selected-repo"
 REPOSITORY_CACHE_FILE = STATE_ROOT / "repositories.txt"
 STATUS_CACHE_MAX_AGE = 60
