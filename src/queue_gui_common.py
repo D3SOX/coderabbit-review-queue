@@ -84,7 +84,8 @@ def file_signature(path: Path) -> tuple[int, int, int] | None:
 
 
 def status_belongs_to_repo(status: str, repo: str) -> bool:
-    return status.splitlines()[0:1] == [f"Repository: {repo}"]
+    # GitHub names are case-insensitive; the CLI prints the state-owning casing.
+    return [line.lower() for line in status.splitlines()[0:1]] == [f"repository: {repo.lower()}"]
 
 
 def compact_duration(seconds: int) -> str:

@@ -347,7 +347,7 @@ claude_session_file() {
 claude_session_state() {
   local session_id=$1
   local session_file=${2:-}
-  local last_op last_stop answered mtime now age state
+  local last_op last_stop pending mtime now age state
 
   if state=$(python3 "$script_dir/t3-delegate.py" --state "$session_id" --provider claudeAgent 2>/dev/null); then
     case $state in
@@ -381,17 +381,19 @@ claude_session_state() {
   fi
 
   # The transcript is not written while a tool runs, so a long test run looks
-  # stale. Only a tool result (including an interrupted one) ends the call.
-  IFS=$'\t' read -r last_stop answered < <(
+  # stale. Each call ends with its tool result (including an interrupted one).
+  IFS=$'\t' read -r last_stop pending < <(
     jq -n -R -r '
+      def blocks($kind): [.message.content[]? | select(type == "object" and .type == $kind)];
       reduce (inputs | fromjson? | select(.type == "assistant" or .type == "user")) as $entry
-        ({stop: "", answered: false};
+        ({stop: "", pending: []};
          if $entry.type == "assistant" then
-           {stop: ($entry.message.stop_reason // .stop), answered: false}
-         elif any($entry.message.content[]?; type == "object" and .type == "tool_result") then
-           .answered = true
-         else . end)
-      | "\(.stop)\t\(.answered)"
+           .stop = ($entry.message.stop_reason // .stop)
+           | .pending += [$entry | blocks("tool_use")[].id]
+         else
+           .pending -= [$entry | blocks("tool_result")[].tool_use_id]
+         end)
+      | "\(.stop)\t\(.pending | length)"
     ' "$session_file" 2>/dev/null
   ) || true
   mtime=$(stat -c %Y "$session_file" 2>/dev/null || printf '0')
@@ -399,7 +401,7 @@ claude_session_state() {
   age=$((now - mtime))
   # An unanswered call is still running unless the process died long ago.
   if [[ $last_stop == tool_use ]] &&
-    { (( age < 120 )) || { [[ $answered != true ]] && (( age < 1800 )); }; }; then
+    { (( age < 120 )) || { (( ${pending:-0} > 0 )) && (( age < 1800 )); }; }; then
     printf 'running\n'
     return 0
   fi

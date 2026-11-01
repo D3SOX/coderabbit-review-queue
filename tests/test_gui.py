@@ -1197,6 +1197,12 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.activate_repo.assert_called_once_with("Example/Repo")
         window.repo_validation_process.start.assert_not_called()
 
+    def test_status_ownership_ignores_repository_casing(self):
+        self.assertTrue(queue_gui_common.status_belongs_to_repo(
+            "Repository: example/repo\n", "Example/Repo"))
+        self.assertFalse(queue_gui_common.status_belongs_to_repo(
+            "Repository: example/other\n", "Example/Repo"))
+
     def test_validated_repository_uses_canonical_name_from_cli(self):
         window = Mock()
         window.pending_repository = "example/repo"

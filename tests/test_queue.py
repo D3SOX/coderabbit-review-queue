@@ -2394,13 +2394,15 @@ claude_agents_json() { echo '[]'; }
 file="$state_root/session.jsonl"
 cat >"$file" <<'JSON'
 {"type":"user","message":{"content":"run the tests"}}
-{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use"}]}}
+{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"a"}]}}
+{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"b"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a"}]}}
 JSON
 touch -d '-10 minutes' "$file"
 echo "long tool: $(claude_session_state session "$file")"
 touch -d '-1 hour' "$file"
 echo "dead tool: $(claude_session_state session "$file")"
-echo '{"type":"user","message":{"content":[{"type":"tool_result","is_error":true}]}}' >>"$file"
+echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b","is_error":true}]}}' >>"$file"
 echo 'partial' >>"$file"
 touch -d '-10 minutes' "$file"
 echo "interrupted: $(claude_session_state session "$file")"
