@@ -969,6 +969,26 @@ wait_for_review_completion 2524 2026-10-30T13:50:31Z head Title
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('CodeRabbit has no new files to review on PR #2524.', result.stdout)
 
+    def test_prune_removes_only_stale_temp_files(self):
+        result = self.run_shell(r'''
+cd "$state_root"
+old=(example__repo-pending-archives.tsv.Ab12Cd example__repo-snapshot.json.xY9zQ1
+  example__repo-order.txt.tmp.123 task-progress.Qw3rTy)
+keep=(example__repo-pending-archives.tsv example__repo-order.txt example__repo-monitor.log
+  example__repo-pending-archives.tsv.Fresh1 other__repo-snapshot.json.Zz9Yy8)
+touch "${old[@]:0:3}" "${keep[@]}"
+mkdir task-progress.Qw3rTy && touch task-progress.Qw3rTy/1
+touch -d '2 days ago' "${old[@]}" example__repo-pending-archives.tsv example__repo-order.txt \
+  other__repo-snapshot.json.Zz9Yy8
+prune_state_files '{"data":{"repository":{"pullRequests":{"nodes":[]}}}}'
+ls -A | sort
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), sorted([
+            'example__repo-monitor.log', 'example__repo-order.txt',
+            'example__repo-pending-archives.tsv', 'example__repo-pending-archives.tsv.Fresh1',
+            'other__repo-snapshot.json.Zz9Yy8']))
+
     def test_no_actionable_summary_counts_only_for_the_reviewed_head(self):
         # CodeRabbit keeps the last review's result in the summary and links the
         # new head in a "Review skipped" notice above it (PR #2573).
