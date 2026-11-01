@@ -48,6 +48,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
                       }
                     }
                     ... on CheckRun {
+                      databaseId
                       name
                       status
                       conclusion

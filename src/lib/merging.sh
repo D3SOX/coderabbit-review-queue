@@ -93,19 +93,15 @@ merge_pr_now() {
       printf 'PR #%s has merge conflicts; merge guard refused.\n' "$pr" >&2
       return 42
     fi
-    if jq -e --arg head "$expected_head" --argjson admin "$bypass_approval" '
+    if jq -e -L "$script_dir/lib" --arg head "$expected_head" --argjson admin "$bypass_approval" '
+    include "latest-checks";
     .state == "OPEN"
     and .headRefOid == $head
     and .mergeable == "MERGEABLE"
     and (.mergeStateStatus == "CLEAN" or ($admin == 1 and .mergeStateStatus == "BLOCKED"))
     and (.statusCheckRollup | type == "array")
-    and ([.statusCheckRollup[]
-      | {key: [.__typename, (.workflowName // ""), (.name // .context // "")],
-         started: (.startedAt // .createdAt // .updatedAt // .completedAt // ""),
-         check: .}]
-      | sort_by(.started)
-      | group_by(.key)
-      | map(last.check)
+    and (.statusCheckRollup
+      | latest_checks
       | all(.[];
           if .__typename == "StatusContext" then .state == "SUCCESS"
           else .status == "COMPLETED"
@@ -124,13 +120,10 @@ merge_pr_now() {
     fi
     # The PR rollup can lag behind `gh pr checks` just after CI finishes.
     # Retry only pending states; never bypass a failed check or review guard.
-    if (( attempt < 3 )) && jq -e '
+    if (( attempt < 3 )) && jq -e -L "$script_dir/lib" '
+      include "latest-checks";
       .mergeable == "UNKNOWN" or (.mergeStateStatus | IN("UNKNOWN", "UNSTABLE"))
-      or ([.statusCheckRollup[]?
-        | {key: [.__typename, (.workflowName // ""), (.name // .context // "")],
-           started: (.startedAt // .createdAt // .updatedAt // .completedAt // ""),
-           check: .}]
-        | sort_by(.started) | group_by(.key) | map(last.check)
+      or ((.statusCheckRollup // []) | latest_checks
         | any(.[]; if .__typename == "StatusContext" then .state == "PENDING"
                    else .status != "COMPLETED" end))
     ' <<<"$data" >/dev/null; then
@@ -138,12 +131,14 @@ merge_pr_now() {
       continue
     fi
     printf 'PR #%s is not ready to merge: head, checks, or reviews are pending.\n' "$pr" >&2
-    jq -c --arg head "$expected_head" '
-      {headMatches: (.headRefOid == $head), state, mergeable, mergeStateStatus,
-       pendingChecks: [.statusCheckRollup[]? | select(
+    jq -c -L "$script_dir/lib" --arg head "$expected_head" '
+      include "latest-checks";
+      ((.statusCheckRollup // []) | latest_checks) as $checks
+      | {headMatches: (.headRefOid == $head), state, mergeable, mergeStateStatus,
+       pendingChecks: [$checks[] | select(
          if .__typename == "StatusContext" then .state == "PENDING"
          else .status != "COMPLETED" end) | (.name // .context // "unknown")],
-       failedChecks: [.statusCheckRollup[]? | select(
+       failedChecks: [$checks[] | select(
          if .__typename == "StatusContext" then .state == "FAILURE"
          else .status == "COMPLETED" and
            ((.conclusion | IN("SUCCESS", "NEUTRAL", "SKIPPED")) | not) end)

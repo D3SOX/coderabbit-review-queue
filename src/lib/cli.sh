@@ -175,7 +175,8 @@ add_finished() {
 
 # Summarizes each PR head's CI checks, e.g. "4/12 passed, 1 failed, 7 pending".
 check_summary_rows() {
-  jq -r '
+  jq -r -L "$script_dir/lib" '
+    include "latest-checks";
     def outcome:
       if .status then
         if (.status | ascii_upcase) != "COMPLETED" then "pending"
@@ -185,11 +186,8 @@ check_summary_rows() {
       elif (.state // "" | ascii_upcase) | IN("PENDING", "EXPECTED") then "pending"
       else "failed" end;
     .data.repository.pullRequests.nodes[]
-    # A re-run supersedes earlier attempts of the same check, as on GitHub.
-    # A run that has not started yet is the newest attempt.
-    | ([.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]? | select(length > 0)]
-      | group_by([(.checkSuite.workflowRun.workflow.name // ""), (.name // .context // "")])
-      | map(max_by(.startedAt // .createdAt // "~") | outcome)) as $outcomes
+    | ([.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?]
+      | latest_checks | map(outcome)) as $outcomes
     | select($outcomes | length > 0)
     | ($outcomes | map(select(. == "failed")) | length) as $failed
     | ($outcomes | map(select(. == "pending")) | length) as $pending

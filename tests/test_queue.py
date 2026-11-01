@@ -2023,6 +2023,8 @@ snapshot() { cat <<'JSON'
   {"name":"notes","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-31T09:21:24Z","checkSuite":{"workflowRun":{"workflow":{"name":"Release Note"}}}},
   {"name":"notes","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-31T09:20:00Z","checkSuite":{"workflowRun":{"workflow":{"name":"Other"}}}},
   {"name":"rerun","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-31T09:20:00Z"},
+  {"databaseId":7,"name":"retry","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-10-31T09:51:42Z"},
+  {"databaseId":9,"name":"retry","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-31T09:37:27Z"},
   {"name":"rerun","status":"QUEUED","conclusion":null},
   {"name":"docs","status":"COMPLETED","conclusion":"SKIPPED"},
   {"name":"lint","status":"COMPLETED","conclusion":"FAILURE"},
@@ -2044,7 +2046,7 @@ show_status 60
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
             '  #42 fix review\n    Result: Approved\n'
-            '    Checks: 4/10 passed, 3 failed, 3 pending\n    Agent task: —\n'
+            '    Checks: 5/11 passed, 3 failed, 3 pending\n    Agent task: —\n'
             '  #43 no checks\n    Result: Approved\n    Agent task: —',
             result.stdout,
         )
@@ -2425,6 +2427,51 @@ merge_pr_now 42 head squash 0 1
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('pr merge 42 --repo example/repo --squash --match-head-commit head --admin', result.stdout)
+
+    def test_merge_orders_check_attempts_by_job_id_not_start_time(self):
+        # From PR #2566: GitHub reported the cancelled attempt as starting after
+        # both re-runs that replaced it.
+        rollup = [
+            {'__typename': 'CheckRun', 'name': 'Release Note', 'workflowName': 'Validate Release Note',
+             'status': 'COMPLETED', 'conclusion': conclusion, 'startedAt': started,
+             'detailsUrl': f'https://github.com/example/repo/actions/runs/1/job/{job}'}
+            for conclusion, started, job in [
+                ('CANCELLED', '2026-11-01T09:51:42Z', 124800893783),
+                ('SUCCESS', '2026-11-01T09:37:27Z', 124809102246),
+                ('SUCCESS', '2026-11-01T09:27:28Z', 124801034099),
+            ]
+        ]
+        result = self.run_shell(r'''
+fixture_rollup=$(cat)
+gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
+  if [[ $1 == pr && $2 == view ]]; then
+    jq -c '{state:"OPEN",headRefOid:"head",mergeable:"MERGEABLE",mergeStateStatus:"CLEAN",statusCheckRollup:.,reviews:[]}' <<<"$fixture_rollup"
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  else
+    printf '%s\n' "$*"
+  fi
+}
+merge_pr_now 42 head squash 0 1
+''', rollup)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('pr merge 42 --repo example/repo --squash --match-head-commit head --admin', result.stdout)
+
+        rollup[1]['conclusion'] = 'FAILURE'
+        rollup[1]['detailsUrl'] = rollup[1]['detailsUrl'].replace('124809102246', '124809102247')
+        rollup.append({**rollup[0], 'conclusion': 'SUCCESS', 'startedAt': '2026-11-01T10:00:00Z'})
+        result = self.run_shell(r'''
+fixture_rollup=$(cat)
+gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
+  [[ $1 == pr && $2 == view ]] &&
+    jq -c '{state:"OPEN",headRefOid:"head",mergeable:"MERGEABLE",mergeStateStatus:"CLEAN",statusCheckRollup:.,reviews:[]}' <<<"$fixture_rollup"
+}
+merge_pr_now 42 head squash 0 1
+''', rollup)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('"failedChecks":["Release Note"]', result.stderr)
 
     def test_merge_rechecks_transient_pending_rollup_before_refusing(self):
         result = self.run_shell(r'''
