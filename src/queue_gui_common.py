@@ -19,6 +19,8 @@ STATE_ROOT = (
     )
     / "coderabbit-review-queue"
 )
+# Mirrors runtime_root in the CLI: locks and pid files stay out of shared /tmp.
+RUNTIME_ROOT = Path(os.environ.get("XDG_RUNTIME_DIR") or STATE_ROOT)
 SELECTED_REPO_FILE = STATE_ROOT / "selected-repo"
 REPOSITORY_CACHE_FILE = STATE_ROOT / "repositories.txt"
 STATUS_CACHE_MAX_AGE = 60
@@ -127,4 +129,4 @@ def monitor_is_running(pid: int) -> bool:
 
 def monitor_pid_files() -> list[Path]:
     """Monitor pid files only; agent helper pid files share the prefix but have no OWNER__NAME key."""
-    return list(Path("/tmp").glob("coderabbit-review-queue-*__*.pid"))
+    return list(RUNTIME_ROOT.glob("coderabbit-review-queue-*__*.pid"))

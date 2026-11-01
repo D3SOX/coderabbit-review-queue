@@ -368,11 +368,16 @@ def send_turn(session_id, prompt, *, steer=True, provider='codex'):
         with urlopen(request, timeout=15) as response:
             response.read()
     finally:
-        subprocess.run(
-            [*cli, 'auth', 'session', 'revoke', '--base-dir', str(home.parent),
-             credential['sessionId']],
-            capture_output=True, text=True, timeout=15, check=False,
-        )
+        # The prompt may already be delivered; a cleanup failure must not turn
+        # that into a retry. The short-lived credential expires on its own.
+        try:
+            subprocess.run(
+                [*cli, 'auth', 'session', 'revoke', '--base-dir', str(home.parent),
+                 credential['sessionId']],
+                capture_output=True, text=True, timeout=15, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f'Could not revoke the T3 credential: {error}', file=sys.stderr)
     print(f'Sent review follow-up to T3 Code thread {thread_id}.')
 
 

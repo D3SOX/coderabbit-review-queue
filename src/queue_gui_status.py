@@ -11,7 +11,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QMessageBox, QTreeWidget, QTreeWidgetItem
 
 from queue_gui_common import (
-    SCRIPT, STATE_ROOT, compact_duration, file_signature, live_review_number,
+    RUNTIME_ROOT, SCRIPT, STATE_ROOT, compact_duration, file_signature, live_review_number,
     monitor_is_running, status_belongs_to_repo,
 )
 from queue_gui_tray import check_icon
@@ -63,7 +63,7 @@ class StatusMixin:
         repo = repo or self.selected_repo()
         if not repo:
             return None
-        return Path(f"/tmp/coderabbit-review-queue-{repo.replace('/', '__')}.pid")
+        return RUNTIME_ROOT / f"coderabbit-review-queue-{repo.replace('/', '__')}.pid"
 
     def monitor_pid(self, repo: str | None = None) -> int | None:
         pid_file = self.monitor_pid_file(repo)
@@ -186,6 +186,9 @@ class StatusMixin:
 
     def refresh(self, manual: bool = False, retry: bool = False) -> None:
         if self.status_process.state() != QProcess.NotRunning:
+            # A settings change must not be lost behind an older query.
+            if manual:
+                self.status_refresh_pending = True
             return
         if self.status_retry_timer.isActive():
             if not manual:
@@ -216,12 +219,17 @@ class StatusMixin:
         self.refresh(manual=self.status_manual, retry=True)
 
     def status_finished(self, exit_code: int) -> None:
-        stdout = bytes(self.status_process.readAllStandardOutput()).decode().strip()
-        stderr = bytes(self.status_process.readAllStandardError()).decode().strip()
+        stdout = bytes(self.status_process.readAllStandardOutput()).decode(errors="replace").strip()
+        stderr = bytes(self.status_process.readAllStandardError()).decode(errors="replace").strip()
         self.refresh_button.setEnabled(True)
         self.refresh_button.setText("Refresh")
         self.spinner_timer.stop()
         self.refresh_spinner.hide()
+        if self.status_refresh_pending:
+            self.status_refresh_pending = False
+            self.status_failures = 0
+            self.refresh(manual=True)
+            return
         if self.status_repo != self.selected_repo():
             self.status_failures = 0
             self.refresh()
@@ -366,9 +374,7 @@ class StatusMixin:
         if self.monitor_activity is not None:
             phase, live_number, title, activity_expiry = self.monitor_activity
             live_phase = phase
-            if phase == "dispatch_wait":
-                busy = "Waiting for this repository's review slot"
-            elif (
+            if (
                 phase == "waiting"
                 and activity_expiry <= QDateTime.currentSecsSinceEpoch()
             ):
@@ -643,7 +649,7 @@ class StatusMixin:
             return
         STATE_ROOT.mkdir(parents=True, exist_ok=True)
         target = self.splitter_sizes_file()
-        temporary = target.with_suffix(".tmp")
+        temporary = target.with_name(target.name + ".tmp")
         temporary.write_text(f"{sizes[0]} {sizes[1]}\n")
         os.replace(temporary, target)
 
@@ -799,7 +805,7 @@ class StatusMixin:
         lock_file = order_file.with_suffix(order_file.suffix + ".lock")
         with lock_file.open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            temporary = order_file.with_suffix(".tmp")
+            temporary = order_file.with_name(order_file.name + ".tmp")
             temporary.write_text("\n".join(numbers) + "\n")
             os.replace(temporary, order_file)
         self.show_transient_status("Queue order saved")

@@ -37,8 +37,11 @@ git_results = {}
 def git(cwd, *args):
     key = (cwd, args)
     if key not in git_results:
-        result = subprocess.run(['git', '-C', cwd, *args], capture_output=True, text=True)
-        git_results[key] = result.stdout.strip() if result.returncode == 0 else ''
+        try:
+            result = subprocess.run(['git', '-C', cwd, *args], capture_output=True, text=True, timeout=3)
+        except subprocess.SubprocessError:
+            result = None
+        git_results[key] = result.stdout.strip() if result and result.returncode == 0 else ''
     return git_results[key]
 
 try:
@@ -199,11 +202,13 @@ PY
       fi
       live_branch=$(git -C "$event_cwd" branch --show-current 2>/dev/null || true)
       live_head=$(git -C "$event_cwd" rev-parse HEAD 2>/dev/null || true)
-      if [[ $live_branch == "$branch_name" ]]; then
+      if [[ $live_branch == "$branch_name" &&
+        $timestamp > ${branch_timestamps[$event_cwd]:-} ]]; then
         branch_timestamps["$event_cwd"]=$timestamp
         branch_sessions["$event_cwd"]=$session_id
       fi
-      if [[ $live_head == "$head_sha" ]]; then
+      if [[ $live_head == "$head_sha" &&
+        $timestamp > ${head_timestamps[$event_cwd]:-} ]]; then
         head_timestamps["$event_cwd"]=$timestamp
         head_sessions["$event_cwd"]=$session_id
       fi
@@ -342,7 +347,7 @@ claude_session_file() {
 claude_session_state() {
   local session_id=$1
   local session_file=${2:-}
-  local last_op last_stop mtime now age state
+  local last_op last_stop answered mtime now age state
 
   if state=$(python3 "$script_dir/t3-delegate.py" --state "$session_id" --provider claudeAgent 2>/dev/null); then
     case $state in
@@ -375,15 +380,26 @@ claude_session_state() {
     return 0
   fi
 
-  last_stop=$(
-    jq -r 'select(.type == "assistant") | .message.stop_reason // empty' \
-      "$session_file" 2>/dev/null |
-      tail -n 1
-  )
+  # The transcript is not written while a tool runs, so a long test run looks
+  # stale. Only a tool result (including an interrupted one) ends the call.
+  IFS=$'\t' read -r last_stop answered < <(
+    jq -n -R -r '
+      reduce (inputs | fromjson? | select(.type == "assistant" or .type == "user")) as $entry
+        ({stop: "", answered: false};
+         if $entry.type == "assistant" then
+           {stop: ($entry.message.stop_reason // .stop), answered: false}
+         elif any($entry.message.content[]?; type == "object" and .type == "tool_result") then
+           .answered = true
+         else . end)
+      | "\(.stop)\t\(.answered)"
+    ' "$session_file" 2>/dev/null
+  ) || true
   mtime=$(stat -c %Y "$session_file" 2>/dev/null || printf '0')
   now=$(date +%s)
   age=$((now - mtime))
-  if [[ $last_stop == tool_use ]] && (( age < 120 )); then
+  # An unanswered call is still running unless the process died long ago.
+  if [[ $last_stop == tool_use ]] &&
+    { (( age < 120 )) || { [[ $answered != true ]] && (( age < 1800 )); }; }; then
     printf 'running\n'
     return 0
   fi

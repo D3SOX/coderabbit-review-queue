@@ -5,7 +5,7 @@ route_all_unresolved_async() {
   (
     trap - EXIT
     close_inherited_locks
-    exec {routing_scan_fd}>"/tmp/coderabbit-review-queue-$repo_key-routing.lock"
+    exec {routing_scan_fd}>"$runtime_root/coderabbit-review-queue-$repo_key-routing.lock"
     flock -n "$routing_scan_fd" || exit 0
     # Detached agent turns must not keep blocking later scans.
     set_cloexec "$routing_scan_fd" || true

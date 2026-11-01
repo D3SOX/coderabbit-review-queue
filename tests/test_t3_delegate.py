@@ -487,5 +487,31 @@ class T3DelegateTests(unittest.TestCase):
         self.assertEqual(calls[1][-1], 'auth-session')
 
 
+    def test_revoke_timeout_after_delivery_still_reports_success(self):
+        def run(args, **_kwargs):
+            if 'revoke' in args:
+                raise subprocess.TimeoutExpired(args, 15)
+            return type('Result', (), {'stdout': json.dumps({
+                'token': 'secret', 'sessionId': 'auth-session',
+            })})()
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{}'
+
+        with patch.object(t3_delegate, 't3_home', return_value=self.home), \
+             patch.object(t3_delegate, 't3_cli', return_value=['t3']), \
+             patch.object(t3_delegate.subprocess, 'run', side_effect=run), \
+             patch.object(t3_delegate, 'urlopen', return_value=Response()) as dispatch, \
+             patch('sys.stdout'), patch('sys.stderr'):
+            t3_delegate.send_turn('codex-session', 'Fix the review')
+        dispatch.assert_called_once()
+
 if __name__ == '__main__':
     unittest.main()

@@ -315,10 +315,7 @@ delegate_all_now() {
   force_delegation=1
   while IFS=$'\t' read -r pr branch_name head_sha title; do
     [[ -n ${pr:-} ]] || continue
-    if ! route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title"; then
-      failed=1
-      break
-    fi
+    route_unresolved_review "$pr" "$branch_name" "$head_sha" "$title" || failed=1
   done < <(reviewed_rows own <<<"$state")
   return "$failed"
 }
@@ -359,7 +356,7 @@ set_cloexec() {
 # Background workers must not keep the monitor's or another scan's lock alive.
 close_inherited_locks() {
   local name
-  for name in monitor_lock_fd dispatch_lock_fd routing_scan_fd approval_scan_fd archive_scan_fd; do
+  for name in monitor_lock_fd routing_scan_fd approval_scan_fd archive_scan_fd; do
     [[ -n ${!name:-} ]] || continue
     eval "exec ${!name}>&-"
     printf -v "$name" ''
@@ -403,20 +400,6 @@ claim_monitor() {
   flock -n "$monitor_lock_fd" || return 1
   set_cloexec "$monitor_lock_fd" || true
   printf '%s\n' "$$" >"$monitor_pid_file"
-}
-
-claim_dispatch() {
-  exec {dispatch_lock_fd}>"$dispatch_lock_file"
-  if ! flock -n "$dispatch_lock_fd"; then
-    write_monitor_state dispatch_wait
-    flock "$dispatch_lock_fd"
-  fi
-  set_cloexec "$dispatch_lock_fd" || true
-}
-
-release_dispatch() {
-  exec {dispatch_lock_fd}>&-
-  dispatch_lock_fd=''
 }
 
 cleanup_monitor() {

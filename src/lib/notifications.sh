@@ -66,7 +66,6 @@ desktop_notify() {
   local title=$1
   local message=$2
   local urgency=${3:-normal}
-  local with_sound=${4:-0}
   local app_icon
   # Always identify the repository, including when monitors overlap. Put it
   # first in the body so a long notification title cannot hide the project.
@@ -78,8 +77,8 @@ desktop_notify() {
     --app-name='CodeRabbit Review Queue'
     --app-icon="$app_icon"
     --hint='string:desktop-entry:coderabbit-review-queue'
-    # Keep Plasma/libnotify from playing their own sound; we only ding
-    # intentionally via play_notification_sound when with_sound=1.
+    # Keep Plasma/libnotify from playing their own sound; callers ding
+    # intentionally via play_notification_sound.
     --hint='boolean:suppress-sound:true'
     --urgency="$urgency"
   )
@@ -88,10 +87,6 @@ desktop_notify() {
     "${args[@]}" \
     "$title" \
     "$message" >/dev/null 2>&1 || true
-
-  if [[ $with_sound == 1 ]] && notify_sound_enabled; then
-    play_notification_sound || true
-  fi
 }
 
 github_low_quota() {
