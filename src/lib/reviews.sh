@@ -279,7 +279,7 @@ wait_for_acceptance() {
               or (
                 .updated_at >= $since
                 and (.body | contains("No actionable comments were generated in the recent review"))
-                and (.body | contains($head))
+                and (.body | test("between [0-9a-f]+ and " + $head))
                 and ((.body | contains("rate limited by coderabbit.ai")) | not)
               )
             )
@@ -411,7 +411,7 @@ wait_for_review_completion() {
             and (
               (
                 (.body | contains("No actionable comments were generated in the recent review"))
-                and (.body | contains($head))
+                and (.body | test("between [0-9a-f]+ and " + $head))
               )
               or (.body | contains("No files to review."))
             )

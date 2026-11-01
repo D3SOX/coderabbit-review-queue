@@ -428,7 +428,9 @@ stale_rows() {
               .comments.nodes[]?;
               (.author.login // "") == "coderabbitai"
               and (.body | contains("No actionable comments were generated in the recent review"))
-              and (.body | contains($pr.headRefOid))
+              # The reviewed range must end at the head; a skip notice elsewhere
+              # in the comment can also link the head.
+              and (.body | test("between [0-9a-f]+ and " + $pr.headRefOid))
               and ((.body | contains("rate limited by coderabbit.ai")) | not)
             )
             | not

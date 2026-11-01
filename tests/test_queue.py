@@ -1,4 +1,5 @@
 import json
+import shlex
 import fcntl
 import os
 from pathlib import Path
@@ -967,6 +968,40 @@ wait_for_review_completion 2524 2026-10-30T13:50:31Z head Title
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('CodeRabbit has no new files to review on PR #2524.', result.stdout)
+
+    def test_no_actionable_summary_counts_only_for_the_reviewed_head(self):
+        # CodeRabbit keeps the last review's result in the summary and links the
+        # new head in a "Review skipped" notice above it (PR #2573).
+        new, old = '053645fb', '68eec368'
+        for reviewed, stale in ((old, True), (new, False)):
+            body = ('## Review skipped\n- **File**: [.coderabbit.yaml](<https://github.com/o/r/blob/'
+                    f'{new}/.coderabbit.yaml>)\n'
+                    '<!-- recent_review_start -->\nNo actionable comments were generated in the recent review.\n'
+                    f'Reviewing files that changed from the base of the PR and between abc123 and {reviewed}.\n')
+            with self.subTest(reviewed=reviewed):
+                pr = self.pr(2573, head=new)
+                pr['comments']['nodes'] = [{'author': {'login': 'coderabbitai'},
+                                            'updatedAt': '2026-11-01T09:34:19Z', 'body': body}]
+                self.assertEqual(self.rows('stale_rows', [pr]), [2573] if stale else [])
+                comments = json.dumps([[{'user': {'login': 'coderabbitai[bot]'},
+                                         'created_at': '2026-11-01T09:12:35Z',
+                                         'updated_at': '2026-11-01T09:34:19Z', 'body': body}]])
+                result = self.run_shell(f'COMMENTS={shlex.quote(comments)}' + '''
+poll_wait_background_actions() { :; }
+desktop_notify() { :; }
+gh() {
+  case "$*" in
+    *'/status') echo '{"statuses":[]}' ;;
+    *'/check-runs'*) echo '{"check_runs":[]}' ;;
+    *'/comments?'*) printf '%s\\n' "$COMMENTS" ;;
+    *'/reviews?'*) echo '[[]]' ;;
+    *) return 99 ;;
+  esac
+}
+sleep() { exit 97; }
+wait_for_acceptance 2573 2026-11-01T09:30:00Z ''' + new + ' Title\n')
+                self.assertEqual('CodeRabbit accepted PR #2573' in result.stdout, not stale,
+                                 result.stdout + result.stderr)
 
     def test_failed_review_action_reason_skips_html_markup(self):
         result = self.run_shell(r'''
