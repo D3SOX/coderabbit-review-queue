@@ -91,8 +91,48 @@ merge_workflow_runs_finished() {
   fi
 }
 
+# Exit status of merge_pr_now when the PR entered a merge queue instead.
+merge_queued_status=43
+
+merge_queue_status() {
+  local pr=$1 data query
+  read -r -d '' query <<'GRAPHQL' || true
+query($owner:String!,$name:String!,$number:Int!) {
+  repository(owner:$owner,name:$name) {
+    pullRequest(number:$number) {
+      state title headRefOid headRefName baseRefName isCrossRepository
+      isMergeQueueEnabled isInMergeQueue
+      autoMergeRequest { enabledAt }
+      headRef { id target { oid } }
+      timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]) {
+        nodes { ... on RemovedFromMergeQueueEvent { createdAt reason } }
+      }
+    }
+  }
+}
+GRAPHQL
+  data=$(gh api graphql -f query="$query" -F owner="$owner" -F name="$name" -F number="$pr") &&
+    jq -ce '.data.repository.pullRequest | objects' <<<"$data"
+}
+
 merge_pr_now() {
   local pr=$1 expected_head=$2 method=$3 delete_branch=$4 bypass_approval=${5:-0} data attempt
+  local queue_data queued=0 admin_guard=$bypass_approval
+  if ! queue_data=$(merge_queue_status "$pr"); then
+    printf 'PR #%s merge queue status is unavailable.\n' "$pr" >&2
+    return 1
+  fi
+  if jq -e '.isInMergeQueue == true' <<<"$queue_data" >/dev/null; then
+    printf 'PR #%s is already in the merge queue.\n' "$pr"
+    start_merge_queue_watch "$pr" "$expected_head" "$method" "$delete_branch" "$bypass_approval"
+    return "$merge_queued_status"
+  fi
+  # The queue runs its own checks before merging; `--admin` would skip them,
+  # and the queue cannot bypass branch protection either.
+  if jq -e '.isMergeQueueEnabled == true' <<<"$queue_data" >/dev/null; then
+    queued=1
+    admin_guard=0
+  fi
   for attempt in 1 2 3; do
     data=$(gh pr view "$pr" --repo "$repo" \
       --json state,isCrossRepository,headRefOid,mergeable,mergeStateStatus,statusCheckRollup,reviews) || return 1
@@ -107,7 +147,7 @@ merge_pr_now() {
       printf 'PR #%s has merge conflicts; merge guard refused.\n' "$pr" >&2
       return 42
     fi
-    if jq -e -L "$script_dir/lib" --arg head "$expected_head" --argjson admin "$bypass_approval" '
+    if jq -e -L "$script_dir/lib" --arg head "$expected_head" --argjson admin "$admin_guard" '
     include "latest-checks";
     .state == "OPEN"
     and .headRefOid == $head
@@ -142,6 +182,8 @@ merge_pr_now() {
       continue
     fi
     printf 'PR #%s is not ready to merge: head, checks, or reviews are pending.\n' "$pr" >&2
+    (( queued == 0 || bypass_approval == 0 )) ||
+      printf 'Its base branch has a merge queue, so the admin bypass does not apply.\n' >&2
     jq -c -L "$script_dir/lib" --arg head "$expected_head" '
       include "latest-checks";
       ((.statusCheckRollup // []) | latest_checks) as $checks
@@ -162,11 +204,190 @@ merge_pr_now() {
   done
   merge_workflow_runs_finished "$pr" "$expected_head" || return 1
   merge_review_threads_clear "$pr" || return 1
+  if (( queued )); then
+    queue_pr_for_merge "$pr" "$expected_head" "$method" "$delete_branch" "$bypass_approval"
+    return
+  fi
   # Merge only the head that passed the guard, even if a push lands meanwhile.
   local -a args=(pr merge "$pr" --repo "$repo" "--$method" --match-head-commit "$expected_head")
   [[ $delete_branch == 1 ]] && args+=(--delete-branch)
   [[ $bypass_approval == 1 ]] && args+=(--admin)
   gh "${args[@]}"
+}
+
+# The queue's merge method applies. Branch deletion and other post-merge work
+# wait for the watcher to see GitHub report the PR merged.
+queue_pr_for_merge() {
+  local pr=$1 expected_head=$2 method=$3 delete_branch=$4 admin=$5 data
+  gh pr merge "$pr" --repo "$repo" --match-head-commit "$expected_head" || return 1
+  if ! data=$(merge_queue_status "$pr"); then
+    printf 'PR #%s merge queue status is unavailable after queuing.\n' "$pr" >&2
+    return 1
+  fi
+  if jq -e '.isInMergeQueue == true' <<<"$data" >/dev/null; then
+    printf 'PR #%s was added to the merge queue. GitHub merges it after the queue checks pass; this is not a failure, so stop here. The branch is deleted after the merge if enabled, and the agent task gets a message if the PR leaves the queue without merging.\n' "$pr"
+    start_merge_queue_watch "$pr" "$expected_head" "$method" "$delete_branch" "$admin"
+    return "$merge_queued_status"
+  fi
+  if jq -e '.state == "MERGED"' <<<"$data" >/dev/null; then
+    return 0
+  fi
+  # gh enables auto-merge when the PR is not ready for the queue.
+  if jq -e '.autoMergeRequest != null' <<<"$data" >/dev/null; then
+    gh pr merge "$pr" --repo "$repo" --disable-auto >/dev/null || true
+    printf 'PR #%s was not ready for the merge queue; GitHub auto-merge was disabled again.\n' "$pr" >&2
+    return 1
+  fi
+  printf 'PR #%s did not enter the merge queue.\n' "$pr" >&2
+  return 1
+}
+
+# Watch from the host that queued the PR: its agents can fix a failed queue run.
+start_merge_queue_watch() {
+  local -a launcher=()
+  local log="$state_root/$repo_key-merge-queue.log"
+  # Leave the calling agent's cgroup so that its exit does not stop the watch.
+  if command -v systemd-run >/dev/null 2>&1 &&
+    systemctl --user show-environment >/dev/null 2>&1; then
+    launcher=(systemd-run --user --scope --quiet --collect --)
+  fi
+  setsid -f "${launcher[@]}" "$script_path" --repo "$repo" --watch-merge-queue "$@" \
+    </dev/null >>"$log" 2>&1 || true
+}
+
+merge_queue_poll_seconds=60
+merge_queue_watch_seconds=86400
+# Someone may remove a PR on purpose, e.g. to requeue a stuck entry.
+merge_queue_manual_grace_seconds=600
+
+watch_merge_queue() {
+  local pr=$1 head=$2 method=$3 delete_branch=$4 admin=$5
+  local lock_fd data now deadline out_since=0 reason status
+  exec {lock_fd}>"$runtime_root/coderabbit-review-queue-$repo_key-merge-queue-$pr.lock"
+  flock -n "$lock_fd" || return 0
+  set_cloexec "$lock_fd" || true
+  printf '%s Watching PR #%s in the merge queue.\n' "$(date -Is)" "$pr"
+  deadline=$(( $(date +%s) + merge_queue_watch_seconds ))
+  while (( $(date +%s) < deadline )); do
+    if data=$(merge_queue_status "$pr"); then
+      case $(jq -r '.state' <<<"$data") in
+        MERGED)
+          finish_queued_merge "$pr" "$data" "$delete_branch"
+          return 0
+          ;;
+        CLOSED)
+          printf '%s PR #%s was closed without merging.\n' "$(date -Is)" "$pr"
+          return 0
+          ;;
+      esac
+      if jq -e '.isInMergeQueue == true' <<<"$data" >/dev/null; then
+        out_since=0
+      else
+        now=$(date +%s)
+        reason=$(jq -r '.timelineItems.nodes[0].reason // "unknown" | ascii_downcase' <<<"$data")
+        # GitHub removes the entry just before it reports the merge.
+        if [[ $reason != merged ]]; then
+          (( out_since > 0 )) || out_since=$now
+          if [[ $reason == manual ]]; then
+            if (( now - out_since >= merge_queue_manual_grace_seconds )); then
+              printf '%s PR #%s was removed from the merge queue manually.\n' "$(date -Is)" "$pr"
+              return 0
+            fi
+          # Confirm on the next poll that the PR did not merge meanwhile.
+          elif (( now > out_since )); then
+            status=0
+            steer_merge_queue_failure "$pr" "$head" "$method" "$delete_branch" "$admin" "$data" ||
+              status=$?
+            (( status == 75 )) || return "$status"
+          fi
+        fi
+      fi
+    fi
+    sleep "$merge_queue_poll_seconds"
+  done
+  printf '%s Stopped watching PR #%s in the merge queue.\n' "$(date -Is)" "$pr"
+}
+
+finish_queued_merge() {
+  local pr=$1 data=$2 delete_branch=$3 title ref_id
+  title=$(jq -r '.title' <<<"$data")
+  printf '%s The merge queue merged PR #%s.\n' "$(date -Is)" "$pr"
+  # Keep a branch that gained commits after the merged head.
+  ref_id=$(jq -r 'select(.isCrossRepository != true and .headRef.target.oid == .headRefOid)
+    | .headRef.id // empty' <<<"$data")
+  if [[ $delete_branch == 1 && -n $ref_id ]]; then
+    gh api graphql -f query='mutation($id:ID!){deleteRef(input:{refId:$id}){clientMutationId}}' \
+      -F id="$ref_id" >/dev/null ||
+      printf 'Could not delete the branch of merged PR #%s.\n' "$pr" >&2
+  fi
+  desktop_notify 'CodeRabbit PR merged' "PR #$pr — $title"
+}
+
+steer_merge_queue_failure() {
+  local pr=$1 head=$2 method=$3 delete_branch=$4 admin=$5 data=$6
+  local title branch base reason removed_at runs token prompt status=0
+  IFS=$'\t' read -r title branch base reason removed_at < <(jq -r '[.title, .headRefName,
+    .baseRefName, (.timelineItems.nodes[0].reason // "unknown"),
+    (.timelineItems.nodes[0].createdAt // "")] | @tsv' <<<"$data")
+  token="merge-queue:$pr:$head:$removed_at"
+  if [[ -f $routed_threads_file ]] && rg -qxF "$token" "$routed_threads_file"; then
+    return 0
+  fi
+  runs=$(gh run list --repo "$repo" --event merge_group --limit 100 \
+    --json databaseId,headBranch,conclusion,workflowName,url 2>/dev/null |
+    jq -r --arg prefix "gh-readonly-queue/$base/pr-$pr-" '
+      [.[] | select((.headBranch | startswith($prefix))
+        and (.conclusion | IN("failure", "timed_out", "startup_failure")))][:3][]
+      | "\(.workflowName) (\(.conclusion)): \(.url), run ID \(.databaseId)"' 2>/dev/null || true)
+  prompt="PR #$pr ($title), https://github.com/$repo/pull/$pr, left the merge queue without merging (GitHub reason: $reason). The queue runs its checks on a temporary merge_group branch that combines the PR with $base, so they can fail even though the PR's own checks passed."
+  if [[ -n $runs ]]; then
+    prompt+=" Failed queue runs:"$'\n'"$runs"$'\n'"Read their failed logs with \`gh run view <run ID> --repo $repo --log-failed\`."
+  else
+    prompt+=" Find the failed run with \`gh run list --repo $repo --event merge_group\`; its branch starts with gh-readonly-queue/$base/pr-$pr- or with the branch of a PR queued in the same group."
+  fi
+  prompt+=" Fetch the current PR and stop if it is closed or merged. Find the cause and fix it in the PR branch, preserving unrelated work. Prove the fix by running the failing checks locally, or explain why they cannot run here. Commit and push the fix, wait for CI and all review bots, and resolve actionable review threads. Do not trigger CodeRabbit yourself. Then run the merge guard on this host again with the new live head SHA:"
+  prompt+=" \`$(installed_command) --repo $repo --merge-now $pr \"\$(gh pr view $pr --repo $repo --json headRefOid --jq .headRefOid)\" $method $delete_branch $admin --local-agents\`. If the failure is unrelated to this PR, report that instead of changing code. Never bypass the guard; report any remaining blocker."
+  local -a ids=("$token")
+  steer_pr_agent "$pr" "$title" "$branch" "$head" "$prompt" ids 'merge queue failure' || status=$?
+  if (( status == 1 )); then
+    desktop_notify 'CodeRabbit merge queue failed' \
+      "PR #$pr — $title"$'\n'"It left the merge queue without merging, and no agent task could take the fix." \
+      'critical'
+  fi
+  return "$status"
+}
+
+# Returns 0 once the prompt reached the PR's agent, 75 to retry later, and 1
+# when no matching agent task exists.
+steer_pr_agent() {
+  local pr=$1 title=$2 branch=$3 head=$4 prompt=$5 ids_name=$6 reason=$7
+  local -n token_ids=$6
+  local match session_id session_cwd found=0 agent
+  local -a agents=(codex claude)
+  ! agent_prefers_claude "$branch" || agents=(claude codex)
+  for agent in "${agents[@]}"; do
+    if [[ $agent == codex ]]; then
+      match=$(matching_codex_session "$branch" "$head") || continue
+      found=1
+      IFS=$'\t' read -r session_id session_cwd <<<"$match"
+      codex_can_receive_review "$session_id" "$(codex_session_state "$session_id")" || continue
+      resume_codex_session "$pr" "$title" "$head" "$session_id" "$session_cwd" "$prompt" \
+        "$ids_name" "$reason" || continue
+    else
+      match=$(matching_claude_session "$branch" "$head") || continue
+      found=1
+      IFS=$'\t' read -r session_id session_cwd <<<"$match"
+      claude_can_receive_review "$session_id" "$(claude_session_state "$session_id")" || continue
+      resume_claude_session "$pr" "$title" "$session_id" "$session_cwd" "$prompt" \
+        "$ids_name" "$head" "$reason" || continue
+    fi
+    # Resuming can also defer when the task started a turn meanwhile.
+    if [[ -f $routed_threads_file ]] && rg -qxF "${token_ids[0]}" "$routed_threads_file"; then
+      return 0
+    fi
+  done
+  (( found )) && return 75
+  return 1
 }
 
 route_merge_pr() {

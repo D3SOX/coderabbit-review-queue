@@ -777,6 +777,7 @@ resume_codex_session 42 title head session "$worktree" prompt threads
 gh() { printf '%s\n' '{"state":"OPEN","headRefOid":"head","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","statusCheckRollup":[],"reviews":[]}'; }
 agent_host() { :; }
 resolve_merge_conflicts() { echo "repair $*"; }
+merge_queue_status() { echo '{}'; }
 route_merge_pr 42 head
 ''')
         self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
@@ -2704,6 +2705,7 @@ gh() {
     return 99
   fi
 }
+merge_queue_status() { echo '{}'; }
 merge_pr_now 42 head squash 1 1
 ''')
         self.assertNotEqual(result.returncode, 0)
@@ -2813,6 +2815,7 @@ gh() {
     printf '%s\n' "$*"
   fi
 }
+merge_queue_status() { echo '{}'; }
 merge_pr_now 42 head squash 0 1
 ''', rollup)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -2828,6 +2831,7 @@ gh() {
   [[ $1 == pr && $2 == view ]] &&
     jq -c '{state:"OPEN",headRefOid:"head",mergeable:"MERGEABLE",mergeStateStatus:"CLEAN",statusCheckRollup:.,reviews:[]}' <<<"$fixture_rollup"
 }
+merge_queue_status() { echo '{}'; }
 merge_pr_now 42 head squash 0 1
 ''', rollup)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -2899,6 +2903,173 @@ merge_pr_now 42 head squash 0 0
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('UNSAFE MERGE', result.stdout)
 
+    MERGE_QUEUE_GH = r"""
+gh() {
+  if [[ $* == *actions/runs* ]]; then echo '[{"workflow_runs":[]}]'; return; fi
+  if [[ $1 == pr && $2 == view ]]; then
+    printf '{"state":"OPEN","headRefOid":"head","mergeable":"MERGEABLE","mergeStateStatus":"%s","statusCheckRollup":[],"reviews":[]}\n' "${merge_state:-CLEAN}"
+  elif [[ $1 == api && $2 == graphql ]]; then
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  else
+    printf 'gh %s\n' "$*" >&2
+    [[ $* != *'--match-head-commit'* ]] || touch "$state_root/queued"
+  fi
+}
+merge_queue_status() {
+  if [[ -f $state_root/queued ]]; then printf '%s\n' "${after_queue:-{\"isInMergeQueue\":true\}}"
+  else printf '%s\n' "${before_queue:-{\"isMergeQueueEnabled\":true\}}"; fi
+}
+start_merge_queue_watch() { echo "watch $*"; }
+"""
+
+    def test_merge_queue_branch_queues_without_admin_or_merge_options(self):
+        result = self.run_shell(self.MERGE_QUEUE_GH + 'merge_pr_now 42 head squash 1 1\n')
+        self.assertEqual(result.returncode, 43, result.stdout + result.stderr)
+        self.assertIn('gh pr merge 42 --repo example/repo --match-head-commit head\n', result.stderr)
+        self.assertNotIn('--admin', result.stderr)
+        self.assertNotIn('--squash', result.stderr)
+        self.assertNotIn('--delete-branch', result.stderr)
+        self.assertIn('was added to the merge queue', result.stdout)
+        self.assertIn('watch 42 head squash 1 1', result.stdout)
+
+    def test_merge_queue_branch_gets_no_admin_bypass_for_blocked_prs(self):
+        result = self.run_shell('merge_state=BLOCKED\nsleep() { :; }\n' + self.MERGE_QUEUE_GH
+                                + 'merge_pr_now 42 head squash 1 1\n')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('gh pr merge', result.stderr)
+        self.assertIn('the admin bypass does not apply', result.stderr)
+
+    def test_branch_without_merge_queue_keeps_direct_admin_merge(self):
+        result = self.run_shell("before_queue='{\"isMergeQueueEnabled\":false}'\n" + self.MERGE_QUEUE_GH
+                                + 'merge_pr_now 42 head squash 1 1\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('gh pr merge 42 --repo example/repo --squash --match-head-commit head '
+                      '--delete-branch --admin', result.stderr)
+        self.assertNotIn('watch', result.stdout)
+
+    def test_already_queued_pr_is_not_merged_again(self):
+        result = self.run_shell("before_queue='{\"isInMergeQueue\":true}'\n" + self.MERGE_QUEUE_GH
+                                + 'merge_pr_now 42 head squash 1 1\n')
+        self.assertEqual(result.returncode, 43, result.stdout + result.stderr)
+        self.assertNotIn('gh pr merge', result.stderr)
+        self.assertIn('watch 42 head squash 1 1', result.stdout)
+
+    def test_auto_merge_enabled_instead_of_queueing_is_disabled_again(self):
+        result = self.run_shell("after_queue='{\"state\":\"OPEN\",\"autoMergeRequest\":{}}'\n"
+                                + self.MERGE_QUEUE_GH + 'merge_pr_now 42 head squash 1 1\n')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('gh pr merge 42 --repo example/repo --disable-auto', result.stderr)
+        self.assertNotIn('watch', result.stdout)
+
+    def run_merge_queue_watch(self, states, extra=''):
+        return self.run_shell(r'''
+printf '%s\n' "$(cat)" | jq -c '.[]' >"$state_root/states"
+clock=1000
+date() { if [[ $1 == +%s ]]; then echo "$clock"; else echo T; fi; }
+sleep() { clock=$((clock + $1)); }
+merge_queue_status() {
+  local line
+  line=$(head -n 1 "$state_root/states")
+  (( $(wc -l <"$state_root/states") == 1 )) || sed -i 1d "$state_root/states"
+  printf '%s\n' "$line"
+}
+gh() { echo "gh $*" >&2; }
+desktop_notify() { echo "notify $1: $2"; }
+steer_merge_queue_failure() { echo "steer $1 $2 $3 $4 $5 $(jq -r .timelineItems.nodes[0].reason <<<"$6")"; }
+''' + extra + 'watch_merge_queue 42 head squash 1 1\n', states)
+
+    def test_merge_queue_watch_deletes_branch_only_after_merge(self):
+        queued = {'state': 'OPEN', 'isInMergeQueue': True, 'title': 'Title'}
+        removed = {**queued, 'isInMergeQueue': False,
+                   'timelineItems': {'nodes': [{'reason': 'MERGED'}]}}
+        merged = {**removed, 'state': 'MERGED', 'headRefOid': 'head',
+                  'headRef': {'id': 'REF', 'target': {'oid': 'head'}}}
+        result = self.run_merge_queue_watch([queued, queued, removed, merged])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('steer', result.stdout)
+        self.assertIn('deleteRef', result.stderr)
+        self.assertIn('-F id=REF', result.stderr)
+        self.assertIn('notify CodeRabbit PR merged: PR #42 — Title', result.stdout)
+
+    def test_merge_queue_watch_keeps_advanced_branch(self):
+        merged = {'state': 'MERGED', 'title': 'Title', 'headRefOid': 'head',
+                  'headRef': {'id': 'REF', 'target': {'oid': 'newer'}}}
+        result = self.run_merge_queue_watch([merged])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('deleteRef', result.stderr)
+
+    def test_merge_queue_watch_steers_agent_after_confirmed_failure(self):
+        failed = {'state': 'OPEN', 'isInMergeQueue': False, 'title': 'Title',
+                  'timelineItems': {'nodes': [{'reason': 'FAILED_CHECKS', 'createdAt': 'T1'}]}}
+        result = self.run_merge_queue_watch([failed])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count('steer 42 head squash 1 1 FAILED_CHECKS'), 1, result.stdout)
+
+    def test_merge_queue_watch_retries_busy_agent_and_waits_out_manual_requeue(self):
+        failed = {'state': 'OPEN', 'isInMergeQueue': False, 'title': 'Title',
+                  'timelineItems': {'nodes': [{'reason': 'FAILED_CHECKS', 'createdAt': 'T1'}]}}
+        manual = {**failed, 'timelineItems': {'nodes': [{'reason': 'MANUAL'}]}}
+        queued = {'state': 'OPEN', 'isInMergeQueue': True}
+        result = self.run_merge_queue_watch(
+            [manual, manual, queued, failed, failed, failed, {'state': 'CLOSED'}],
+            'steer_merge_queue_failure() { echo steer; return 75; }\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count('steer'), 2, result.stdout)
+        self.assertIn('was closed without merging', result.stdout)
+
+    def test_merge_queue_failure_prompt_names_failed_run_and_guard(self):
+        data = {'title': 'Title', 'headRefName': 'branch', 'baseRefName': 'development',
+                'timelineItems': {'nodes': [{'reason': 'FAILED_CHECKS', 'createdAt': 'T1'}]}}
+        result = self.run_shell(r'''
+data=$(cat)
+gh() {
+  printf '%s\n' '[{"databaseId":7,"headBranch":"gh-readonly-queue/development/pr-42-abc","conclusion":"failure","workflowName":"E2E Tests","url":"https://example.test/run/7"},
+    {"databaseId":8,"headBranch":"gh-readonly-queue/development/pr-420-abc","conclusion":"failure","workflowName":"Other","url":"https://example.test/run/8"},
+    {"databaseId":9,"headBranch":"gh-readonly-queue/development/pr-42-def","conclusion":"success","workflowName":"Linter","url":"https://example.test/run/9"}]'
+}
+steer_pr_agent() { local -n queue_ids=$6; printf 'agent %s %s %s %s\n%s\n' "$1" "$3" "$4" "${queue_ids[0]}" "$5"; }
+steer_merge_queue_failure 42 head squash 1 1 "$data"
+''', data)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('agent 42 branch head merge-queue:42:head:T1', result.stdout)
+        self.assertIn('GitHub reason: FAILED_CHECKS', result.stdout)
+        self.assertIn('E2E Tests (failure): https://example.test/run/7, run ID 7', result.stdout)
+        self.assertNotIn('run/8', result.stdout)
+        self.assertNotIn('run/9', result.stdout)
+        self.assertIn('--merge-now 42', result.stdout)
+        self.assertIn('squash 1 1 --local-agents', result.stdout)
+
+    def test_steer_pr_agent_reports_delivery_busy_and_missing_agents(self):
+        for state, expected in [('idle', 0), ('running', 75), ('missing', 1)]:
+            with self.subTest(state=state):
+                result = self.run_shell(rf'''
+agent_prefers_claude() {{ return 1; }}
+matching_codex_session() {{ [[ {state} != missing ]] && printf 'session\t/tmp\n'; }}
+matching_claude_session() {{ return 1; }}
+codex_session_state() {{ echo {state}; }}
+steer_running_agents_enabled() {{ return 1; }}
+resume_codex_session() {{ local -n queue_ids=$7; printf '%s\n' "${{queue_ids[@]}}" >>"$routed_threads_file"; }}
+ids=(merge-queue:42:head:T1)
+steer_pr_agent 42 Title branch head prompt ids 'merge queue failure'
+''')
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
+    def test_approved_merge_rows_skip_queued_and_requeue_only_after_a_push(self):
+        review = {'author': {'login': 'coderabbitai'}, 'commit': {'oid': 'head'}, 'state': 'APPROVED'}
+        def pr(number, queued, removed_at):
+            return {'number': number, 'title': f'PR {number}', 'headRefOid': 'head',
+                    'headRefName': f'b{number}', 'isCrossRepository': False, 'isDraft': False,
+                    'author': {'login': 'someone'}, 'isInMergeQueue': queued,
+                    'timelineItems': {'nodes': [{'createdAt': removed_at}] if removed_at else []},
+                    'commits': {'nodes': [{'commit': {'committedDate': '2026-11-02T12:00:00Z'}}]},
+                    'reviews': {'nodes': [review]}}
+        state = {'data': {'repository': {'pullRequests': {'nodes': [
+            pr(1, False, None), pr(2, True, None), pr(3, False, '2026-11-02T13:00:00Z'),
+            pr(4, False, '2026-11-02T11:00:00Z')]}}}}
+        result = self.run_shell('approved_merge_rows "$(cat)" | cut -f1\n', state)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.split(), ['1', '4'])
+
     def test_merge_refuses_queued_workflow_run_missing_from_rollup(self):
         for runs, message in [
             ('[{"workflow_runs":[{"name":"E2E Tests","status":"queued"},{"name":"Linter","status":"completed"}]}]',
@@ -2946,6 +3117,7 @@ gh() {
     touch "$state_root/merged"
   fi
 }
+merge_queue_status() { echo '{}'; }
 merge_pr_now 42 head squash 0 1
 ''')
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -171,8 +171,14 @@ started yet), review states, and unresolved review threads, including feedback
 from other bots. CodeRabbit nitpicks and outside-diff findings in a review body
 can't be resolved like threads, so they count as handled once someone answers
 with a PR comment after that review. If those checks fail, it does not merge.
-An approved PR whose agent task is still running merges after the agent stops. Archiving waits until a merge is confirmed and the matching Codex task
-is idle.
+An approved PR whose agent task is still running merges after the agent stops.
+If the base branch has a merge queue, the guard adds the PR to the queue
+without `--admin`, and the queue's merge method applies. A watcher on the same
+host deletes the branch once GitHub reports the merge. If the PR leaves the
+queue without merging, the watcher sends the failed queue runs to the PR's agent
+task and asks it to fix the failure, push, and run the guard again. Automatic
+merging doesn't queue that head again; it waits for a new push. Archiving waits
+until a merge is confirmed and the matching Codex task is idle.
 
 ## Privacy
 

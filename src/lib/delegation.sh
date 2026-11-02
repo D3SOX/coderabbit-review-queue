@@ -118,7 +118,7 @@ auto_merge_instruction() {
     refusal_text='If it refuses because of conflicts, follow the conflict-resolution instructions above and retry the guard. For other blockers, stop and report them.'
     printf '\n\nIf the merge guard reports merge conflicts, fetch the current base, resolve the conflicts while preserving unrelated work, validate and push the resolution, wait for CI and review bots, and run the same guard again with the new live head SHA. Do not bypass the guard or trigger CodeRabbit yourself. For other blockers, stop and report them.\n'
   fi
-  printf '\n\n%sAfter the task work is complete, wait for CI and every review bot to finish. Before invoking the merge guard, fetch all unresolved review threads, including non-CodeRabbit bots. Verify each finding; fix valid ones or explain and resolve dismissals according to repository rules. Do not merge while any thread remains unresolved; report its author and path if it cannot be addressed. Use the queue merge guard on this agent host: `%s --repo %s --merge-now %s "$(gh pr view %s --repo %s --json headRefOid --jq .headRefOid)" %s %s %s --local-agents`. The command uses the selected merge method without GitHub auto-merge and checks the live head, reviews, checks, and threads before merging.%s %s\n' \
+  printf '\n\n%sAfter the task work is complete, wait for CI and every review bot to finish. Before invoking the merge guard, fetch all unresolved review threads, including non-CodeRabbit bots. Verify each finding; fix valid ones or explain and resolve dismissals according to repository rules. Do not merge while any thread remains unresolved; report its author and path if it cannot be addressed. Use the queue merge guard on this agent host: `%s --repo %s --merge-now %s "$(gh pr view %s --repo %s --json headRefOid --jq .headRefOid)" %s %s %s --local-agents`. The command uses the selected merge method without GitHub auto-merge and checks the live head, reviews, checks, and threads before merging. If the base branch has a merge queue, it adds the PR to the queue instead and exits with status 43; that is not a failure, so stop there. GitHub merges the PR after the queue checks pass, and you get a message if it leaves the queue without merging.%s %s\n' \
     "$decision_text" "$(installed_command)" "$repo" "$pr" "$pr" "$repo" "$method" "$delete_branch" "$admin" "$delete_text" "$refusal_text"
 }
 
@@ -935,6 +935,7 @@ resume_claude_session() {
   local prompt=$5
   local -n thread_ids=$6
   local head_sha=$7
+  local routing_reason=${8:-unresolved CodeRabbit review}
   local git_common_dir session_state resume_status session_file dispatch_result=0
   local routing_lock_path routing_lock_fd
 
@@ -975,8 +976,8 @@ resume_claude_session() {
     fi
   fi
 
-  printf 'Routing unresolved CodeRabbit review on PR #%s to Claude session %s.\n' \
-    "$pr" "$session_id"
+  printf 'Routing %s on PR #%s to Claude session %s.\n' \
+    "$routing_reason" "$pr" "$session_id"
   if (
     cd "$session_cwd" || exit 1
     if python3 "$script_dir/t3-delegate.py" --can-steer "$session_id" --provider claudeAgent >/dev/null 2>&1; then
@@ -1001,7 +1002,7 @@ resume_claude_session() {
     clear_routing_failure "$pr"
     desktop_notify \
       'CodeRabbit review routed' \
-      "PR #$pr — $title"$'\n'"Sent unresolved feedback to its Claude session."
+      "PR #$pr — $title"$'\n'"Sent $routing_reason to its Claude session."
   else
     resume_status=$?
     if (( resume_status == 75 )); then
