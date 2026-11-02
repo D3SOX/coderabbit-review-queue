@@ -336,9 +336,25 @@ class MonitorHostMixin:
         device.addItems(choices)
         device.setCurrentIndex(choices.index(current))
         projects = QListWidget()
+        # True or False once known; None while a remote device is asked;
+        # "unreachable" when it did not answer.
+        running: dict[str, bool | str | None] = {
+            name: None if self.monitor_host(name) else self.monitor_pid(name) is not None
+            for name in repos
+        }
+
+        def describe(name: str) -> str:
+            host, state = self.monitor_host(name), running.get(name)
+            if not host:
+                return f"{name} (running here)" if state else f"{name} (stopped)"
+            if state is None:
+                return f"{name} (on {host}, checking…)"
+            if state == "unreachable":
+                return f"{name} (on {host}, unreachable)"
+            return f"{name} (running on {host})" if state else f"{name} (stopped, on {host})"
+
         for name in repos:
-            host = self.monitor_host(name)
-            item = QListWidgetItem(f"{name} (on {host})" if host else name)
+            item = QListWidgetItem(describe(name))
             item.setData(Qt.UserRole, name)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if name == repo else Qt.Unchecked)
@@ -356,7 +372,15 @@ class MonitorHostMixin:
         chosen: list[Qt.CheckState] = []
 
         def update_controls() -> None:
-            projects.setEnabled(not every_running.isChecked())
+            # Lock the rows, not the list, so that it still scrolls.
+            locked = every_running.isChecked()
+            with QSignalBlocker(projects):
+                for index in range(projects.count()):
+                    item = projects.item(index)
+                    if locked:
+                        item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                    else:
+                        item.setFlags(item.flags() | Qt.ItemIsEnabled)
             move_button.setEnabled(every_running.isChecked() or any(
                 projects.item(index).checkState() == Qt.Checked
                 for index in range(projects.count())
@@ -364,18 +388,51 @@ class MonitorHostMixin:
 
         def toggle_every_running(enabled: bool) -> None:
             # "All running" picks the repositories itself: lock the list with
-            # every box ticked, and restore the user's choice afterwards.
+            # the running ones ticked, and restore the user's choice afterwards.
             with QSignalBlocker(projects):
                 for index in range(projects.count()):
                     item = projects.item(index)
                     if enabled:
                         chosen.append(item.checkState())
-                        item.setCheckState(Qt.Checked)
+                        item.setCheckState(
+                            Qt.Checked if running.get(item.data(Qt.UserRole)) is True
+                            else Qt.Unchecked
+                        )
                     else:
                         item.setCheckState(chosen[index])
                 if not enabled:
                     chosen.clear()
             update_controls()
+
+        def remote_state_known(index: int, process: QProcess, exit_code: int) -> None:
+            stdout, _stderr = command_output(process)
+            name = repos[index]
+            try:
+                info = json.loads(stdout) if exit_code == 0 else None
+            except json.JSONDecodeError:
+                info = None
+            running[name] = (
+                isinstance(info.get("pid"), int) if isinstance(info, dict) else "unreachable"
+            )
+            item = projects.item(index)
+            with QSignalBlocker(projects):
+                item.setText(describe(name))
+                if every_running.isChecked():
+                    item.setCheckState(Qt.Checked if running[name] is True else Qt.Unchecked)
+
+        probes: list[QProcess] = []
+        for index, name in enumerate(repos):
+            if running[name] is not None:
+                continue
+            process = QProcess(dialog)
+            process.finished.connect(
+                lambda code, _status, index=index, process=process:
+                remote_state_known(index, process, code)
+            )
+            process.setProgram(SCRIPT)
+            process.setArguments(["--repo", name, "--monitor-info"])
+            process.start()
+            probes.append(process)
 
         every_running.toggled.connect(toggle_every_running)
         projects.itemChanged.connect(update_controls)
@@ -389,7 +446,12 @@ class MonitorHostMixin:
         layout.addWidget(projects)
         layout.addWidget(every_running)
         layout.addWidget(buttons)
-        if dialog.exec() != QDialog.Accepted:
+        accepted = dialog.exec() == QDialog.Accepted
+        for process in probes:
+            if process.state() != QProcess.NotRunning:
+                process.kill()
+                process.waitForFinished(1000)
+        if not accepted:
             return
         target = device.currentText()
         checked = [
