@@ -359,6 +359,25 @@ class MonitorHostMixin:
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if name == repo else Qt.Unchecked)
             projects.addItem(item)
+
+        # Open wide enough for the longest label a row can get once its
+        # remote state arrives, so that no row needs a horizontal scrollbar.
+        def longest_labels(name: str) -> list[str]:
+            host = self.monitor_host(name)
+            if not host:
+                return [f"{name} (running here)"]
+            return [f"{name} (on {host}, unreachable)", f"{name} (stopped, on {host})"]
+
+        metrics = projects.fontMetrics()
+        style = projects.style()
+        projects.setMinimumWidth(
+            max((metrics.horizontalAdvance(text) for name in repos for text in longest_labels(name)),
+                default=0)
+            + style.pixelMetric(style.PixelMetric.PM_IndicatorWidth)
+            + style.pixelMetric(style.PixelMetric.PM_ScrollBarExtent)
+            + 6 * style.pixelMetric(style.PixelMetric.PM_LayoutHorizontalSpacing, None, projects)
+            + 2 * projects.frameWidth()
+        )
         every_running = QCheckBox("All running monitors")
         every_running.setToolTip(
             "Move every repository whose monitor is running; stopped monitors stay where they are"
