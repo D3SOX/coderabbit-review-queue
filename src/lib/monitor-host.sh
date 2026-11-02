@@ -308,7 +308,7 @@ set_monitor_host() {
 }
 
 move_monitor() {
-  local target=$1 source info source_id target_id local_id state was_running=0
+  local target=$1 only_running=${2:-0} source info source_id target_id local_id state was_running=0
   [[ $target != local ]] || target=''
   [[ -z $target || $target =~ ^[A-Za-z0-9_.@-]+$ ]] || {
     printf 'Use an SSH config alias or a host name without spaces.\n' >&2
@@ -320,6 +320,21 @@ move_monitor() {
     return 0
   fi
   local_id=$(machine_id)
+  source_id=$local_id
+  if [[ -n $source ]]; then
+    info=$(ssh_queue_command "$source" --monitor-info --local-monitor) || {
+      printf 'Could not reach the monitor host %s.\n' "$source" >&2
+      return 1
+    }
+    source_id=$(jq -r '.machineId' <<<"$info")
+    [[ $(jq -r '.pid' <<<"$info") == null ]] || was_running=1
+  elif local_monitor_pid >/dev/null; then
+    was_running=1
+  fi
+  if (( only_running && ! was_running )); then
+    printf 'The monitor for %s is not running; it stays on %s.\n' "$repo" "$(monitor_location "$source")"
+    return 0
+  fi
   target_id=$local_id
   if [[ -n $target ]]; then
     info=$(ssh_queue_command "$target" --monitor-info --local-monitor) || {
@@ -336,17 +351,6 @@ move_monitor() {
         "$repo" "$target" >&2
       return 1
     fi
-  fi
-  source_id=$local_id
-  if [[ -n $source ]]; then
-    info=$(ssh_queue_command "$source" --monitor-info --local-monitor) || {
-      printf 'Could not reach the monitor host %s.\n' "$source" >&2
-      return 1
-    }
-    source_id=$(jq -r '.machineId' <<<"$info")
-    [[ $(jq -r '.pid' <<<"$info") == null ]] || was_running=1
-  elif local_monitor_pid >/dev/null; then
-    was_running=1
   fi
   refuse_monitors_elsewhere "$source_id" "$target_id" || return 1
 

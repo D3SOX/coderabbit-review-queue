@@ -142,7 +142,7 @@ main() {
   local archive_session=''
   local codex_state_session=''
   local merge_pr='' merge_head='' merge_method_arg='' merge_delete='0' merge_admin_arg='0'
-  local move_target='' sync_host='' sync_direction=''
+  local move_target='' move_if_running=0 sync_host='' sync_direction=''
   local -a queue_order=()
 
   while (( $# > 0 )); do
@@ -273,6 +273,10 @@ main() {
         move_target=$2
         shift 2
         ;;
+      --if-running)
+        move_if_running=1
+        shift
+        ;;
       --sync-settings)
         (( $# >= 3 )) && [[ $3 =~ ^(send|receive)$ ]] || {
           printf '%s\n' '--sync-settings requires an SSH host and send or receive.' >&2
@@ -399,7 +403,7 @@ main() {
     monitor-info) monitor_info; return ;;
     start-monitor) start_monitor_command; return ;;
     stop-monitor) stop_local_monitor; return ;;
-    move-monitor) move_monitor "$move_target"; return ;;
+    move-monitor) move_monitor "$move_target" "$move_if_running"; return ;;
     export-state) export_monitor_state all; return ;;
     export-settings) export_monitor_state settings; return ;;
     sync-settings) sync_settings "$sync_host" "$sync_direction"; return ;;

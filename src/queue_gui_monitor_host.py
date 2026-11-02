@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QProcess, Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QInputDialog,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
     QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout,
 )
 
@@ -80,6 +80,10 @@ class MonitorHostMixin:
         self.monitor_command_process.finished.connect(self.monitor_command_finished)
         self.monitor_command_repo = ""
         self.monitor_command_kind = ""
+        self.move_batch: list[tuple[str, list[str]]] = []
+        self.move_target_label = ""
+        self.move_results: list[str] = []
+        self.move_failed = False
         self.sync_process = QProcess(self)
         self.sync_process.finished.connect(self.sync_step_finished)
         self.sync_pending: list[str] = []
@@ -242,6 +246,19 @@ class MonitorHostMixin:
         self.remote_monitors.pop(repo, None)
         self.remote_monitor_errors.pop(repo, None)
         self.pushed_settings.pop(repo, None)
+        if kind == "move":
+            # Moves run as a batch; report them together at the end.
+            message = (stdout if exit_code == 0 else stderr) or stdout or stderr
+            if exit_code != 0:
+                self.move_failed = True
+                message = f"{repo}: {message.splitlines()[-1] if message else 'failed'}"
+            # Keep the "now belongs to" line rather than the start message after it.
+            moved = [line for line in stdout.splitlines() if "now belongs to" in line]
+            line = moved[-1] if exit_code == 0 and moved else (message.splitlines()[-1] if message else "")
+            if line and "already belongs" not in line and "is not running" not in line:
+                self.move_results.append(line)
+            self.start_next_move()
+            return
         if exit_code == 0:
             lines = stdout.splitlines()
             self.show_transient_status(lines[-1] if lines else "Done", 6000)
@@ -249,7 +266,6 @@ class MonitorHostMixin:
             titles = {
                 "start": "Could not start monitor",
                 "stop": "Could not stop monitor",
-                "move": "Could not move monitor",
             }
             QMessageBox.warning(
                 self, titles.get(kind, "Monitor command failed"),
@@ -284,7 +300,7 @@ class MonitorHostMixin:
 
     def move_monitor(self) -> None:
         repo = self.selected_repo()
-        if not repo or self.monitor_command_running(repo):
+        if not repo or self.monitor_command_process.state() != QProcess.NotRunning:
             return
         current = self.monitor_host(repo) or THIS_DEVICE
         hosts = queue_hosts()
@@ -297,31 +313,72 @@ class MonitorHostMixin:
         choices = [THIS_DEVICE] + hosts
         if current not in choices:
             choices.append(current)
-        selected, accepted = QInputDialog.getItem(
-            self,
-            "Move monitor",
-            f"Device that should run the monitor for {repo}.\n"
-            "A running monitor is stopped, its settings and queue state are copied, "
-            "and it starts again there.",
-            choices,
-            choices.index(current),
-            False,
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Move monitor")
+        intro = QLabel(
+            f"Device that should run the monitor for {repo}. A running monitor is "
+            "stopped, its settings and queue state are copied, and it starts again there."
         )
-        if not accepted:
+        intro.setWordWrap(True)
+        device = QComboBox()
+        device.addItems(choices)
+        device.setCurrentIndex(choices.index(current))
+        every_running = QCheckBox("All running monitors, not just this repository")
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Move")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form = QFormLayout()
+        form.addRow("Device", device)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(intro)
+        layout.addLayout(form)
+        layout.addWidget(every_running)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
             return
-        target = selected.strip()
-        if target == current:
+        target = device.currentText()
+        if target == current and not every_running.isChecked():
             return
-        if target != THIS_DEVICE and not re.fullmatch(r"[A-Za-z0-9_.@-]+", target):
-            QMessageBox.warning(
-                self, "Invalid SSH host",
-                "Use an SSH config alias or a host name without spaces.",
-            )
+        host_argument = "local" if target == THIS_DEVICE else target
+        # This repository moves; the others only when their monitor runs.
+        batch = [] if target == current else [(repo, ["--move-monitor", host_argument])]
+        if every_running.isChecked():
+            batch += [
+                (other, ["--move-monitor", host_argument, "--if-running"])
+                for other in (
+                    self.repo_combo.itemText(index) for index in range(self.repo_combo.count())
+                )
+                if other != repo
+            ]
+        self.move_batch = batch
+        self.move_target_label = "this device" if target == THIS_DEVICE else target
+        self.move_results = []
+        self.move_failed = False
+        self.start_next_move()
+
+    def start_next_move(self) -> None:
+        if not self.move_batch:
+            summary = "\n".join(self.move_results) or "Nothing was moved."
+            if self.move_failed:
+                QMessageBox.warning(self, "Could not move every monitor", summary)
+            else:
+                lines = summary.splitlines()
+                self.show_transient_status(
+                    lines[-1] if len(lines) == 1
+                    else f"Moved the running monitors to {self.move_target_label}",
+                    6000,
+                )
+            repo = self.selected_repo()
+            if repo:
+                self.review_requests_signature = None
+                self.update_monitor_state()
+                self.load_agent_host(repo)
+                self.refresh()
             return
+        repo, arguments = self.move_batch.pop(0)
         self.run_monitor_command(
-            repo, "move",
-            ["--move-monitor", "local" if target == THIS_DEVICE else target],
-            f"Moving monitor to {target.lower() if target == THIS_DEVICE else target}…",
+            repo, "move", arguments, f"Moving the monitor for {repo} to {self.move_target_label}…"
         )
 
     def configure_devices(self) -> None:

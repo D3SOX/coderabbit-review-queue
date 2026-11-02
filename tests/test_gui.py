@@ -68,6 +68,30 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 hosts_file.write_text(hosts_file.read_text() + 'pi\nbad host\n')
                 self.assertEqual(queue_gui_monitor_host.queue_hosts(), ['pi', 'nico-laptop'])
 
+    def test_batch_move_reports_moved_monitors_and_failures_together(self):
+        window = Mock()
+        window.selected_repo.return_value = 'example/one'
+        window.starting_monitors = set()
+        window.remote_monitors, window.remote_monitor_errors, window.pushed_settings = {}, {}, {}
+        window.move_results, window.move_failed = [], False
+        window.monitor_command_kind = 'move'
+        outputs = [
+            ('example/one', 0, b'Stopped the monitor\nThe monitor for example/one now belongs to pi.\nStarted it\n', b''),
+            ('example/two', 0, b'The monitor for example/two is not running; it stays on this device.\n', b''),
+            ('example/three', 1, b'', b'Could not reach the queue on pi.\n'),
+        ]
+        for repo, code, stdout, stderr in outputs:
+            window.monitor_command_repo = repo
+            window.monitor_command_process.readAllStandardOutput.return_value = stdout
+            window.monitor_command_process.readAllStandardError.return_value = stderr
+            queue_gui_monitor_host.MonitorHostMixin.monitor_command_finished(window, code)
+        self.assertEqual(window.move_results, [
+            'The monitor for example/one now belongs to pi.',
+            'example/three: Could not reach the queue on pi.',
+        ])
+        self.assertTrue(window.move_failed)
+        self.assertEqual(window.start_next_move.call_count, 3)
+
     def test_remote_monitor_pid_comes_from_the_last_poll_of_its_host(self):
         window = Mock()
         window.monitor_host.return_value = 'pi'

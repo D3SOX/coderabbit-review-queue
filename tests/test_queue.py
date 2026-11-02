@@ -3090,6 +3090,18 @@ queue_hosts | tr '\n' ' '; echo
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines(), ['pi laptop ', 'pi laptop deck '])
 
+    def test_move_if_running_leaves_stopped_monitors_in_place(self):
+        result = self.run_shell(r'''
+machine_id() { echo here; }
+local_monitor_pid() { return 1; }
+ssh_queue_command() { echo "UNEXPECTED ssh $*"; }
+main --repo example/repo --move-monitor pi --if-running
+[[ ! -e $monitor_host_file ]] || exit 41
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('The monitor for example/repo is not running; it stays on this device.', result.stdout)
+        self.assertNotIn('UNEXPECTED', result.stdout)
+
     def test_merge_refuses_queued_workflow_run_missing_from_rollup(self):
         for runs, message in [
             ('[{"workflow_runs":[{"name":"E2E Tests","status":"queued"},{"name":"Linter","status":"completed"}]}]',
