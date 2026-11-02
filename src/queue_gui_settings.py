@@ -569,6 +569,32 @@ class SettingsMixin:
         )
         self.refresh(manual=True)
 
+    def notifications_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-notifications"
+
+    def load_notifications(self, repo: str) -> None:
+        self.notifications.blockSignals(True)
+        self.notifications.setEnabled(bool(repo))
+        try:
+            enabled = not repo or self.notifications_file(repo).read_text().strip() != "0"
+        except OSError:
+            enabled = True
+        self.notifications.setChecked(enabled)
+        self.notifications.blockSignals(False)
+
+    def notifications_changed(self, enabled: bool) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = self.notifications_file(repo)
+        temporary = target.with_name(target.name + ".tmp")
+        temporary.write_text("1\n" if enabled else "0\n")
+        os.replace(temporary, target)
+        self.show_transient_status(
+            "Desktop notifications enabled" if enabled else "Desktop notifications disabled"
+        )
+
     def notify_sound_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-notify-sound"
 

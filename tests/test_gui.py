@@ -1418,10 +1418,11 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         for index, widget in enumerate((
             window.stop_when_empty,
             window.ignore_drafts,
+            window.notifications,
             window.notify_sound,
         )):
             self.assertEqual(options_row.indexOf(widget), index)
-        self.assertEqual(options_row.indexOf(window.notify_sound_button), 4)
+        self.assertEqual(options_row.indexOf(window.notify_sound_button), 5)
         window.show()
         app.processEvents()
         button_right = window.notify_sound_button.mapTo(
@@ -1449,6 +1450,27 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertGreater(window.excluded_authors.width(), 150)
         window.close()
         app.processEvents()
+
+    def test_notifications_toggle_is_saved_per_repository(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            queue_gui.QueueWindow, "load_cached_repos", return_value=True
+        ), patch.object(queue_gui_settings, "STATE_ROOT", Path(directory)):
+            window = queue_gui.QueueWindow()
+            window.selected_repo = lambda: "example/repo"
+            window.show_transient_status = Mock()
+            target = Path(directory) / "example__repo-notifications"
+            window.load_notifications("example/repo")
+            self.assertTrue(window.notifications.isChecked())
+            window.notifications.setChecked(False)
+            self.assertEqual(target.read_text(), "0\n")
+            window.load_notifications("example/repo")
+            self.assertFalse(window.notifications.isChecked())
+            window.load_notifications("")
+            self.assertFalse(window.notifications.isEnabled())
+            self.assertEqual(target.read_text(), "0\n")
+            window.close()
+            app.processEvents()
 
     def test_configure_sound_follows_saved_and_live_sound_toggle(self):
         app = QApplication.instance() or QApplication([])

@@ -2459,6 +2459,17 @@ printf '%s %s\n' "$repo" "$repo_key"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), 'acme/widget acme__widget')
 
+    def test_disabled_notifications_skip_notify_send(self):
+        for setting, expected in (('', 'sent'), ('1', 'sent'), ('0', '')):
+            with self.subTest(setting=setting):
+                result = self.run_shell(f'''
+[[ -z "{setting}" ]] || printf '%s\\n' "{setting}" >"$notifications_file"
+notify-send() {{ echo sent >&3; }}
+desktop_notify Title Message 3>&1
+''')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+
     def test_repository_state_suffixes_cover_every_state_file(self):
         result = self.run_shell('printf "%s\\n" "$repo_state_suffixes"')
         self.assertEqual(result.returncode, 0, result.stderr)

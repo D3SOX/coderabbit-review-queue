@@ -62,11 +62,17 @@ play_notification_sound() {
   fi
 }
 
+notifications_enabled() {
+  # Default on: missing file or anything other than 0.
+  [[ ! -f $notifications_file ]] || [[ $(head -n 1 "$notifications_file") != 0 ]]
+}
+
 desktop_notify() {
   local title=$1
   local message=$2
   local urgency=${3:-normal}
   local app_icon
+  notifications_enabled || return 0
   # Always identify the repository, including when monitors overlap. Put it
   # first in the body so a long notification title cannot hide the project.
   [[ -z ${repo:-} ]] || message="$repo"$'\n'"$message"

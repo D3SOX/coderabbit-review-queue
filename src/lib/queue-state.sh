@@ -131,7 +131,7 @@ snapshot() {
 }
 
 # Every per-repository file name after "$repo_key-"; see configure_repo.
-repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor\.log|monitor-state\.tsv|new-items-at-top|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
+repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
 
 configure_repo() {
   local selected=$1
@@ -175,6 +175,7 @@ configure_repo() {
   ignore_drafts_file="$state_root/$repo_key-ignore-drafts"
   excluded_branches_file="$state_root/$repo_key-excluded-branches"
   excluded_authors_file="$state_root/$repo_key-excluded-authors"
+  notifications_file="$state_root/$repo_key-notifications"
   notify_sound_file="$state_root/$repo_key-notify-sound"
   notify_sound_path_file="$state_root/$repo_key-notify-sound-path"
   notify_sound_volume_file="$state_root/$repo_key-notify-sound-volume"

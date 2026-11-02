@@ -325,6 +325,13 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.excluded_authors.editingFinished.connect(self.excluded_authors_changed)
         excluded_row.addWidget(authors_label)
         excluded_row.addWidget(self.excluded_authors, 1)
+        self.notifications = QCheckBox("Show desktop notifications")
+        self.notifications.setToolTip(
+            "Per repository. When disabled, the monitor shows no desktop "
+            "notifications. The review-available sound has its own setting."
+        )
+        self.notifications.setChecked(True)
+        self.notifications.toggled.connect(self.notifications_changed)
         self.notify_sound = QCheckBox(
             "Play a sound when a new review becomes available"
         )
@@ -343,6 +350,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         monitor_options_row.setSpacing(12)
         monitor_options_row.addWidget(self.stop_when_empty)
         monitor_options_row.addWidget(self.ignore_drafts)
+        monitor_options_row.addWidget(self.notifications)
         monitor_options_row.addWidget(self.notify_sound)
         monitor_options_row.addStretch()
         monitor_options_row.addWidget(self.notify_sound_button)
@@ -862,6 +870,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.load_ignore_drafts(repo)
         self.load_excluded_branches(repo)
         self.load_excluded_authors(repo)
+        self.load_notifications(repo)
         self.load_notify_sound(repo)
         self.load_new_items_at_top(repo)
         self.load_requeued_items_at_top(repo)
