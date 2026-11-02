@@ -26,8 +26,9 @@ requests.
   approvals, unresolved feedback, CI check status, and matching agent-task
   progress. Queue order, the last status, and unexpired review windows
   survive an app restart.
-- Runs separate monitors for separate repositories. The GUI can start and stop
-  them; the tray icon shows the time to the next window, running reviews,
+- Runs separate monitors for separate repositories, on this device or on
+  another one over SSH, and refuses to run two for the same repository. The GUI
+  can start, stop, and move them; the tray icon shows the time to the next window, running reviews,
   available reviews, and a stopped monitor, and can show or hide the window.
 - Can delegate unresolved feedback to an idle Codex or Claude task, including
   tasks on an SSH host selected from your SSH config. Codex sessions started by
@@ -153,6 +154,15 @@ Automatic delegation is disabled by default. For each repository, choose Auto
 available. The **Agent host** dialog lists
 hosts from `~/.ssh/config`, or you can leave it on Local. The queue uses that
 host for task lookup, delegation, and `gh pr merge`.
+
+**Move monitor…** runs a repository's monitor on another device from
+`~/.ssh/config`, or brings it back. The queue must be installed there. Moving
+stops a running monitor, copies its settings and queue state, and starts it on
+the new device. The window keeps controlling it over SSH: it shows the remote
+queue and status, starts and stops it, and sends every settings change there.
+Before any monitor starts, the queue asks each SSH host whether it already runs
+a monitor for that repository and refuses to start a second one. Desktop
+notifications and sounds from a remote monitor appear on that device.
 
 T3 Code delegations are sent through its running local server so turns also
 appear in the T3 app. If its CLI is not on `PATH`, set `T3CODE_CLI` on the

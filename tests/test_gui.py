@@ -19,27 +19,64 @@ assert SPEC and SPEC.loader
 queue_gui = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(queue_gui)
 import queue_gui_common
+import queue_gui_monitor_host
 import queue_gui_settings
 import queue_gui_status
 
 
 class ReviewRequestRefreshTests(unittest.TestCase):
-    def test_gui_started_monitor_keeps_diagnostics_in_repository_log(self):
+    def test_gui_starts_monitor_through_the_cli_duplicate_check(self):
         window = Mock()
         window.selected_repo.return_value = 'example/repo'
         window.monitor_pid.return_value = None
+        window.monitor_command_running.return_value = False
         window.starting_monitors = set()
+        queue_gui.QueueWindow.start_monitor(window)
+        window.start_monitor_via_cli.assert_called_once_with('example/repo')
+
+    def test_remote_monitor_state_is_read_from_its_mirror(self):
         with tempfile.TemporaryDirectory() as directory:
-            log_path = Path(directory) / 'example__repo-monitor.log'
-            log_path.write_text('previous diagnostic\n')
-            def launch(*_args, **kwargs):
-                self.assertIs(kwargs['stdout'], kwargs['stderr'])
-                kwargs['stderr'].write(b'new diagnostic\n')
-            with patch.object(queue_gui, 'STATE_ROOT', Path(directory)), \
-                 patch.object(queue_gui.subprocess, 'Popen', side_effect=launch), \
-                 patch.object(queue_gui.QTimer, 'singleShot'):
-                queue_gui.QueueWindow.start_monitor(window)
-            self.assertEqual(log_path.read_text(), 'previous diagnostic\nnew diagnostic\n')
+            root = Path(directory)
+            window = Mock()
+            window.monitor_host.side_effect = lambda repo=None: 'pi'
+            window.selected_repo.return_value = 'example/repo'
+            mirror = root / 'remote-monitors'
+            with patch.object(queue_gui_monitor_host, 'STATE_ROOT', root), \
+                 patch.object(queue_gui_monitor_host, 'REMOTE_MIRROR_ROOT', mirror):
+                path = queue_gui_monitor_host.MonitorHostMixin.repo_state_file(
+                    window, 'example/repo', 'monitor-state.tsv')
+                self.assertEqual(path, mirror / 'example__repo-monitor-state.tsv')
+                setting = queue_gui_monitor_host.MonitorHostMixin.repo_state_file(
+                    window, 'example/repo', 'auto-merge')
+                self.assertEqual(setting, root / 'example__repo-auto-merge')
+                queue_gui_monitor_host.MonitorHostMixin.write_remote_mirror(window, 'example/repo', {
+                    'monitor-state.tsv': {'text': 'waiting\t\t\t0\n', 'mtime': 1000},
+                })
+                self.assertEqual(path.read_text(), 'waiting\t\t\t0\n')
+                self.assertEqual(path.stat().st_mtime, 1000)
+                self.assertFalse((mirror / 'example__repo-order.txt').exists())
+                queue_gui_monitor_host.MonitorHostMixin.write_remote_mirror(window, 'example/repo', {})
+                self.assertFalse(path.exists())
+
+    def test_queue_hosts_file_ignores_invalid_and_duplicate_hosts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hosts_file = Path(directory) / 'queue-hosts'
+            with patch.object(queue_gui_monitor_host, 'QUEUE_HOSTS_FILE', hosts_file), \
+                 patch.object(queue_gui_monitor_host, 'STATE_ROOT', Path(directory)):
+                self.assertEqual(queue_gui_monitor_host.queue_hosts(), [])
+                queue_gui_monitor_host.save_queue_hosts(['pi', 'nico-laptop'])
+                hosts_file.write_text(hosts_file.read_text() + 'pi\nbad host\n')
+                self.assertEqual(queue_gui_monitor_host.queue_hosts(), ['pi', 'nico-laptop'])
+
+    def test_remote_monitor_pid_comes_from_the_last_poll_of_its_host(self):
+        window = Mock()
+        window.monitor_host.return_value = 'pi'
+        window.remote_monitors = {'example/repo': ('pi', 42)}
+        self.assertEqual(
+            queue_gui_monitor_host.MonitorHostMixin.remote_monitor_pid(window, 'example/repo'), 42)
+        window.remote_monitors = {'example/repo': ('laptop', 42)}
+        self.assertIsNone(
+            queue_gui_monitor_host.MonitorHostMixin.remote_monitor_pid(window, 'example/repo'))
 
     def test_claude_delegation_is_running_only_after_delivery_confirmation(self):
         for confirmed in (True, False):

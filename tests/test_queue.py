@@ -2505,8 +2505,8 @@ remote_agent_command --task-progress $'multi\nline'
         command = result.stdout.split('\n', 1)[1]
         check = subprocess.run(
             ['bash', '-c', 'coderabbit-review-queue() { printf "<%s>" "$@"; }\n'
-             + command.replace('exec "${XDG_BIN_HOME:-$HOME/.local/bin}/coderabbit-review-queue"',
-                               'coderabbit-review-queue')],
+             + command.replace('[[ -x $queue ]] || exit 127', ':')
+                      .replace('exec "$queue"', 'coderabbit-review-queue')],
             text=True, capture_output=True,
         )
         self.assertEqual(check.stdout, '<--repo><example/repo><--task-progress><multi\nline>')
@@ -2898,6 +2898,197 @@ merge_pr_now 42 head squash 0 0
 ''')
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('UNSAFE MERGE', result.stdout)
+
+    def test_monitor_state_export_and_import_round_trip(self):
+        result = self.run_shell(r'''
+printf 'claude\n' >"$auto_delegate_file"
+printf '7\n9\n' >"$queue_order_file"
+printf 'old\n' >"$state_root/example__repo-excluded-authors"
+state=$(export_monitor_state all)
+jq -e '.["auto-delegate"] == "claude\n" and .["order.txt"] == "7\n9\n" and .["auto-merge"] == null' <<<"$state" >/dev/null || exit 41
+settings=$(export_monitor_state settings)
+jq -e 'has("order.txt") | not' <<<"$settings" >/dev/null || exit 42
+rm -f "$auto_delegate_file" "$queue_order_file"
+printf '1\n' >"$auto_merge_file"
+jq -c '. + {"../evil": "x", "excluded-authors": null}' <<<"$state" | import_monitor_state
+[[ $(<"$auto_delegate_file") == claude && $(<"$queue_order_file") == $'7\n9' ]] || exit 43
+[[ ! -e $auto_merge_file && ! -e $state_root/example__repo-excluded-authors ]] || exit 44
+[[ ! -e $state_root/evil && ! -e $state_root/example__repo-../evil ]] || exit 45
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Skipping unknown state file ../evil.', result.stderr)
+
+    def test_portable_settings_keep_the_remote_agent_host_when_local(self):
+        result = self.run_shell(r'''
+printf '\n' >"$agent_host_file"
+portable_settings | jq -e 'has("agent-host") | not' >/dev/null || exit 41
+printf 'desktop\n' >"$agent_host_file"
+portable_settings | jq -e '.["agent-host"] == "desktop\n"' >/dev/null || exit 42
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_ssh_queue_command_passes_stdin_data_to_the_remote_queue(self):
+        result = self.run_shell(r'''
+ssh() { cat; }
+remote_stdin=$'{"a": "x\'y"}\nline' ssh_queue_command pi --import-state --local-monitor
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        check = subprocess.run(
+            ['bash', '-c', 'queue_stub() { printf "<%s>" "$@"; printf "[%s]" "$(cat)"; }\n'
+             + result.stdout.replace('[[ -x $queue ]] || exit 127', ':')
+                            .replace('"$queue"', 'queue_stub')],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(check.stdout,
+                         '<--repo><example/repo><--import-state><--local-monitor>'
+                         '[{"a": "x\'y"}\nline]', check.stderr)
+
+    def test_monitor_commands_run_on_the_monitor_host(self):
+        result = self.run_shell(r'''
+printf 'pi\n' >"$monitor_host_file"
+ssh_queue_command() { echo "ssh $*"; }
+main --repo example/repo --cached-status
+main --repo example/repo --delegate 4 --delegate 5
+main --repo example/repo --set-order 3 1
+main --repo example/repo --stop-monitor
+main --repo example/repo && echo started-here || echo "refused $?"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('ssh pi --cached-status --local-monitor', result.stdout)
+        self.assertIn('ssh pi --delegate 4 --delegate 5 --local-monitor', result.stdout)
+        self.assertIn('ssh pi --set-order 3 1 --local-monitor', result.stdout)
+        self.assertIn('ssh pi --stop-monitor --local-monitor', result.stdout)
+        self.assertNotIn('started-here', result.stdout)
+        self.assertIn('refused 1', result.stdout)
+        self.assertIn('The monitor for example/repo belongs to pi.', result.stderr)
+
+    def test_monitors_elsewhere_skips_this_device_and_unreachable_hosts(self):
+        result = self.run_shell(r'''
+machine_id() { echo here; }
+queue_hosts() { printf '%s\n' self pi pi-alias laptop down idle; }
+ssh_queue_command() {
+  case $1 in
+    self) echo '{"machineId":"here","pid":10}' ;;
+    pi|pi-alias) echo '{"machineId":"pi-id","pid":20}' ;;
+    laptop) echo '{"machineId":"laptop-id","pid":30}' ;;
+    idle) echo '{"machineId":"idle-id","pid":null}' ;;
+    *) return 255 ;;
+  esac
+}
+monitors_elsewhere | cut -f2,3
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['laptop-id\t30', 'pi-id\t20'])
+
+    def test_start_refuses_when_another_device_runs_the_monitor(self):
+        result = self.run_shell(r'''
+machine_id() { echo here; }
+monitors_elsewhere() { printf 'pi\tpi-id\t20\n'; }
+start_local_monitor() { echo UNEXPECTED START; }
+main --repo example/repo --start-monitor
+''')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('UNEXPECTED', result.stdout)
+        self.assertIn('A monitor for example/repo already runs on pi (PID 20).', result.stderr)
+
+    def test_move_monitor_to_another_device_carries_its_state(self):
+        result = self.run_shell(r'''
+machine_id() { echo here; }
+printf 'desktop\n' >"$agent_host_file"
+printf '5\n' >"$queue_order_file"
+local_monitor_pid() { [[ ! -f $state_root/stopped ]] && echo 77; }
+stop_local_monitor() { touch "$state_root/stopped"; echo stopped-local; }
+monitors_elsewhere() { :; }
+ssh_queue_command() {
+  if [[ $2 == --import-state ]]; then
+    echo "import on $1: $(jq -r '.["order.txt"]' <<<"$remote_stdin" | tr -d '\n')"
+  elif [[ $2 == --monitor-info ]]; then
+    echo '{"machineId":"pi-id","pid":null}'
+  else
+    echo "ssh $*"
+  fi
+}
+move_monitor pi
+echo "host file: $(<"$monitor_host_file")"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            'stopped-local',
+            'import on pi: 5',
+            'The monitor for example/repo now belongs to pi.',
+            'ssh pi --start-monitor --local-monitor',
+            'host file: pi',
+        ])
+
+    def test_move_monitor_needs_a_reachable_agent_host(self):
+        result = self.run_shell(r'''
+machine_id() { echo here; }
+ssh_queue_command() { echo '{"machineId":"pi-id","pid":null}'; }
+move_monitor pi
+''')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('Set the agent host to this device', result.stderr)
+        self.assertNotIn('now belongs', result.stdout)
+
+    def test_move_monitor_back_keeps_the_local_agent_host(self):
+        result = self.run_shell(r'''
+machine_id() { echo here; }
+printf 'pi\n' >"$monitor_host_file"
+printf 'desktop\n' >"$agent_host_file"
+monitors_elsewhere() { :; }
+start_local_monitor() { echo started-local; }
+ssh_queue_command() {
+  case $2 in
+    --monitor-info) echo '{"machineId":"pi-id","pid":20}' ;;
+    --export-state) echo '{"order.txt":"8\n","agent-host":"elsewhere\n","auto-merge":"1\n"}' ;;
+    *) echo "ssh $*" ;;
+  esac
+}
+move_monitor local
+[[ ! -e $monitor_host_file ]] || exit 41
+echo "agent host: $(<"$agent_host_file") order: $(<"$queue_order_file") merge: $(<"$auto_merge_file")"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('ssh pi --stop-monitor --local-monitor', result.stdout)
+        self.assertIn('started-local', result.stdout)
+        self.assertIn('agent host: desktop order: 8 merge: 1', result.stdout)
+
+    def test_sync_settings_sends_receives_and_never_wipes(self):
+        result = self.run_shell(r'''
+printf 'claude\n' >"$auto_delegate_file"
+printf '4\n' >"$queue_order_file"
+ssh_queue_command() {
+  case $2 in
+    --import-state) echo "import on $1: $(jq -c 'with_entries(select(.value != null))' <<<"$remote_stdin")" ;;
+    --export-settings) printf '%s\n' "${remote_settings:?}" ;;
+  esac
+}
+sync_settings laptop send
+remote_settings='{"auto-merge":"1\n","agent-host":"\n","auto-delegate":null}' sync_settings laptop receive
+echo "local: merge=$(<"$auto_merge_file") delegate=$([[ -e $auto_delegate_file ]] && echo kept || echo removed) order=$(<"$queue_order_file")"
+remote_settings='{"auto-merge":null,"auto-delegate":null}' sync_settings laptop receive
+[[ -e $auto_merge_file ]] || exit 41
+rm -f "$auto_merge_file"
+sync_settings laptop send
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('import on laptop: {"auto-delegate":"claude\\n"}', result.stdout)
+        self.assertIn('Received the settings for example/repo from laptop.', result.stdout)
+        self.assertIn('local: merge=1 delegate=removed order=4', result.stdout)
+        self.assertIn('No settings for example/repo on laptop; nothing to sync.', result.stdout)
+        self.assertIn('No settings for example/repo on this device; nothing to sync.', result.stdout)
+        self.assertEqual(result.stdout.count('import on laptop'), 1, result.stdout)
+
+    def test_queue_hosts_are_configured_and_grow_with_moves(self):
+        result = self.run_shell(r'''
+printf 'pi\nbad host\npi\n\nlaptop\n' >"$state_root/queue-hosts"
+queue_hosts | tr '\n' ' '; echo
+add_queue_host pi
+add_queue_host deck
+queue_hosts | tr '\n' ' '; echo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['pi laptop ', 'pi laptop deck '])
 
     def test_merge_refuses_queued_workflow_run_missing_from_rollup(self):
         for runs, message in [

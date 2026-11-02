@@ -131,7 +131,7 @@ snapshot() {
 }
 
 # Every per-repository file name after "$repo_key-"; see configure_repo.
-repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
+repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
 
 configure_repo() {
   local selected=$1
@@ -182,6 +182,7 @@ configure_repo() {
   new_items_at_top_file="$state_root/$repo_key-new-items-at-top"
   requeued_items_at_top_file="$state_root/$repo_key-requeued-items-at-top"
   agent_host_file="$state_root/$repo_key-agent-host"
+  monitor_host_file="$state_root/$repo_key-monitor-host"
   delegated_prs_file="$state_root/$repo_key-delegated-prs.txt"
   requeued_heads_file="$state_root/$repo_key-requeued-heads.tsv"
   delegation_prompt_mode_file="$state_root/$repo_key-delegation-prompt-mode"
@@ -217,24 +218,13 @@ agent_host() {
 }
 
 remote_agent_command() {
-  local host command arguments
-  local -a timeout_args=()
+  local host
   host=$(agent_host) || {
     printf 'Invalid SSH agent host configured for %s.\n' "$repo" >&2
     return 2
   }
   [[ -n $host ]] || return 2
-  printf -v arguments '%q ' --repo "$repo" "$@"
-  command="exec \"\${XDG_BIN_HOME:-\$HOME/.local/bin}/coderabbit-review-queue\" $arguments"
-  [[ -z ${remote_command_timeout:-} ]] || timeout_args=(timeout "$remote_command_timeout")
-  # Feed the command to bash on stdin: printf %q quoting is bash syntax, and
-  # the remote login shell (fish, for example) only has to run `bash -s`.
-  "${timeout_args[@]}" ssh \
-    -o BatchMode=yes \
-    -o ConnectTimeout=5 \
-    -o ServerAliveInterval=15 \
-    -o ServerAliveCountMax=2 \
-    -- "$host" bash -s <<<"$command"
+  ssh_queue_command "$host" "$@"
 }
 
 mark_pr_delegated() {

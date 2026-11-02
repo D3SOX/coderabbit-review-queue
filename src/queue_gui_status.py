@@ -69,6 +69,8 @@ class StatusMixin:
         pid_file = self.monitor_pid_file(repo)
         if pid_file is None:
             return None
+        if self.monitor_host(repo or self.selected_repo()):
+            return self.remote_monitor_pid(repo or self.selected_repo())
         try:
             pid = int(pid_file.read_text().strip())
         except (OSError, ValueError):
@@ -77,33 +79,51 @@ class StatusMixin:
 
     def update_monitor_state(self) -> None:
         repo = self.selected_repo()
+        if repo:
+            self.poll_remote_monitor(repo)
+        self.render_monitor_state()
+
+    def render_monitor_state(self) -> None:
+        repo = self.selected_repo()
         running = self.monitor_pid(repo) is not None
         starting = repo in self.starting_monitors
+        busy = bool(repo) and self.monitor_command_running(repo)
+        host = self.monitor_host(repo) if repo else ""
+        location = self.monitor_location_label(repo) if repo else ""
+        known = not host or (
+            repo not in self.remote_monitor_errors
+            and self.remote_monitors.get(repo, ("", None))[0] == host
+        )
         if running:
-            label = "Monitor: Running"
+            label = f"Monitor: Running{location}"
         elif starting:
             label = "Monitor: Starting…"
+        elif busy:
+            label = "Monitor: Updating…"
+        elif not known:
+            label = f"Monitor{location}"
         else:
-            label = "Monitor: Stopped"
+            label = f"Monitor: Stopped{location}"
         self.monitor_label.setText(label)
         if running:
             self.monitor_button.setIcon(QIcon.fromTheme("media-playback-stop"))
             self.monitor_button.setText("Stop monitor")
-            self.monitor_button.setEnabled(True)
+            self.monitor_button.setEnabled(not busy)
         else:
             self.monitor_button.setIcon(QIcon.fromTheme("media-playback-start"))
             self.monitor_button.setText("Start monitor")
-            self.monitor_button.setEnabled(not starting)
+            self.monitor_button.setEnabled(not starting and not busy)
+        self.move_monitor_button.setEnabled(bool(repo) and not busy)
         self.refresh_if_review_requests_changed()
 
     def review_requests_file(self, repo: str) -> Path:
-        return STATE_ROOT / f"{repo.replace('/', '__')}-review-requests.tsv"
+        return self.repo_state_file(repo, "review-requests.tsv")
 
     def monitor_state_file(self, repo: str) -> Path:
-        return STATE_ROOT / f"{repo.replace('/', '__')}-monitor-state.tsv"
+        return self.repo_state_file(repo, "monitor-state.tsv")
 
     def review_completion_file(self, repo: str) -> Path:
-        return STATE_ROOT / f"{repo.replace('/', '__')}-review-completion.tsv"
+        return self.repo_state_file(repo, "review-completion.tsv")
 
     def apply_recent_completion(self) -> None:
         repo = self.selected_repo()
@@ -356,8 +376,9 @@ class StatusMixin:
         self.waiting_for_review_window = False
         if not self.notify_sound.isChecked():
             return
-        # Monitor plays the ding after its own wait_until; avoid a double sound.
-        if self.monitor_pid() is not None:
+        # A local monitor plays the ding after its own wait_until; avoid a
+        # double sound. A monitor on another device plays it there.
+        if self.monitor_pid() is not None and not self.monitor_host():
             return
         self.play_availability_sound()
 
@@ -808,7 +829,10 @@ class StatusMixin:
             temporary = order_file.with_name(order_file.name + ".tmp")
             temporary.write_text("\n".join(numbers) + "\n")
             os.replace(temporary, order_file)
+        # The mirror shows the new order at once; the monitor's host keeps it.
+        if self.monitor_host(repo):
+            QProcess.startDetached(SCRIPT, ["--repo", repo, "--set-order", *numbers])
         self.show_transient_status("Queue order saved")
 
     def queue_order_file(self, repo: str) -> Path:
-        return STATE_ROOT / f"{repo.replace('/', '__')}-order.txt"
+        return self.repo_state_file(repo, "order.txt")

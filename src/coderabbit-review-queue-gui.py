@@ -4,7 +4,6 @@
 import os
 import re
 import signal
-import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -45,6 +44,7 @@ from queue_gui_common import (
     STATUS_CACHE_MAX_AGE, app_icon, monitor_is_running, monitor_pid_files,
     process_is_running, status_belongs_to_repo,
 )
+from queue_gui_monitor_host import MonitorHostMixin
 from queue_gui_settings import SettingsMixin
 from queue_gui_status import StatusMixin
 from queue_gui_tray import ANIMATED_TRAY_STATES, TRAY_FRAME_MS, render_tray_icon
@@ -151,7 +151,7 @@ def connect_process(process: QProcess, finished: Callable[[int], None]) -> None:
     process.errorOccurred.connect(failed_to_start)
 
 
-class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
+class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.base_window_title = "CodeRabbit Review Queue"
@@ -201,6 +201,7 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         self.delegate_pr = ""
         self.delegate_prs: list[str] = []
         self.starting_monitors: set[str] = set()
+        self.init_monitor_host()
         # True after we have shown a future rate-limit countdown; used so the
         # availability ding fires on transition, not on startup already-open.
         self.waiting_for_review_window = False
@@ -387,12 +388,29 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
             "Refresh",
         )
         self.monitor_button.clicked.connect(self.toggle_monitor)
+        self.move_monitor_button = QPushButton(
+            QIcon.fromTheme("network-server"),
+            "Move monitor…",
+        )
+        self.move_monitor_button.setToolTip(
+            "Run this repository's monitor on another device over SSH, or bring it back"
+        )
+        self.move_monitor_button.clicked.connect(self.move_monitor)
+        self.devices_button = QPushButton(QIcon.fromTheme("computer"), "Devices…")
+        self.devices_button.setToolTip("Choose the SSH hosts that have the queue installed")
+        self.devices_button.clicked.connect(self.configure_devices)
+        self.sync_button = QPushButton(QIcon.fromTheme("folder-sync"), "Sync settings…")
+        self.sync_button.setToolTip("Copy repository settings between this device and another one")
+        self.sync_button.clicked.connect(self.sync_settings)
         self.refresh_button.clicked.connect(lambda: self.refresh(manual=True))
 
         header_buttons = QHBoxLayout()
         header_buttons.addWidget(self.monitor_label)
         header_buttons.addWidget(self.timer_label)
         header_buttons.addStretch()
+        header_buttons.addWidget(self.devices_button)
+        header_buttons.addWidget(self.sync_button)
+        header_buttons.addWidget(self.move_monitor_button)
         header_buttons.addWidget(self.monitor_button)
         header_buttons.addWidget(self.refresh_button)
 
@@ -1069,61 +1087,20 @@ class QueueWindow(SettingsMixin, StatusMixin, QMainWindow):
         if (
             not repo
             or repo in self.starting_monitors
+            or self.monitor_command_running(repo)
             or self.monitor_pid(repo) is not None
         ):
             return
-        self.starting_monitors.add(repo)
-        self.update_monitor_state()
-        self.statusBar().showMessage("Starting monitor…")
-        try:
-            STATE_ROOT.mkdir(parents=True, exist_ok=True)
-            log_path = STATE_ROOT / f"{repo.replace('/', '__')}-monitor.log"
-            with log_path.open("ab") as log:
-                subprocess.Popen(
-                    [SCRIPT, "--repo", repo],
-                    stdin=subprocess.DEVNULL,
-                    stdout=log,
-                    stderr=log,
-                    start_new_session=True,
-                    close_fds=True,
-                )
-        except OSError as error:
-            self.starting_monitors.discard(repo)
-            self.update_monitor_state()
-            self.show_transient_status(
-                f"Could not start monitor: {error}",
-                6000,
-            )
-            return
-        QTimer.singleShot(200, lambda: self.check_monitor_started(repo, 0))
-
-    def check_monitor_started(self, repo: str, attempt: int) -> None:
-        if self.monitor_pid(repo) is not None:
-            self.starting_monitors.discard(repo)
-            if repo == self.selected_repo():
-                self.show_transient_status("Monitor started")
-                self.update_monitor_state()
-            return
-        if attempt < 24:
-            QTimer.singleShot(
-                200,
-                lambda: self.check_monitor_started(repo, attempt + 1),
-            )
-            return
-
-        self.starting_monitors.discard(repo)
-        if repo == self.selected_repo():
-            self.show_transient_status(
-                "Monitor finished immediately or could not acquire its lock",
-                6000,
-            )
-            self.update_monitor_state()
-            self.refresh()
+        # The CLI first makes sure no other device already runs this monitor.
+        self.start_monitor_via_cli(repo)
 
     def stop_monitor(self) -> None:
         repo = self.selected_repo()
         if self.monitor_pid(repo) is None:
             self.update_monitor_state()
+            return
+        if self.monitor_host(repo):
+            self.stop_remote_monitor(repo)
             return
         answer = QMessageBox.question(
             self,

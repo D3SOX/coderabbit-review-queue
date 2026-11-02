@@ -358,6 +358,15 @@ class SettingsMixin:
         host = selected.strip()
         if host.lower() == "local":
             host = ""
+            monitor_host = self.monitor_host(repo)
+            if monitor_host:
+                QMessageBox.warning(
+                    self,
+                    "Agent host needed",
+                    f"The monitor runs on {monitor_host}, so “Local” would mean that "
+                    "device. Choose the SSH host where the agent tasks run.",
+                )
+                return
         if host and not re.fullmatch(r"[A-Za-z0-9_.@-]+", host):
             QMessageBox.warning(
                 self,
