@@ -30,14 +30,6 @@ query($owner: String!, $name: String!, $endCursor: String) {
         updatedAt
         headRefOid
         headRefName
-        isInMergeQueue
-        timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
-          nodes {
-            ... on RemovedFromMergeQueueEvent {
-              createdAt
-            }
-          }
-        }
         commits(last: 1) {
           nodes {
             commit {
@@ -139,7 +131,7 @@ snapshot() {
 }
 
 # Every per-repository file name after "$repo_key-"; see configure_repo.
-repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|merge-queue\.log|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
+repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
 
 configure_repo() {
   local selected=$1
@@ -635,11 +627,6 @@ approved_merge_rows() {
   eligible_state <<<"$1" | jq -r '
     .data.repository.pullRequests.nodes[]
     | select(.isCrossRepository | not)
-    # A queued PR is pending. One that left the queue since its head commit
-    # waits for a new push rather than being queued again for the same failure.
-    | select(.isInMergeQueue != true)
-    | select((.timelineItems.nodes[0].createdAt // "")
-        <= (.commits.nodes[0].commit.committedDate // ""))
     | . as $pr
     | select(any(.reviews.nodes[]?;
         (.author.login // "") == "coderabbitai"

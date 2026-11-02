@@ -251,7 +251,7 @@ main() {
         force_local_agents=1
         shift
         ;;
-      --merge-now|--resolve-merge-conflicts|--watch-merge-queue)
+      --merge-now|--resolve-merge-conflicts)
         (( $# >= 6 )) && [[ $2 =~ ^[0-9]+$ ]] \
           && [[ $4 =~ ^(merge|squash|rebase)$ ]] && [[ $5 =~ ^[01]$ ]] \
           && [[ $6 =~ ^[01]$ ]] || {
@@ -360,10 +360,6 @@ main() {
   fi
   if [[ $action == merge-now ]]; then
     merge_pr_now "$merge_pr" "$merge_head" "$merge_method_arg" "$merge_delete" "$merge_admin_arg"
-    return $?
-  fi
-  if [[ $action == watch-merge-queue ]]; then
-    watch_merge_queue "$merge_pr" "$merge_head" "$merge_method_arg" "$merge_delete" "$merge_admin_arg"
     return $?
   fi
   if [[ $action == resolve-merge-conflicts ]]; then
