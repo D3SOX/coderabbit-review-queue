@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt
+from PySide6.QtCore import QProcess, QSignalBlocker, Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
     QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout,
@@ -52,6 +52,15 @@ def save_queue_hosts(hosts: list[str]) -> None:
     temporary = QUEUE_HOSTS_FILE.with_name(QUEUE_HOSTS_FILE.name + ".tmp")
     temporary.write_text("".join(f"{host}\n" for host in hosts))
     os.replace(temporary, QUEUE_HOSTS_FILE)
+
+
+def move_batch(
+    repos: list[str], checked: list[str], every_running: bool, target: str,
+) -> list[tuple[str, list[str]]]:
+    """Checked repositories move as chosen; "all running" moves only running ones."""
+    if every_running:
+        return [(repo, ["--move-monitor", target, "--if-running"]) for repo in repos]
+    return [(repo, ["--move-monitor", target]) for repo in repos if repo in checked]
 
 
 def command_output(process: QProcess) -> tuple[str, str]:
@@ -313,45 +322,85 @@ class MonitorHostMixin:
         choices = [THIS_DEVICE] + hosts
         if current not in choices:
             choices.append(current)
+        repos = [self.repo_combo.itemText(index) for index in range(self.repo_combo.count())]
+        if repo not in repos:
+            repos.insert(0, repo)
         dialog = QDialog(self)
         dialog.setWindowTitle("Move monitor")
         intro = QLabel(
-            f"Device that should run the monitor for {repo}. A running monitor is "
-            "stopped, its settings and queue state are copied, and it starts again there."
+            "Running monitors are stopped, their settings and queue state are copied, "
+            "and they start again on the chosen device."
         )
         intro.setWordWrap(True)
         device = QComboBox()
         device.addItems(choices)
         device.setCurrentIndex(choices.index(current))
-        every_running = QCheckBox("All running monitors, not just this repository")
+        projects = QListWidget()
+        for name in repos:
+            host = self.monitor_host(name)
+            item = QListWidgetItem(f"{name} (on {host})" if host else name)
+            item.setData(Qt.UserRole, name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if name == repo else Qt.Unchecked)
+            projects.addItem(item)
+        every_running = QCheckBox("All running monitors")
+        every_running.setToolTip(
+            "Move every repository whose monitor is running; stopped monitors stay where they are"
+        )
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Move")
+        move_button = buttons.button(QDialogButtonBox.Ok)
+        move_button.setText("Move")
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
+
+        chosen: list[Qt.CheckState] = []
+
+        def update_controls() -> None:
+            projects.setEnabled(not every_running.isChecked())
+            move_button.setEnabled(every_running.isChecked() or any(
+                projects.item(index).checkState() == Qt.Checked
+                for index in range(projects.count())
+            ))
+
+        def toggle_every_running(enabled: bool) -> None:
+            # "All running" picks the repositories itself: lock the list with
+            # every box ticked, and restore the user's choice afterwards.
+            with QSignalBlocker(projects):
+                for index in range(projects.count()):
+                    item = projects.item(index)
+                    if enabled:
+                        chosen.append(item.checkState())
+                        item.setCheckState(Qt.Checked)
+                    else:
+                        item.setCheckState(chosen[index])
+                if not enabled:
+                    chosen.clear()
+            update_controls()
+
+        every_running.toggled.connect(toggle_every_running)
+        projects.itemChanged.connect(update_controls)
+        update_controls()
         form = QFormLayout()
         form.addRow("Device", device)
         layout = QVBoxLayout(dialog)
         layout.addWidget(intro)
         layout.addLayout(form)
+        layout.addWidget(QLabel("Repositories"))
+        layout.addWidget(projects)
         layout.addWidget(every_running)
         layout.addWidget(buttons)
         if dialog.exec() != QDialog.Accepted:
             return
         target = device.currentText()
-        if target == current and not every_running.isChecked():
-            return
-        host_argument = "local" if target == THIS_DEVICE else target
-        # This repository moves; the others only when their monitor runs.
-        batch = [] if target == current else [(repo, ["--move-monitor", host_argument])]
-        if every_running.isChecked():
-            batch += [
-                (other, ["--move-monitor", host_argument, "--if-running"])
-                for other in (
-                    self.repo_combo.itemText(index) for index in range(self.repo_combo.count())
-                )
-                if other != repo
-            ]
-        self.move_batch = batch
+        checked = [
+            projects.item(index).data(Qt.UserRole)
+            for index in range(projects.count())
+            if (chosen[index] if chosen else projects.item(index).checkState()) == Qt.Checked
+        ]
+        self.move_batch = move_batch(
+            repos, checked, every_running.isChecked(),
+            "local" if target == THIS_DEVICE else target,
+        )
         self.move_target_label = "this device" if target == THIS_DEVICE else target
         self.move_results = []
         self.move_failed = False

@@ -68,6 +68,17 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 hosts_file.write_text(hosts_file.read_text() + 'pi\nbad host\n')
                 self.assertEqual(queue_gui_monitor_host.queue_hosts(), ['pi', 'nico-laptop'])
 
+    def test_move_batch_uses_checked_repositories_or_all_running_ones(self):
+        repos = ['example/one', 'example/two', 'example/three']
+        self.assertEqual(
+            queue_gui_monitor_host.move_batch(repos, ['example/two', 'example/three'], False, 'pi'),
+            [('example/two', ['--move-monitor', 'pi']), ('example/three', ['--move-monitor', 'pi'])],
+        )
+        self.assertEqual(
+            queue_gui_monitor_host.move_batch(repos, ['example/two'], True, 'local'),
+            [(repo, ['--move-monitor', 'local', '--if-running']) for repo in repos],
+        )
+
     def test_batch_move_reports_moved_monitors_and_failures_together(self):
         window = Mock()
         window.selected_repo.return_value = 'example/one'
