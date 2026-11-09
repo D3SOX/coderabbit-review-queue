@@ -75,10 +75,68 @@ human_expiry() {
   fi
 }
 
+# A REST GET that revalidates with the last ETag. GitHub does not count a 304
+# against the REST quota, so polling an unchanged resource is free. --slurp
+# matches `gh api --paginate --slurp`; a resource with more pages skips the cache.
+github_get() {
+  local slurp=0 url cache_dir cache etag='' response status=0 status_line headers body temporary
+  if [[ $1 == --slurp ]]; then
+    slurp=1
+    shift
+  fi
+  url=$1
+  cache_dir="$runtime_root/coderabbit-review-queue-etags"
+  cache="$cache_dir/$(sha1sum <<<"$repo $url" | cut -c1-40)"
+  [[ -f $cache ]] && etag=$(head -n 1 "$cache")
+  # gh exits 1 on a 304, so the status line decides.
+  response=$(gh api -i ${etag:+-H "If-None-Match: $etag"} "$url" 2>/dev/null) || status=$?
+  status_line=${response%%$'\n'*}
+  if [[ $status_line != HTTP/* ]]; then
+    # Not a response with headers (a test double, for example).
+    printf '%s\n' "$response"
+    return "$status"
+  fi
+  case ${status_line#HTTP/* } in
+    304*)
+      touch "$cache"
+      body=$(tail -n +2 "$cache")
+      ;;
+    2*)
+      headers=$(awk '/^\r?$/ { exit } { print }' <<<"$response")
+      body=$(awk 'found { print; next } /^\r?$/ { found=1 }' <<<"$response")
+      if rg -qi '^link:.*rel="next"' <<<"$headers"; then
+        if (( slurp )); then
+          gh api --paginate --slurp "$url"
+        else
+          gh api --paginate "$url"
+        fi
+        return
+      fi
+      etag=$(awk -F ': ' 'tolower($1) == "etag" { sub(/\r$/, "", $2); print $2 }' <<<"$headers")
+      if [[ -n $etag ]] && mkdir -p -m 700 "$cache_dir"; then
+        temporary=$(mktemp "$cache.XXXXXX")
+        printf '%s\n%s\n' "$etag" "$body" >"$temporary"
+        mv "$temporary" "$cache"
+        # Entries are per head or PR; drop the ones no poll has used lately.
+        find "$cache_dir" -type f -mmin +60 -delete 2>/dev/null || true
+      fi
+      ;;
+    *)
+      printf 'GitHub request failed: %s\n' "${status_line%$'\r'}" >&2
+      return 1
+      ;;
+  esac
+  if (( slurp )); then
+    printf '[%s]\n' "$body"
+  else
+    printf '%s\n' "$body"
+  fi
+}
+
 # All issue comments as one array. Without --slurp, gh emits one array per
 # page and jq would answer once per page.
 issue_comments() {
-  gh api --paginate --slurp "repos/$repo/issues/$1/comments?per_page=100" |
+  github_get --slurp "repos/$repo/issues/$1/comments?per_page=100" |
     jq -c 'add // []'
 }
 
@@ -211,26 +269,22 @@ query_quota() {
 
 coderabbit_commit_statuses() {
   local head_sha=$1 since=$2 statuses checks
-  statuses=$(gh api "repos/$repo/commits/$head_sha/status") || return $?
-  # Keep the single-request path for legacy installations. New CodeRabbit
-  # runs publish CheckRuns instead of commit statuses.
-  if jq -e --arg since "$since" '
-    any(.statuses[]?; .context == "CodeRabbit" and .created_at >= $since)
-  ' <<<"$statuses" >/dev/null; then
-    printf '%s\n' "$statuses"
+  # CodeRabbit publishes CheckRuns now. Poll those first so a running review
+  # costs one request; only legacy installations also need commit statuses.
+  checks=$(github_get --slurp "repos/$repo/commits/$head_sha/check-runs?check_name=CodeRabbit&per_page=100") || return $?
+  checks=$(jq -c -L "$script_dir/lib" '
+    include "coderabbit-checks";
+    [(if type == "array" then .[] else . end)
+      | objects | .check_runs[]? | coderabbit_check_context
+      | select(.context == "CodeRabbit" and .creator.login == "coderabbitai")
+      | .state |= ascii_downcase]
+  ' <<<"$checks") || return 1
+  if jq -e --arg since "$since" 'any(.[]; .created_at >= $since)' <<<"$checks" >/dev/null; then
+    jq -c '{statuses: .}' <<<"$checks"
     return 0
   fi
-  checks=$(gh api --paginate --slurp "repos/$repo/commits/$head_sha/check-runs?check_name=CodeRabbit&per_page=100") || return $?
-  jq -s -L "$script_dir/lib" '
-    include "coderabbit-checks";
-    .[0] as $legacy | .[1] as $checks |
-    {statuses: (($legacy.statuses // []) + [
-      $checks | (if type == "array" then .[] else . end)
-      | .check_runs[]? | coderabbit_check_context
-      | select(.context == "CodeRabbit" and .creator.login == "coderabbitai")
-      | .state |= ascii_downcase
-    ])}
-  ' < <(printf '%s\n' "$statuses" "$checks")
+  statuses=$(github_get "repos/$repo/commits/$head_sha/status") || return $?
+  jq -s '{statuses: ((.[0].statuses // []) + .[1])}' < <(printf '%s\n' "$statuses" "$checks")
 }
 
 wait_for_acceptance() {
@@ -388,8 +442,8 @@ wait_for_review_completion() {
       return 4
     fi
     if [[ $result == completed ]]; then
-      reviews=$(gh api --paginate --slurp "repos/$repo/pulls/$pr/reviews?per_page=100")
-      comments=$(gh api --paginate --slurp "repos/$repo/issues/$pr/comments?per_page=100")
+      reviews=$(github_get --slurp "repos/$repo/pulls/$pr/reviews?per_page=100")
+      comments=$(github_get --slurp "repos/$repo/issues/$pr/comments?per_page=100")
       if jq -s -e \
         --arg since "$triggered_at" \
         --arg head "$head_sha" '
@@ -446,7 +500,7 @@ wait_for_review_completion() {
       fi
     fi
     if (( attempt % 3 == 1 )); then
-      comments=$(gh api --paginate --slurp "repos/$repo/issues/$pr/comments?per_page=100")
+      comments=$(github_get --slurp "repos/$repo/issues/$pr/comments?per_page=100")
       failure_reason=$(jq -r --arg since "$triggered_at" '
         [ .[][]
           | select(.user.login == "coderabbitai[bot]"

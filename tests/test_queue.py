@@ -33,6 +33,36 @@ wait_for_review_completion 2434 2026-10-27T11:04:04Z head Title
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('CodeRabbit finished PR #2434.', result.stdout)
 
+    def test_github_get_revalidates_with_etag(self):
+        result = self.run_shell(r'''
+gh() {
+  printf '%s\n' "$*" >>"$state_root/calls"
+  if [[ $* == *'If-None-Match: "v1"'* ]]; then
+    printf 'HTTP/2.0 304 Not Modified\r\nEtag: "v1"\r\n\r\n'
+    return 1
+  fi
+  printf 'HTTP/2.0 200 OK\r\nEtag: "v1"\r\n\r\n[{"id":1}]\n'
+}
+github_get --slurp repos/example/repo/issues/1/comments
+github_get --slurp repos/example/repo/issues/1/comments
+rg -c 'If-None-Match' "$state_root/calls"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['[[{"id":1}]]', '[[{"id":1}]]', '1'])
+
+    def test_fresh_check_run_skips_legacy_status_request(self):
+        result = self.run_shell(r'''
+gh() {
+  case "$*" in
+    *'/status') return 99 ;;
+    *'/check-runs'*) echo '{"check_runs":[{"name":"CodeRabbit","app":{"slug":"coderabbitai"},"status":"in_progress","started_at":"2026-10-27T11:04:37Z"}]}' ;;
+  esac
+}
+coderabbit_commit_statuses head 2026-10-27T11:04:04Z
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)['statuses'][0]['description'], 'Review in progress')
+
     def test_check_run_completion_requires_fresh_owned_success_and_published_review(self):
         for status, conclusion, app, started, published, expected in [
             ('completed', 'success', 'coderabbitai', '2026-10-27T11:04:37Z', True, 0),
@@ -3385,6 +3415,19 @@ cat "$state_root/calls"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.count('called'), 1)
 
+    def test_merged_pr_without_codex_task_leaves_pending_archives(self):
+        result = self.run_shell(r'''
+printf '1\n' >"$archive_after_merge_file"
+printf '42\tfeature\thead\tTitle\t\n43\tother\tother-head\tOther\t\n' >"$pending_archives_file"
+gh() { printf '{"state":"MERGED","headRefOid":"%s"}\n' "$([[ $3 == 42 ]] && echo head || echo other-head)"; }
+route_archive_codex_thread() { [[ $1 == feature ]] && return 2; return 1; }
+process_pending_thread_archives '{}'
+cat "$pending_archives_file"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('42\tfeature', result.stdout)
+        self.assertIn('43\tother\tother-head', result.stdout)
+
     def test_open_pr_keeps_pending_archive_without_archiving(self):
         result = self.run_shell(r'''
 printf '1\n' >"$archive_after_merge_file"
@@ -3559,6 +3602,7 @@ gh() {
   case "$*" in
     *'/status') echo '{"statuses":[{"context":"CodeRabbit","created_at":"2026-10-27T11:05:00Z","state":"error","description":"Review skipped"}]}' ;;
     *'/comments'*) echo '[[]]' ;;
+    *'/check-runs'*) echo '{"check_runs":[]}' ;;
     *) return 99 ;;
   esac
 }

@@ -75,7 +75,7 @@ GRAPHQL
 # PR's status rollup. Refuse to merge until every run for the head finished.
 merge_workflow_runs_finished() {
   local pr=$1 head_sha=$2 runs pending
-  if ! runs=$(gh api --paginate --slurp \
+  if ! runs=$(github_get --slurp \
     "repos/$repo/actions/runs?head_sha=$head_sha&per_page=100") ||
     ! pending=$(jq -r '
       if all(.[]; .workflow_runs | type == "array") then
@@ -359,7 +359,7 @@ queue_approved_thread_archives() {
 
 process_pending_thread_archives() {
   local state=$1 pr branch_name head_sha title session_id marker data pr_state current_head
-  local temporary archive_lock_fd scanned reconciled
+  local temporary archive_lock_fd scanned reconciled archive_status
   archive_after_merge_enabled || return 0
   [[ -s $pending_archives_file ]] || return 0
   exec {archive_lock_fd}>"$pending_archives_file.lock"
@@ -398,9 +398,17 @@ process_pending_thread_archives() {
     # An agent may push fixes and merge without another review, so the merged
     # head can differ from the one recorded at delegation.
     if [[ $pr_state == MERGED ]]; then
-      if route_archive_codex_thread "$branch_name" "$current_head" "$session_id"; then
+      archive_status=0
+      route_archive_codex_thread "$branch_name" "$current_head" "$session_id" || archive_status=$?
+      if (( archive_status == 0 )); then
         printf '%s\n' "$marker" >>"$archived_heads_file"
         printf 'Archived the matching Codex task for merged PR #%s.\n' "$pr"
+        continue
+      fi
+      # No Codex task matches (a Claude task, or one already deleted). Retrying
+      # cannot help and would cost a GitHub lookup on every scan.
+      if (( archive_status == 2 )); then
+        printf '%s\n' "$marker" >>"$archived_heads_file"
         continue
       fi
       printf '%s\t%s\t%s\t%s\t%s\n' "$pr" "$branch_name" "$head_sha" "$title" "$session_id" \
