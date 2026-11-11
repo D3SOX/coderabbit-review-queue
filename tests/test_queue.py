@@ -33,6 +33,16 @@ wait_for_review_completion 2434 2026-10-27T11:04:04Z head Title
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('CodeRabbit finished PR #2434.', result.stdout)
 
+    def test_queue_review_request_with_footer_is_guarded_against_duplicates(self):
+        result = self.run_shell(r'''
+gh() {
+  jq -nc --arg body "@coderabbitai review"$'\n\n'"$queue_comment_footer" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '[[{user: {login: "D3SOX"}, created_at: $at, updated_at: $at, body: $body}]]'
+}
+(( $(recent_review_request_expiry 1 head) > $(date -u +%s) ))
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_github_get_revalidates_with_etag(self):
         result = self.run_shell(r'''
 gh() {
@@ -439,6 +449,7 @@ route_unresolved_review 1913 branch head Title
             ('answered before the review', [('2026-11-01T10:00:00Z', user, 'Declining this.')], False),
             ('bot comment', [('2026-11-01T10:40:00Z', bot, 'Summary updated.')], False),
             ('review command', [('2026-11-01T10:40:00Z', user, '@coderabbitai review')], False),
+            ('queue review command', [('2026-11-01T10:40:00Z', user, '@coderabbitai review\n\n<sub>🤖 Posted automatically by [coderabbit-review-queue](https://github.com/D3SOX/coderabbit-review-queue)</sub>')], False),
             ('answered', [('2026-11-01T10:33:52Z', user, 'Declining the outside-diff finding.')], True),
             ('answered to CodeRabbit', [('2026-11-01T10:33:52Z', user, '@coderabbitai this cannot happen because the tab bar mounts later.')], True),
         ]

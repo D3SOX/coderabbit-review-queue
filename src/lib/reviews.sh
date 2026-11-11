@@ -228,7 +228,7 @@ query_quota() {
   printf 'Checking CodeRabbit quota on PR #%s: %s\n' "$pr" "$title"
   command=$(
     gh api -X POST "repos/$repo/issues/$pr/comments" \
-      -f body='@coderabbitai rate limit'
+      -f body="@coderabbitai rate limit"$'\n\n'"$queue_comment_footer"
   ) || return 1
   command_at=$(jq -r '.created_at // empty' <<<"$command")
   # An empty cutoff would accept every old quota reply on the PR.

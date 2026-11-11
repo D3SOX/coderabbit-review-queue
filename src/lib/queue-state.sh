@@ -990,14 +990,15 @@ recent_review_request_expiry() {
 
   comments=$(issue_comments "$pr") || return 1
   github_at=$(
-    jq -r --arg cutoff "$cutoff_iso" '
+    jq -r -L "$script_dir/lib" --arg cutoff "$cutoff_iso" '
+      include "review-feedback";
       . as $comments
       | [
           .[]
           | select(
               .user.login != "coderabbitai[bot]"
               and .created_at >= $cutoff
-              and ((.body | gsub("^\\s+|\\s+$"; "")) == "@coderabbitai review")
+              and ((.body | without_queue_footer) == "@coderabbitai review")
             )
       ]
       | sort_by(.created_at)

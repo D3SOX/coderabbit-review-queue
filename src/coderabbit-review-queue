@@ -69,6 +69,8 @@ review_window_safety_seconds=10
 review_window_safety_minutes=60
 github_quota_threshold=100
 github_poll_interval=5
+# Shown under each command comment the queue posts; the command stays first.
+queue_comment_footer='<sub>🤖 Posted automatically by [coderabbit-review-queue](https://github.com/D3SOX/coderabbit-review-queue)</sub>'
 acceptance_response_attempts=36
 completion_delay_notice_attempts=120
 completion_timeout_attempts=1440
@@ -632,7 +634,7 @@ while true; do
   record_review_request "$pr" "$head_sha" "$(date -u +%s)"
   # Compare later replies with GitHub's clock, not a possibly skewed local one.
   if ! triggered_at=$(gh api -X POST "repos/$repo/issues/$pr/comments" \
-    -f body='@coderabbitai review' --jq .created_at) || [[ -z $triggered_at ]]; then
+    -f body="@coderabbitai review"$'\n\n'"$queue_comment_footer" --jq .created_at) || [[ -z $triggered_at ]]; then
     printf 'Posting the review request for PR #%s had an uncertain result; retrying safely later.\n' \
       "$pr" >&2
     desktop_notify \
