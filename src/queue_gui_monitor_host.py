@@ -334,7 +334,8 @@ class MonitorHostMixin:
         intro.setWordWrap(True)
         device = QComboBox()
         device.addItems(choices)
-        device.setCurrentIndex(choices.index(current))
+        # Moving only makes sense to another device: preselect the first one.
+        device.setCurrentIndex(next(index for index, choice in enumerate(choices) if choice != current))
         projects = QListWidget()
         # True or False once known; None while a remote device is asked;
         # "unreachable" when it did not answer.
@@ -455,7 +456,7 @@ class MonitorHostMixin:
 
         every_running.toggled.connect(toggle_every_running)
         projects.itemChanged.connect(update_controls)
-        update_controls()
+        every_running.setChecked(True)
         form = QFormLayout()
         form.addRow("Device", device)
         layout = QVBoxLayout(dialog)

@@ -326,6 +326,40 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.save_status_cache.assert_called_once()
         window.refresh.assert_called_once_with()
 
+    def test_move_dialog_defaults_to_all_running_monitors_on_another_device(self):
+        app = QApplication.instance() or QApplication([])
+        seen = {}
+
+        class InspectDialog(queue_gui_monitor_host.QDialog):
+            def __init__(self, _parent):
+                super().__init__()
+
+            def exec(self):
+                seen['device'] = self.findChild(queue_gui_monitor_host.QComboBox).currentText()
+                seen['all'] = next(box for box in self.findChildren(queue_gui_monitor_host.QCheckBox)
+                                   if box.text() == "All running monitors").isChecked()
+                projects = self.findChild(queue_gui_monitor_host.QListWidget)
+                seen['checked'] = [projects.item(index).data(Qt.UserRole)
+                                   for index in range(projects.count())
+                                   if projects.item(index).checkState() == Qt.Checked]
+                return InspectDialog.Rejected
+
+        for host, device in (('', 'pi'), ('pi', queue_gui_monitor_host.THIS_DEVICE)):
+            with self.subTest(host=host):
+                window = Mock()
+                window.selected_repo.return_value = 'example/one'
+                window.monitor_command_process.state.return_value = QProcess.NotRunning
+                window.monitor_host.side_effect = lambda repo=None: host if repo == 'example/one' else ''
+                window.repo_combo.count.return_value = 2
+                window.repo_combo.itemText.side_effect = ['example/one', 'example/two'].__getitem__
+                window.monitor_pid.side_effect = lambda repo: 42 if repo == 'example/two' else None
+                with patch.object(queue_gui_monitor_host, 'queue_hosts', return_value=['pi', 'nico-laptop']), \
+                     patch.object(queue_gui_monitor_host, 'QDialog', InspectDialog), \
+                     patch.object(queue_gui_monitor_host.QProcess, 'start'):
+                    queue_gui_monitor_host.MonitorHostMixin.move_monitor(window)
+                self.assertEqual(seen, {'device': device, 'all': True, 'checked': ['example/two']})
+        app.processEvents()
+
     def test_delegation_dialog_saves_repository_steering_preference(self):
         app = QApplication.instance() or QApplication([])
         class SaveDialog(queue_gui_settings.QDialog):
