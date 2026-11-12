@@ -600,7 +600,7 @@ route_unresolved_review 42 branch head Title
                 result = self.run_shell(r'''
 printf '%s\n' ''' + new_top + r''' >"$new_items_at_top_file"
 printf '%s\n' ''' + requeue_top + r''' >"$requeued_items_at_top_file"
-printf '2\n' >"$delegated_prs_file"
+printf '2\treviewed-head\t0\n' >"$requeued_heads_file"
 printf '4\n9\n' >"$queue_order_file"
 stale_rows() { printf '4\tnow\tbranch\thead-4\tTitle\t-\n9\tnow\tbranch\thead-9\tTitle\t-\n2\tnow\tbranch\tnew-head\tTitle\t-\n'; }
 load_stale_rows '{}'
@@ -616,27 +616,33 @@ printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
         result = self.run_shell(r'''
 printf '0\n' >"$new_items_at_top_file"
 printf '1\n' >"$requeued_items_at_top_file"
-printf '2\n' >"$delegated_prs_file"
 printf '4\n9\n' >"$queue_order_file"
+# PR 2 was reviewed by the queue at reviewed-head; it was never delegated.
+record_review_request 2 reviewed-head 123
 stale_rows() { printf '4\tnow\tbranch\thead-4\tTitle\t-\n9\tnow\tbranch\thead-9\tTitle\t-\n2\tnow\tbranch\tnew-head\tTitle\t-\n'; }
 agent_review_decision_pending() { [[ $1 == 2$'\t'* ]]; }
 load_stale_rows '{}' 1
 printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
-[[ ! -f $requeued_heads_file ]] || exit 99
+[[ $(<"$requeued_heads_file") == 2$'\t'reviewed-head$'\t'0 ]] || exit 99
 load_stale_rows '{}'
 printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
 # A GUI save based on the old finished table may drop the newly returned PR.
 printf '9\n4\n' >"$queue_order_file"
 load_stale_rows '{}'
 printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
-# A subsequent head returns again even if the user moved the previous head.
+# Another push before the next review keeps a manual move.
 printf '9\n4\n2\n' >"$queue_order_file"
 stale_rows() { printf '4\tnow\tbranch\thead-4\tTitle\t-\n9\tnow\tbranch\thead-9\tTitle\t-\n2\tnow\tbranch\tnext-head\tTitle\t-\n'; }
 load_stale_rows '{}'
 printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
+# After the next review, its following return is placed again.
+record_review_request 2 next-head 456
+stale_rows() { printf '4\tnow\tbranch\thead-4\tTitle\t-\n9\tnow\tbranch\thead-9\tTitle\t-\n2\tnow\tbranch\tlast-head\tTitle\t-\n'; }
+load_stale_rows '{}'
+printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ['4 9', '2 4 9', '2 9 4', '2 9 4'])
+        self.assertEqual(result.stdout.splitlines(), ['4 9', '2 4 9', '2 9 4', '9 4 2', '2 9 4'])
 
     def test_review_wait_does_not_block_other_pr_feedback_routing(self):
         result = self.run_shell(r'''
@@ -1035,14 +1041,22 @@ ls -A | sort
 cd "$state_root"
 touch example__repo-routing-failure-{1,2,3}.lock example__repo-routing-failure-3 \
   other__repo-routing-failure-3.lock
+printf '3\n12\n1\n' >"$queue_order_file"
+printf '1\n3\n' >"$delegated_prs_file"
+printf '3\ta\t1\n12\tb\t0\n' >"$requeued_heads_file"
 prune_state_files 'not json'
 ls -A | wc -l
+paste -sd ' ' "$queue_order_file" "$delegated_prs_file"
 prune_state_files '{"data":{"repository":{"pullRequests":{"nodes":[{"number":1},{"number":12}]}}}}'
+paste -sd ' ' "$queue_order_file" "$delegated_prs_file"
+cut -f1 "$requeued_heads_file"
+rm -f "$queue_order_file"* "$delegated_prs_file" "$requeued_heads_file"
 ls -A | sort
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.split(), [
-            '5', 'example__repo-routing-failure-1.lock', 'other__repo-routing-failure-3.lock'])
+            '8', '3', '12', '1', '1', '3', '12', '1', '1', '12',
+            'example__repo-routing-failure-1.lock', 'other__repo-routing-failure-3.lock'])
 
     def test_no_actionable_summary_counts_only_for_the_reviewed_head(self):
         # CodeRabbit keeps the last review's result in the summary and links the
@@ -1228,41 +1242,21 @@ wait_for_acceptance 138 2026-09-23T13:48:07Z head title
 ''')
         self.assertEqual(result.returncode, 99, result.stdout + result.stderr)
 
-    def test_recording_review_request_moves_pr_to_bottom(self):
-        result = self.run_shell(r'''
-printf '0\n' >"$new_items_at_top_file"
+    def test_recording_review_request_keeps_queue_position(self):
+        # A request CodeRabbit rejects for quota leaves the PR at the queue's head.
+        for requeue_top in ('0', '1'):
+            with self.subTest(requeue_top=requeue_top):
+                result = self.run_shell(r'''
+printf '%s\n' ''' + requeue_top + r''' >"$requeued_items_at_top_file"
 printf '%s\n' 4 2 9 >"$queue_order_file"
+printf '2\told\t1\n7\tother\t0\n' >"$requeued_heads_file"
 record_review_request 2 head-2 123
-cat "$queue_order_file"
-''')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ['4', '9', '2'])
-
-    def test_recording_review_request_moves_pr_to_top_when_configured(self):
-        result = self.run_shell(r'''
-printf '1\n' >"$new_items_at_top_file"
-printf '%s\n' 4 2 9 >"$queue_order_file"
-record_review_request 2 head-2 123
-cat "$queue_order_file"
-''')
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ['2', '4', '9'])
-
-    def test_requeued_pr_placement_is_independent_of_new_pr_placement(self):
-        for new_at_top, requeued_at_top, expected in (
-            ("0", "1", ["2", "4", "9"]),
-            ("1", "0", ["4", "9", "2"]),
-        ):
-            with self.subTest(new_at_top=new_at_top, requeued_at_top=requeued_at_top):
-                result = self.run_shell(f'''
-printf '%s\\n' {new_at_top} >"$new_items_at_top_file"
-printf '%s\\n' {requeued_at_top} >"$requeued_items_at_top_file"
-printf '%s\\n' 4 2 9 >"$queue_order_file"
-record_review_request 2 head-2 123
-cat "$queue_order_file"
+clear_review_request 2 head-2
+paste -sd ' ' "$queue_order_file"
+sort "$requeued_heads_file"
 ''')
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual(result.stdout.splitlines(), expected)
+                self.assertEqual(result.stdout.splitlines(), ['4 2 9', '2\thead-2\t0', '7\tother\t0'])
 
     def test_monitor_order_update_does_not_overwrite_concurrent_gui_order(self):
         with tempfile.TemporaryDirectory() as state:
@@ -1276,7 +1270,8 @@ cat "$queue_order_file"
                 process = subprocess.Popen(
                     ['bash', '-c', (
                         'source "$1"\nconfigure_repo example/repo\n'
-                        'record_review_request 2 head-2 123'
+                        'printf "2\\told-head\\t0\\n" >"$requeued_heads_file"\n'
+                        'position_requeued_pr 2 head-2'
                     ), 'test', str(SCRIPT)],
                     text=True,
                     stdout=subprocess.PIPE,
@@ -2983,6 +2978,16 @@ remote_stdin=$'{"a": "x\'y"}\nline' ssh_queue_command pi --import-state --local-
         self.assertEqual(check.stdout,
                          '<--repo><example/repo><--import-state><--local-monitor>'
                          '[{"a": "x\'y"}\nline]', check.stderr)
+
+    def test_set_order_keeps_slots_of_prs_the_gui_does_not_show(self):
+        result = self.run_shell(r'''
+# 7 is in review and 2 waits for an agent, so the GUI sends only 3, 1 and new 5.
+printf '7\n1\n2\n3\n' >"$queue_order_file"
+main --repo example/repo --set-order 3 1 5
+paste -sd ' ' "$queue_order_file"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.split('\n')[0], '7 3 2 1 5')
 
     def test_monitor_commands_run_on_the_monitor_host(self):
         result = self.run_shell(r'''

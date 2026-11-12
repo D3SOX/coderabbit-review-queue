@@ -167,12 +167,21 @@ import_monitor_state() {
   done < <(jq -r 'keys[]' <<<"$json")
 }
 
+# The GUI sends the PRs it shows. PRs it does not show, such as ones in review,
+# keep their saved slots; the shown PRs fill theirs in the new order.
 set_queue_order() {
-  local temporary lock_fd
+  local temporary lock_fd saved=/dev/null
   exec {lock_fd}>"$queue_order_file.lock"
   flock -x "$lock_fd"
+  [[ ! -f $queue_order_file ]] || saved=$queue_order_file
   temporary=$(mktemp "$queue_order_file.XXXXXX")
-  printf '%s\n' "$@" >"$temporary"
+  { (( $# == 0 )) || printf '%s\n' "$@"; } | awk '
+    FNR == NR { if (!($0 in shown)) { shown[$0] = 1; order[++count] = $0 }; next }
+    seen[$0]++ { next }
+    $0 in shown { print order[++next_index]; next }
+    { print }
+    END { while (next_index < count) print order[++next_index] }
+  ' - "$saved" >"$temporary"
   mv -- "$temporary" "$queue_order_file"
   exec {lock_fd}>&-
 }

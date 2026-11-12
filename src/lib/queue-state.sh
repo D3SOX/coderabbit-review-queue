@@ -447,17 +447,21 @@ stale_rows() {
   '
 }
 
+# requeued-heads.tsv holds "PR, head the queue last requested a review for,
+# 1 once the PR has been placed after returning with a newer head". Place each
+# return once, so later manual moves and further pushes keep their position.
 position_requeued_pr() {
-  local pr=$1 head_sha=$2 order_lock_fd
-  [[ -f $delegated_prs_file ]] &&
-    rg -q -F -x "$pr" "$delegated_prs_file" || return 0
+  local pr=$1 head_sha=$2 order_lock_fd reviewed_head positioned
+  [[ -f $requeued_heads_file ]] || return 0
+  IFS=$'\t' read -r _ reviewed_head positioned < <(
+    awk -F '\t' -v pr="$pr" '$1 == pr' "$requeued_heads_file"
+  ) || return 0
+  [[ -n $reviewed_head && $reviewed_head != "$head_sha" ]] || return 0
 
   exec {order_lock_fd}>"$queue_order_file.lock"
   flock -x "$order_lock_fd"
-  # Position each returned head once. If a stale GUI save omitted this PR,
-  # restore it, but never undo subsequent manual moves while it is present.
-  if [[ -f $requeued_heads_file && -f $queue_order_file ]] &&
-    rg -q -F -x "$pr"$'\t'"$head_sha" "$requeued_heads_file" &&
+  # If a stale GUI save omitted the placed PR, restore it.
+  if [[ $positioned == 1 && -f $queue_order_file ]] &&
     rg -q -F -x "$pr" "$queue_order_file"; then
     exec {order_lock_fd}>&-
     return 0
@@ -470,14 +474,20 @@ position_requeued_pr() {
     if ! requeued_items_at_top_enabled; then printf '%s\n' "$pr"; fi
   } >"$queue_order_file.tmp.$$"
   mv "$queue_order_file.tmp.$$" "$queue_order_file"
+  write_requeued_head "$pr" "$reviewed_head" 1
+  exec {order_lock_fd}>&-
+}
+
+# Callers hold the queue order lock.
+write_requeued_head() {
+  local pr=$1 head_sha=$2 positioned=$3
   {
     if [[ -f $requeued_heads_file ]]; then
       awk -F '\t' -v pr="$pr" '$1 != pr' "$requeued_heads_file"
     fi
-    printf '%s\t%s\n' "$pr" "$head_sha"
+    printf '%s\t%s\t%s\n' "$pr" "$head_sha" "$positioned"
   } >"$requeued_heads_file.tmp.$$"
   mv "$requeued_heads_file.tmp.$$" "$requeued_heads_file"
-  exec {order_lock_fd}>&-
 }
 
 load_stale_rows() {
@@ -903,28 +913,18 @@ record_review_request() {
   printf '%s\t%s\t%s\n' "$pr" "$head_sha" "$requested_at" \
     >>"$review_requests_file"
 
-  # Keep an active review pinned visually at the top. Its saved position after
-  # the review uses the requeue preference, independently of newly found PRs.
+  # Remember the reviewed head; the PR is placed by the requeue preference
+  # when it returns with a newer one. Until then it keeps its queue position.
   if (( requested_at > 0 )); then
     exec {order_lock_fd}>"$order_lock_file"
     flock -x "$order_lock_fd"
-    if requeued_items_at_top_enabled; then
-      awk -v pr="$pr" 'BEGIN { print pr } $0 != pr { print }' \
-        "$queue_order_file" 2>/dev/null >"$queue_order_file.tmp.$$" ||
-        printf '%s\n' "$pr" >"$queue_order_file.tmp.$$"
-    else
-      awk -v pr="$pr" '$0 != pr { print } END { print pr }' \
-        "$queue_order_file" 2>/dev/null >"$queue_order_file.tmp.$$" ||
-        printf '%s\n' "$pr" >"$queue_order_file.tmp.$$"
-    fi
-    mv "$queue_order_file.tmp.$$" "$queue_order_file"
-    flock -u "$order_lock_fd"
+    write_requeued_head "$pr" "$head_sha" 0
     exec {order_lock_fd}>&-
   fi
 }
 
 # Request and delegation logs only grow. At monitor start, drop PRs whose
-# requests are all past every window and delegations of PRs no longer open.
+# requests are all past every window, and other PR records of closed PRs.
 prune_state_files() {
   local state=$1 temporary now
   now=$(date -u +%s)
@@ -950,13 +950,18 @@ prune_state_files() {
     ' "$review_requests_file" "$review_requests_file" >"$temporary"
     mv "$temporary" "$review_requests_file"
   fi
-  if [[ -f $delegated_prs_file ]]; then
-    temporary=$(mktemp "$delegated_prs_file.XXXXXX")
-    jq -r '.data.repository.pullRequests.nodes[].number' <<<"$state" |
-      awk 'FNR == NR { open[$1] = 1; next } $1 in open' - "$delegated_prs_file" \
-        >"$temporary"
-    mv "$temporary" "$delegated_prs_file"
-  fi
+  [[ -n ${open_prs:-} ]] || return 0
+  local file order_lock_fd
+  exec {order_lock_fd}>"$queue_order_file.lock"
+  flock -x "$order_lock_fd"
+  for file in "$delegated_prs_file" "$queue_order_file" "$requeued_heads_file"; do
+    [[ -f $file ]] || continue
+    temporary=$(mktemp "$file.XXXXXX")
+    tr ' ' '\n' <<<"$open_prs" |
+      awk -F '\t' 'FNR == NR { open[$1] = 1; next } $1 in open' - "$file" >"$temporary"
+    mv "$temporary" "$file"
+  done
+  exec {order_lock_fd}>&-
 }
 
 clear_review_request() {

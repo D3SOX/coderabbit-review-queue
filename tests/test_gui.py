@@ -499,38 +499,35 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual(window.queue.verticalScrollBar().value(), before)
         window.queue.close()
 
-    def test_changing_new_item_placement_preserves_existing_queue_order(self):
+    def test_queue_order_follows_saved_order_and_keeps_hidden_prs(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             order_file = root / "order.txt"
-            order_file.write_text("2\n1\n")
+            # PR 7 is in review, so the queue does not show it.
+            order_file.write_text("7\n2\n1\n")
             window = Mock()
             window.queue = queue_gui.QTreeWidget()
             window.new_items_at_top = queue_gui.QCheckBox()
-            window.new_items_at_top.setChecked(True)
             window.monitor_activity = None
             window.selected_repo.return_value = "example/repo"
+            window.monitor_host.return_value = ""
             window.queue_order_file.return_value = order_file
             window.new_items_at_top_file.return_value = root / "new-items-at-top"
             window.save_order = lambda: queue_gui.QueueWindow.save_order(window)
-            status = "Repository: example/repo\nQueued PRs:\n  #1 First\n  #2 Second\n  #3 New\n"
+            shown = lambda: [window.queue.topLevelItem(i).text(0) for i in range(window.queue.topLevelItemCount())]
             with patch.object(queue_gui_status, "STATE_ROOT", root), patch.object(queue_gui_settings, "STATE_ROOT", root):
                 # A toggle during initial loading must not erase saved order.
                 queue_gui.QueueWindow.new_items_at_top_changed(window, True)
-                self.assertEqual(order_file.read_text(), "2\n1\n")
-                queue_gui.QueueWindow.populate_queue(window, status)
-                self.assertEqual([window.queue.topLevelItem(i).text(0) for i in range(3)], ["#3", "#2", "#1"])
-                for enabled, new_number in ((False, 4), (True, 5)):
-                    before = [window.queue.topLevelItem(i).text(0) for i in range(window.queue.topLevelItemCount())]
-                    window.new_items_at_top.setChecked(enabled)
-                    queue_gui.QueueWindow.new_items_at_top_changed(window, enabled)
-                    queue_gui.QueueWindow.populate_queue(window, status)
-                    self.assertEqual([window.queue.topLevelItem(i).text(0) for i in range(len(before))], before)
-                    status += f"  #{new_number} New\n"
-                    queue_gui.QueueWindow.populate_queue(window, status)
-                    expected = [f"#{new_number}"] + before if enabled else before + [f"#{new_number}"]
-                    self.assertEqual([window.queue.topLevelItem(i).text(0) for i in range(len(expected))], expected)
+                self.assertEqual(order_file.read_text(), "7\n2\n1\n")
+                # The monitor placed new PR 3; its status predates the saved order.
+                queue_gui.QueueWindow.populate_queue(window, "Queued PRs:\n  #3 New\n  #1 First\n  #2 Second\n")
+                self.assertEqual(shown(), ["#3", "#2", "#1"])
+                queue_gui.QueueWindow.new_items_at_top_changed(window, False)
+                self.assertEqual(order_file.read_text().split(), ["7", "3", "2", "1"])
+                queue_gui.QueueWindow.populate_queue(
+                    window, "Queued PRs:\n  #3 New\n  #2 Second\n  #1 First\n  #4 Newer\n")
+                self.assertEqual(shown(), ["#3", "#2", "#1", "#4"])
         app.processEvents()
 
     def test_move_buttons_scroll_selected_prs_into_view(self):

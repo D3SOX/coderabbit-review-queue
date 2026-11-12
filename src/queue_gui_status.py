@@ -52,6 +52,20 @@ def preserve_viewport(table_name):
     return decorate
 
 
+def fill_slots(base: list[str], order: list[str]) -> list[str]:
+    """Put `order` into the slots its items hold in `base`, appending the rest.
+
+    Items of `base` missing from `order` keep their positions.
+    """
+    shown = set(order)
+    pending = iter(order)
+    merged = [
+        next(pending) if number in shown else number
+        for number in dict.fromkeys(base)
+    ]
+    return merged + list(pending)
+
+
 def reviews_summary(active: list[tuple[str, str]]) -> str:
     if len(active) == 1:
         return f"Review in progress on #{active[0][0]}"
@@ -529,17 +543,12 @@ class StatusMixin:
                 saved_order = self.queue_order_file(repo).read_text().splitlines()
             except OSError:
                 saved_order = []
-            queued_by_number = {number: title for number, title in queued}
-            saved_queued = [
-                (number, queued_by_number.pop(number))
-                for number in saved_order
-                if number in queued_by_number
-            ]
-            new_queued = list(queued_by_number.items())
-            if self.new_items_at_top.isChecked():
-                queued = new_queued + saved_queued
-            else:
-                queued = saved_queued + new_queued
+            # The monitor already placed new and returning PRs. Apply only the
+            # saved order, which can be newer than this status.
+            titles = dict(queued)
+            numbers = list(titles)
+            saved = [number for number in dict.fromkeys(saved_order) if number in titles]
+            queued = [(number, titles[number]) for number in fill_slots(numbers, saved)]
 
         self.active_reviews = active
         self.approved_review_numbers = approved_numbers
@@ -826,10 +835,17 @@ class StatusMixin:
         lock_file = order_file.with_suffix(order_file.suffix + ".lock")
         with lock_file.open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                saved = order_file.read_text().splitlines()
+            except OSError:
+                saved = []
+            # PRs not shown here, such as ones in review, keep their slots.
+            merged = fill_slots(saved, numbers)
             temporary = order_file.with_name(order_file.name + ".tmp")
-            temporary.write_text("\n".join(numbers) + "\n")
+            temporary.write_text("".join(f"{number}\n" for number in merged))
             os.replace(temporary, order_file)
-        # The mirror shows the new order at once; the monitor's host keeps it.
+        # The mirror shows the new order at once; the monitor's host keeps it
+        # and merges it the same way.
         if self.monitor_host(repo):
             QProcess.startDetached(SCRIPT, ["--repo", repo, "--set-order", *numbers])
         self.show_transient_status("Queue order saved")
