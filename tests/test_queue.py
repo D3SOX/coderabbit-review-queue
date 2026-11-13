@@ -2346,6 +2346,27 @@ show_status 60 | grep 'Estimated review starts'
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ['0', 'Estimated review starts: slots for 2'])
 
+    def test_status_estimates_start_after_the_monitors_own_wait(self):
+        result = self.run_shell(r'''
+snapshot() { printf '{}'; }
+status_quota_available() { :; }
+load_stale_rows() { stale=($'1\tnow\tb\th1\tFirst\t-'); }
+active_review_rows() { :; }
+approved_review_rows() { :; }
+reviewed_rows() { :; }
+latest_expiry() { echo 0; }
+shared_expiry() { echo 0; }
+review_slot_estimates() { echo "from $2"; }
+local_monitor_pid() { echo 123; }
+wake=$(( $(date -u +%s) + 180 ))
+printf 'waiting\t\t\t%s\n' "$wake" >"$monitor_state_file"
+[[ $(show_status 60 | grep 'Estimated review starts') == "Estimated review starts: from $wake" ]]
+printf 'checking\t1\tFirst\t0\n' >"$monitor_state_file"
+show_status 60 | grep 'Estimated review starts'
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['Estimated review starts: from 0'])
+
     def test_finished_reviews_summarize_ci_checks(self):
         result = self.run_shell(r'''
 snapshot() { cat <<'JSON'

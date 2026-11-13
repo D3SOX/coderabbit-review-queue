@@ -183,6 +183,11 @@ show_status() {
     # Only a running monitor starts reviews. Each time is for a queue position,
     # so the GUI can apply them to its own order.
     if (( waiting > 0 )) && local_monitor_pid >/dev/null; then
+      # The monitor can also wait for other reasons, such as a recent request
+      # for the same head; the first review starts no earlier than that.
+      local wake
+      wake=$(awk -F '\t' '$1 == "waiting" { print $4 + 0 }' "$monitor_state_file" 2>/dev/null) || wake=0
+      (( ${wake:-0} > expiry )) && expiry=$wake
       printf 'Estimated review starts: %s\n' "$(review_slot_estimates "$waiting" "$expiry")"
     fi
   fi
