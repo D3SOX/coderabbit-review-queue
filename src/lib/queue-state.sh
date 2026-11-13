@@ -131,7 +131,7 @@ snapshot() {
 }
 
 # Every per-repository file name after "$repo_key-"; see configure_repo.
-repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-history\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
+repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|check-quota-now|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-history\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
 
 configure_repo() {
   local selected=$1
@@ -171,6 +171,7 @@ configure_repo() {
   quota_expiry_file="$state_root/$repo_key-quota-expiry.txt"
   review_requests_file="$state_root/$repo_key-review-requests.tsv"
   review_history_file="$state_root/$repo_key-review-history.tsv"
+  check_quota_now_file="$state_root/$repo_key-check-quota-now"
   auto_delegate_file="$state_root/$repo_key-auto-delegate"
   stop_when_empty_file="$state_root/$repo_key-stop-when-empty"
   ignore_drafts_file="$state_root/$repo_key-ignore-drafts"
@@ -820,7 +821,15 @@ timer_rows() {
       | sort_by(.updatedAt)
       | last // null;
 
-    .data.repository.pullRequests.nodes[]
+    # A later "Reviews are available now" reply voids older limits, for
+    # example after a plan upgrade.
+    ([
+      .data.repository.pullRequests.nodes[].comments.nodes[]?
+      | select((.author.login // "") == "coderabbitai"
+          and (.body | test("Reviews are available now"; "i")))
+      | .updatedAt
+    ] | max // "") as $available_at
+    | .data.repository.pullRequests.nodes[]
     | (latest_rate_limit) as $rate_limit
     | (
         if $rate_limit == null then null
@@ -838,6 +847,7 @@ timer_rows() {
     | select(
         $rate_limit != null
         and $timer != null
+        and $rate_limit.updatedAt > $available_at
       )
     | [
         .number,
@@ -997,6 +1007,8 @@ review_slot_estimates() {
       # Back-to-back triggers show how long a quota check and trigger take.
       if (n && $1 - accepted[n] < 600) { gaps += $1 - accepted[n]; gap_count++ }
       accepted[++n] = $1
+      # More reviews in an hour than the limit allows: the plan changed.
+      if (capacity && in_window($1) > capacity) capacity = 0
     }
     $2 == "limited" { c = in_window($1); if (c) capacity = c }
     END {

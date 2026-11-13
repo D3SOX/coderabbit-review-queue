@@ -28,15 +28,19 @@ wait_until() {
       'CodeRabbit queue waiting' \
       "Next review window opens $wake."
   fi
+  local actions_at=$now
   while (( delay > 0 )); do
     interval=$delay
-    (( interval <= 60 )) || interval=60
+    (( interval <= 5 )) || interval=5
     sleep "$interval"
+    # The GUI's "Check now" ends the wait early.
+    [[ ! -e $check_quota_now_file ]] || return 0
     now=$(date -u +%s)
     delay=$((expiry - now))
-    if (( delay > 0 )) && {
+    if (( delay > 0 && now - actions_at >= 60 )) && {
       auto_delegation_enabled || { auto_merge_enabled && merge_after_approval_enabled; }
     }; then
+      actions_at=$now
       process_approval_actions_async
     fi
   done

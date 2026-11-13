@@ -378,6 +378,13 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
 
         self.monitor_label = QLabel()
         self.timer_label = QLabel("Next review: —")
+        self.check_quota_button = QPushButton(QIcon.fromTheme("view-refresh"), "Check now")
+        self.check_quota_button.setToolTip(
+            "Ask CodeRabbit now instead of waiting, for example after a plan change. "
+            "Posts one rate limit check on the first queued PR."
+        )
+        self.check_quota_button.clicked.connect(self.check_quota_now)
+        self.check_quota_button.hide()
 
         self.monitor_button = QPushButton(
             QIcon.fromTheme("media-playback-start"),
@@ -407,6 +414,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
         header_buttons = QHBoxLayout()
         header_buttons.addWidget(self.monitor_label)
         header_buttons.addWidget(self.timer_label)
+        header_buttons.addWidget(self.check_quota_button)
         header_buttons.addStretch()
         header_buttons.addWidget(self.devices_button)
         header_buttons.addWidget(self.sync_button)

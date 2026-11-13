@@ -406,8 +406,25 @@ class StatusMixin:
             return
         self.play_availability_sound()
 
+    def check_quota_now(self) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        # The monitor's host ends its wait and asks CodeRabbit once.
+        QProcess.startDetached(SCRIPT, ["--repo", repo, "--check-quota-now"])
+        self.check_quota_button.hide()
+        self.show_transient_status("Asking CodeRabbit whether reviews are available")
+
     def update_countdown_display(self) -> None:
         self.setWindowTitle(self.base_window_title)
+        waiting = (
+            self.has_queued_reviews
+            and isinstance(self.next_review_at, QDateTime)
+            and QDateTime.currentDateTime().secsTo(self.next_review_at) > 0
+            and (self.monitor_activity is None
+                 or self.monitor_activity[0] not in {"checking", "triggering"})
+        )
+        self.check_quota_button.setVisible(bool(waiting) and self.monitor_pid() is not None)
         repo = self.selected_repo() or self.base_window_title
         # The monitor writes one phase at a time, but several reviews can run
         # alongside it; keep every running review in the summary.

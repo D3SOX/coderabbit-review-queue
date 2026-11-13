@@ -981,6 +981,35 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                     f"Next review: {expected} · Reviews in progress (#1, #2)"
                 )
 
+    def test_check_now_offered_only_while_a_running_monitor_waits(self):
+        later = queue_gui.QDateTime.currentDateTime().addSecs(53 * 60)
+        for queued, next_review_at, activity, pid, visible in [
+            (True, later, ("waiting", "", "", 0), 123, True),
+            (True, later, ("waiting", "", "", 0), None, False),
+            (True, later, ("checking", "4", "Four", 0), 123, False),
+            (True, None, None, 123, False),
+            (False, later, None, 123, False),
+        ]:
+            with self.subTest(queued=queued, later=bool(next_review_at), activity=activity, pid=pid):
+                window = Mock()
+                window.base_window_title = "CodeRabbit Review Queue"
+                window.status_loading_repo = None
+                window.monitor_activity = activity
+                window.selected_repo.return_value = "example/repo"
+                window.active_reviews = []
+                window.has_queued_reviews = queued
+                window.next_review_at = next_review_at
+                window.monitor_pid.return_value = pid
+                window.format_expiry.return_value = "Today"
+                queue_gui.QueueWindow.update_countdown_display(window)
+                window.check_quota_button.setVisible.assert_called_once_with(visible)
+        window = Mock()
+        window.selected_repo.return_value = "example/repo"
+        with patch.object(queue_gui_status.QProcess, "startDetached") as start:
+            queue_gui.QueueWindow.check_quota_now(window)
+        start.assert_called_once_with(queue_gui_status.SCRIPT, ["--repo", "example/repo", "--check-quota-now"])
+        window.check_quota_button.hide.assert_called_once_with()
+
     def test_uncached_repository_shows_loading_instead_of_old_availability(self):
         window = Mock()
         window.base_window_title = "CodeRabbit Review Queue"

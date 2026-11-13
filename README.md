@@ -24,6 +24,8 @@ requests.
   Oversized PR heads are skipped rather than blocking the queue.
 - Estimates when each queued PR's review starts. The monitor learns how many
   reviews CodeRabbit allows per hour from its own requests and limit replies.
+  While it waits, **Check now** asks CodeRabbit right away, for example after
+  a plan upgrade.
 - Shows pending and in-progress reviews separately from finished reviews,
   approvals, unresolved feedback, CI check status, and matching agent-task
   progress. Queue order, the last status, and unexpired review windows

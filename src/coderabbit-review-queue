@@ -29,6 +29,7 @@ queue_order_file=''
 quota_expiry_file=''
 review_requests_file=''
 review_history_file=''
+check_quota_now_file=''
 auto_delegate_file=''
 stop_when_empty_file=''
 ignore_drafts_file=''
@@ -290,6 +291,10 @@ main() {
         sync_direction=$3
         shift 3
         ;;
+      --check-quota-now)
+        action='check-quota-now'
+        shift
+        ;;
       --set-order)
         action='set-order'
         shift
@@ -396,6 +401,7 @@ main() {
     status | cached-status | delegate-all | monitor-info | stop-monitor | export-state) forward_args=("--$action") ;;
     delegate) for forward_pr in "${delegate_prs[@]}"; do forward_args+=(--delegate "$forward_pr"); done ;;
     set-order) forward_args=(--set-order "${queue_order[@]}") ;;
+    check-quota-now) forward_args=(--check-quota-now) ;;
   esac
   if (( ${#forward_args[@]} > 0 )); then
     forward_status=0
@@ -413,6 +419,7 @@ main() {
     import-state) import_monitor_state; return ;;
     push-settings) push_monitor_settings; return ;;
     set-order) set_queue_order "${queue_order[@]}"; return ;;
+    check-quota-now) mkdir -p "$state_root" && : >"$check_quota_now_file"; return ;;
   esac
 
   if [[ $action == task-progress ]]; then
@@ -540,6 +547,7 @@ while true; do
   remember_shared_expiry "$expiry"
   quota_expiry=$(shared_expiry)
   (( quota_expiry > expiry )) && expiry=$quota_expiry
+  [[ ! -e $check_quota_now_file ]] || expiry=0
   write_monitor_state waiting '' '' "$expiry"
   wait_until "$expiry"
 
@@ -555,6 +563,7 @@ while true; do
   empty_announced=0
 
   current_expiry=$(latest_expiry "$state")
+  [[ ! -e $check_quota_now_file ]] || current_expiry=0
   now=$(date -u +%s)
   if (( current_expiry > now )); then
     continue
@@ -573,6 +582,7 @@ while true; do
   current_expiry=$(latest_expiry "$state")
   quota_expiry=$(shared_expiry)
   (( quota_expiry > current_expiry )) && current_expiry=$quota_expiry
+  [[ ! -e $check_quota_now_file ]] || current_expiry=0
   now=$(date -u +%s)
   if (( current_expiry > now )); then
     write_monitor_state waiting '' '' "$current_expiry"
@@ -587,10 +597,14 @@ while true; do
   if defer_recent_review_request "$quota_pr" "$quota_head" "$quota_title"; then
     continue
   fi
+  # A requested check (after a plan change, for example) asks CodeRabbit once.
+  rm -f -- "$check_quota_now_file"
   if ! query_quota "$quota_pr" "$quota_title"; then
     sleep "$quota_retry_delay"
     continue
   fi
+  # An available review voids any remembered wait.
+  (( quota_remaining == 0 )) || rm -f -- "$quota_expiry_file"
 
   # The quota query can take long enough for the GUI order to change. Reapply
   # the persisted order before choosing which PR receives the available slot.

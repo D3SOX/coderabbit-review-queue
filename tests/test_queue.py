@@ -1254,6 +1254,17 @@ review_slot_estimates 0 9600
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines(), ['6100 6160 6220', '9600 9635 13200 13235'])
 
+    def test_review_slot_estimates_forget_a_limit_after_a_plan_upgrade(self):
+        result = self.run_shell(r'''
+date() { echo 6400; }
+# The old limit was two an hour; then three reviews ran within minutes.
+printf '%s\n' $'1000\taccepted' $'1035\taccepted' $'1060\tlimited' \
+  $'6000\taccepted' $'6035\taccepted' $'6070\taccepted' >"$review_history_file"
+review_slot_estimates 2 0
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.split(), ['6400', '6435'])
+
     def test_recording_review_request_keeps_queue_position(self):
         # A request CodeRabbit rejects for quota leaves the PR at the queue's head.
         for requeue_top in ('0', '1'):
@@ -1332,6 +1343,60 @@ main --repo example/repo
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Dispatched PR #2', result.stdout)
+
+    def test_check_quota_now_skips_the_remembered_wait_once(self):
+        result = self.run_shell(r'''
+claim_monitor() { :; }
+cleanup_monitor() { :; }
+monitor_snapshot() { printf 'snapshot\n'; }
+route_all_unresolved_async() { :; }
+process_approval_actions_async() { :; }
+process_thread_archives_async() { :; }
+prune_state_files() { :; }
+load_stale_rows() { stale=($'1\tnow\tbranch-1\thead-1\tfirst\t-'); }
+latest_expiry() { echo 9999999999; }
+printf '9999999999\n' >"$quota_expiry_file"
+wait_until() { [[ -e $check_quota_now_file ]] || { echo "waited for $1"; exit 0; }; }
+recent_review_request_expiry() { echo 0; }
+query_quota() { echo "checked with marker: $([[ -e $check_quota_now_file ]] && echo yes || echo no)"; quota_remaining=-1; }
+desktop_notify() { :; }
+record_review_request() { :; }
+gh() { echo 2026-10-27T11:04:04Z; }
+wait_for_acceptance() {
+  echo "Dispatched PR #$1, quota expiry file: $([[ -e $quota_expiry_file ]] && echo kept || echo cleared)"
+  exit 0
+}
+main --repo example/repo --check-quota-now
+[[ -e $check_quota_now_file ]] || exit 41
+main --repo example/repo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('waited', result.stdout)
+        self.assertIn('checked with marker: no', result.stdout)
+        self.assertIn('Dispatched PR #1, quota expiry file: cleared', result.stdout)
+
+    def test_wait_until_ends_when_a_quota_check_is_requested(self):
+        result = self.run_shell(r'''
+clock=100
+date() { if [[ $* == '-u +%s' ]]; then echo "$clock"; else command date "$@"; fi; }
+sleep() { clock=$((clock + $1)); (( clock < 130 )) || : >"$check_quota_now_file"; }
+desktop_notify() { :; }
+wait_until 3700 quiet
+echo "woke at $clock"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('woke at 130', result.stdout)
+
+    def test_available_reply_voids_older_rate_limits(self):
+        limited = {'author': {'login': 'coderabbitai'}, 'updatedAt': '2026-11-13T14:00:00Z',
+                   'body': 'More reviews will be available in 59 minutes.'}
+        available = {'author': {'login': 'coderabbitai'}, 'updatedAt': '2026-11-13T14:05:00Z',
+                     'body': 'Your plan includes PR reviews. Reviews are available now.'}
+        first, second = self.pr(1), self.pr(2)
+        first['comments']['nodes'] = [limited]
+        self.assertEqual(self.rows('timer_rows', [first, second]), [1])
+        second['comments']['nodes'] = [available]
+        self.assertEqual(self.rows('timer_rows', [first, second]), [])
 
     def test_agent_routing_does_not_block_monitor(self):
         result = self.run_shell(r'''
