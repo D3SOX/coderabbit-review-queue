@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QProcess, Qt
+from PySide6.QtCore import QDateTime, QProcess, Qt
 from PySide6.QtWidgets import QApplication, QDialog
 
 import importlib.util
@@ -173,11 +173,11 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                              ['PR', 'Checks', 'Task', 'Title', 'Result', 'Agent status', 'Latest progress'])
             self.assertTrue(header.isSectionHidden(3))
 
-            for label in ['PR', 'Title']:
+            for label in ['PR', 'Title', 'Status']:
                 pick(window, window.queue, label)
-            pick(window, window.queue, 'Status')
-            self.assertEqual([window.queue.header().isSectionHidden(c) for c in range(3)],
-                             [True, True, False])
+            pick(window, window.queue, 'Estimated review')
+            self.assertEqual([window.queue.header().isSectionHidden(c) for c in range(4)],
+                             [True, True, True, False])
             window.close()
 
     def test_finished_reviews_support_ctrl_and_shift_selection(self):
@@ -528,6 +528,38 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 queue_gui.QueueWindow.populate_queue(
                     window, "Queued PRs:\n  #3 New\n  #2 Second\n  #1 First\n  #4 Newer\n")
                 self.assertEqual(shown(), ["#3", "#2", "#1", "#4"])
+        app.processEvents()
+
+    def test_queue_shows_estimated_review_start_per_position(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.queue.setColumnCount(4)
+        window.monitor_activity = None
+        window.selected_repo.return_value = ""
+        window.format_day = lambda local: queue_gui.QueueWindow.format_day(window, local)
+        window.format_time = lambda local: queue_gui.QueueWindow.format_time(window, local)
+        window.apply_review_estimates = lambda: queue_gui.QueueWindow.apply_review_estimates(window)
+        now = QDateTime.currentSecsSinceEpoch()
+        status = (
+            "Active reviews:\n  #7 Reviewing\nQueued PRs:\n  #7 Reviewing (in progress)\n"
+            f"  #1 First\n  #2 Second\n  #3 Third\nEstimated review starts: {now - 5} {now + 3600}\n"
+        )
+        queue_gui.QueueWindow.populate_queue(window, status)
+        rows = [window.queue.topLevelItem(i) for i in range(4)]
+        self.assertEqual([row.text(0) for row in rows], ["#7", "#1", "#2", "#3"])
+        self.assertEqual(rows[0].text(3), "")
+        self.assertEqual(rows[1].toolTip(3), "Estimated review start: now")
+        later = QDateTime.fromSecsSinceEpoch(now + 3600)
+        self.assertTrue(rows[2].text(3).endswith(queue_gui.QueueWindow.format_time(window, later)))
+        self.assertEqual(rows[2].toolTip(3), "Estimated review start: in 1h 0m")
+        self.assertEqual(rows[3].text(3), "")
+        # A moved PR takes the estimate of its new position.
+        window.queue.insertTopLevelItem(1, window.queue.takeTopLevelItem(2))
+        queue_gui.QueueWindow.apply_review_estimates(window)
+        self.assertEqual(window.queue.topLevelItem(1).text(0), "#2")
+        self.assertEqual(window.queue.topLevelItem(1).toolTip(3), "Estimated review start: now")
+        self.assertEqual(window.queue.topLevelItem(2).toolTip(3), "Estimated review start: in 1h 0m")
         app.processEvents()
 
     def test_move_buttons_scroll_selected_prs_into_view(self):

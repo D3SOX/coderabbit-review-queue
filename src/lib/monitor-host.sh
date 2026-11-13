@@ -11,7 +11,8 @@ monitor_setting_suffixes=(
 # Queue progress that moves with the monitor.
 monitor_runtime_suffixes=(
   archived-heads.tsv delegated-prs.txt order.txt pending-archives.tsv quota-expiry.txt
-  requeued-heads.tsv review-completion.tsv review-requests.tsv routed-threads.txt
+  requeued-heads.tsv review-completion.tsv review-history.tsv review-requests.tsv
+  routed-threads.txt
 )
 # Files the GUI mirrors from a remote monitor to show its live state.
 monitor_mirror_suffixes=(monitor-state.tsv order.txt review-completion.tsv review-requests.tsv)

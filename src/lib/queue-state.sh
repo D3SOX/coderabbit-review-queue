@@ -131,7 +131,7 @@ snapshot() {
 }
 
 # Every per-repository file name after "$repo_key-"; see configure_repo.
-repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
+repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-history\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
 
 configure_repo() {
   local selected=$1
@@ -170,6 +170,7 @@ configure_repo() {
   queue_order_file="$state_root/$repo_key-order.txt"
   quota_expiry_file="$state_root/$repo_key-quota-expiry.txt"
   review_requests_file="$state_root/$repo_key-review-requests.tsv"
+  review_history_file="$state_root/$repo_key-review-history.tsv"
   auto_delegate_file="$state_root/$repo_key-auto-delegate"
   stop_when_empty_file="$state_root/$repo_key-stop-when-empty"
   ignore_drafts_file="$state_root/$repo_key-ignore-drafts"
@@ -950,6 +951,11 @@ prune_state_files() {
     ' "$review_requests_file" "$review_requests_file" >"$temporary"
     mv "$temporary" "$review_requests_file"
   fi
+  if [[ -f $review_history_file ]]; then
+    temporary=$(mktemp "$review_history_file.XXXXXX")
+    awk -F '\t' -v cutoff="$((now - 86400))" '$1 >= cutoff' "$review_history_file" >"$temporary"
+    mv "$temporary" "$review_history_file"
+  fi
   [[ -n ${open_prs:-} ]] || return 0
   local file order_lock_fd
   exec {order_lock_fd}>"$queue_order_file.lock"
@@ -962,6 +968,49 @@ prune_state_files() {
     mv "$temporary" "$file"
   done
   exec {order_lock_fd}>&-
+}
+
+# review-history.tsv: "epoch<TAB>accepted" when CodeRabbit accepts a queued
+# review and "epoch<TAB>limited" when it reports no review available.
+record_review_history() {
+  printf '%s\t%s\n' "$(date -u +%s)" "$1" >>"$review_history_file"
+}
+
+# Prints the estimated start time (epoch) of the next COUNT queued reviews.
+# CodeRabbit allows a number of reviews per rolling hour; each "limited" event
+# shows that limit as the reviews accepted in the hour before it. Without one,
+# reviews only wait for each other's quota check and trigger.
+review_slot_estimates() {
+  local count=$1 expiry=$2 history=/dev/null
+  (( count > 0 )) || return 0
+  [[ ! -f $review_history_file ]] || history=$review_history_file
+  awk -F '\t' -v now="$(date -u +%s)" -v count="$count" -v expiry="$expiry" '
+    function in_window(t,    i, c) {
+      c = 0; oldest = 0
+      for (i = 1; i <= n; i++) if (accepted[i] > t - 3600) {
+        c++
+        if (!oldest || accepted[i] < oldest) oldest = accepted[i]
+      }
+      return c
+    }
+    $2 == "accepted" {
+      # Back-to-back triggers show how long a quota check and trigger take.
+      if (n && $1 - accepted[n] < 600) { gaps += $1 - accepted[n]; gap_count++ }
+      accepted[++n] = $1
+    }
+    $2 == "limited" { c = in_window($1); if (c) capacity = c }
+    END {
+      gap = gap_count ? int(gaps / gap_count) : 60
+      t = expiry > now ? expiry : now
+      for (k = 1; k <= count; k++) {
+        while (capacity && in_window(t) >= capacity) t = oldest + 3600
+        printf "%s%d", (k > 1 ? " " : ""), t
+        accepted[++n] = t
+        t += gap
+      }
+      print ""
+    }
+  ' "$history"
 }
 
 clear_review_request() {

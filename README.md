@@ -22,6 +22,8 @@ requests.
   Once CodeRabbit accepts a review, the next PR is checked right away, so plans
   with more reviews can run several at once.
   Oversized PR heads are skipped rather than blocking the queue.
+- Estimates when each queued PR's review starts. The monitor learns how many
+  reviews CodeRabbit allows per hour from its own requests and limit replies.
 - Shows pending and in-progress reviews separately from finished reviews,
   approvals, unresolved feedback, CI check status, and matching agent-task
   progress. Queue order, the last status, and unexpired review windows

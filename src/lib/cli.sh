@@ -158,6 +158,7 @@ show_status() {
       printf 'No eligible open PR has an outstanding CodeRabbit review request.\n'
     fi
   else
+    local waiting=0
     printf 'Queued PRs:\n'
     for row in "${stale[@]}"; do
       IFS=$'\t' read -r pr _updated_at _branch_name _head_sha title _limit_at <<<"$row"
@@ -167,6 +168,7 @@ show_status() {
         printf '  #%s %s (in progress)\n' "$pr" "$title"
       else
         printf '  #%s %s\n' "$pr" "$title"
+        ((waiting+=1))
       fi
     done
 
@@ -177,6 +179,11 @@ show_status() {
     if (( expiry > now )); then
       printf 'Next outstanding rate limit expires at %s UTC.\n' \
         "$(date -u -d "@$expiry" +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+    # Only a running monitor starts reviews. Each time is for a queue position,
+    # so the GUI can apply them to its own order.
+    if (( waiting > 0 )) && local_monitor_pid >/dev/null; then
+      printf 'Estimated review starts: %s\n' "$(review_slot_estimates "$waiting" "$expiry")"
     fi
   fi
 

@@ -28,6 +28,7 @@ routed_threads_file=''
 queue_order_file=''
 quota_expiry_file=''
 review_requests_file=''
+review_history_file=''
 auto_delegate_file=''
 stop_when_empty_file=''
 ignore_drafts_file=''
@@ -602,6 +603,7 @@ while true; do
   if (( quota_remaining == 0 )); then
     now=$(date -u +%s)
     if (( quota_expiry > now )); then
+      record_review_history limited
       remember_shared_expiry "$quota_expiry"
       write_monitor_state waiting '' '' "$quota_expiry"
       wait_until "$quota_expiry"
@@ -645,6 +647,7 @@ while true; do
   fi
 
   if wait_for_acceptance "$pr" "$triggered_at" "$head_sha" "$title"; then
+    record_review_history accepted
     write_monitor_state reviewing "$pr" "$title"
     # Watch completion in the background so another review can start as soon
     # as CodeRabbit's quota allows, instead of after this one finishes.
@@ -653,6 +656,7 @@ while true; do
   else
     acceptance_status=$?
     if (( acceptance_status == 2 )); then
+      record_review_history limited
       clear_review_request "$pr" "$head_sha"
       state=$(monitor_snapshot)
       remember_shared_expiry "$(latest_expiry "$state")"

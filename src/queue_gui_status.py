@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QMessageBox, QTreeWidget, QTreeWidgetItem
 
 from queue_gui_common import (
     RUNTIME_ROOT, SCRIPT, STATE_ROOT, compact_duration, file_signature, live_review_number,
-    monitor_is_running, status_belongs_to_repo,
+    monitor_is_running, relative_time, status_belongs_to_repo,
 )
 from queue_gui_tray import check_icon
 
@@ -355,28 +355,38 @@ class StatusMixin:
     def format_time(self, local: QDateTime) -> str:
         return QLocale.system().toString(local.time(), QLocale.ShortFormat)
 
-    def format_expiry(self, local: QDateTime) -> str:
+    def format_day(self, local: QDateTime) -> str:
         today = QDate.currentDate()
         if local.date() == today:
-            day = "Today"
-        elif local.date() == today.addDays(1):
-            day = "Tomorrow"
-        else:
-            day = local.toString("ddd, d MMM")
+            return "Today"
+        if local.date() == today.addDays(1):
+            return "Tomorrow"
+        return local.toString("ddd, d MMM")
 
+    def format_expiry(self, local: QDateTime) -> str:
         seconds = QDateTime.currentDateTime().secsTo(local)
-        if seconds <= 0:
-            remaining = "available now"
-        elif seconds < 60:
-            remaining = f"in {seconds} second{'s' if seconds != 1 else ''}"
-        else:
-            minutes = (seconds + 59) // 60
-            if minutes < 60:
-                remaining = f"in {minutes} minute{'s' if minutes != 1 else ''}"
-            else:
-                hours, minutes = divmod(minutes, 60)
-                remaining = f"in {hours}h {minutes}m"
-        return f"{day} at {self.format_time(local)} ({remaining})"
+        remaining = "available now" if seconds <= 0 else relative_time(seconds)
+        return f"{self.format_day(local)} at {self.format_time(local)} ({remaining})"
+
+    def apply_review_estimates(self) -> None:
+        """Give each waiting row the monitor's estimate for its queue position."""
+        starts = iter(getattr(self, "review_starts", []))
+        now = QDateTime.currentSecsSinceEpoch()
+        for index in range(self.queue.topLevelItemCount()):
+            item = self.queue.topLevelItem(index)
+            start = None
+            if item.data(0, Qt.UserRole + 1) != "In progress":
+                start = next(starts, None)
+            if start is None:
+                item.setText(3, "")
+                item.setToolTip(3, "")
+                continue
+            local = QDateTime.fromSecsSinceEpoch(max(start, now))
+            day = self.format_day(local)
+            time = self.format_time(local)
+            item.setText(3, time if day == "Today" else f"{day} {time}")
+            relative = relative_time(start - now)
+            item.setToolTip(3, f"Estimated review start: {relative}")
 
     def play_availability_sound(self) -> None:
         repo = self.selected_repo()
@@ -513,6 +523,7 @@ class StatusMixin:
         current_finished_number = ""
         section = ""
         expiry: QDateTime | None = None
+        review_starts: list[int] = []
         for line in status.splitlines():
             if line == "Active reviews:":
                 section = "active"
@@ -522,6 +533,12 @@ class StatusMixin:
                 section = "finished"
             elif line.startswith("Next outstanding rate limit expires at "):
                 expiry = self.parse_expiry(line)
+            elif line.startswith("Estimated review starts: "):
+                review_starts = [
+                    int(value)
+                    for value in line.removeprefix("Estimated review starts: ").split()
+                    if value.isdigit()
+                ]
             elif section == "finished" and line.startswith("  #"):
                 number, _, _title = line.strip().partition(" ")
                 current_finished_number = number.removeprefix("#")
@@ -558,6 +575,7 @@ class StatusMixin:
         self.finished_review_numbers = finished_numbers
         self.has_queued_reviews = bool(queued)
         self.next_review_at = expiry
+        self.review_starts = review_starts
         self.update_countdown_display()
 
         active_numbers = {number for number, _title in active}
@@ -587,6 +605,7 @@ class StatusMixin:
             else:
                 self.queue.setCurrentItem(self.queue.topLevelItem(0))
         self.apply_monitor_activity_to_queue()
+        self.apply_review_estimates()
         self.update_queue_buttons()
 
     @preserve_viewport("queue")
@@ -818,6 +837,7 @@ class StatusMixin:
         self.queue.scrollToItem(first if offset < 0 else last)
         self.queue.horizontalScrollBar().setValue(horizontal_position)
         self.save_order()
+        self.apply_review_estimates()
         self.update_queue_buttons()
 
     def save_order(self) -> None:

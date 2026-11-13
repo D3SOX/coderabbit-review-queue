@@ -1242,6 +1242,18 @@ wait_for_acceptance 138 2026-09-23T13:48:07Z head title
 ''')
         self.assertEqual(result.returncode, 99, result.stdout + result.stderr)
 
+    def test_review_slot_estimates_learn_the_hourly_limit(self):
+        result = self.run_shell(r'''
+date() { echo 6100; }
+review_slot_estimates 3 0
+# Two reviews 35 s apart, then CodeRabbit reported its limit.
+printf '6000\taccepted\n6035\taccepted\n6060\tlimited\n' >"$review_history_file"
+review_slot_estimates 4 9600
+review_slot_estimates 0 9600
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['6100 6160 6220', '9600 9635 13200 13235'])
+
     def test_recording_review_request_keeps_queue_position(self):
         # A request CodeRabbit rejects for quota leaves the PR at the queue's head.
         for requeue_top in ('0', '1'):
@@ -2180,6 +2192,25 @@ cat "$state_root/snapshot-age"
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines()[-1], '60')
+
+    def test_status_estimates_review_starts_only_while_monitor_runs(self):
+        result = self.run_shell(r'''
+snapshot() { printf '{}'; }
+status_quota_available() { :; }
+load_stale_rows() { stale=($'7\tnow\tb\th7\tReviewing\t-' $'1\tnow\tb\th1\tFirst\t-' $'2\tnow\tb\th2\tSecond\t-'); }
+active_review_rows() { printf '7\tReviewing\n'; }
+approved_review_rows() { :; }
+reviewed_rows() { :; }
+latest_expiry() { echo 0; }
+shared_expiry() { echo 0; }
+review_slot_estimates() { echo "slots for $1"; }
+local_monitor_pid() { return 1; }
+show_status 60 | grep -c 'Estimated review starts' || true
+local_monitor_pid() { echo 123; }
+show_status 60 | grep 'Estimated review starts'
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['0', 'Estimated review starts: slots for 2'])
 
     def test_finished_reviews_summarize_ci_checks(self):
         result = self.run_shell(r'''

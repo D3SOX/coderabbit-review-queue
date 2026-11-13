@@ -416,16 +416,16 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
 
         queue_label = QLabel("CodeRabbit review queue")
         self.queue = QTreeWidget()
-        self.queue.setHeaderLabels(["PR", "Title", "Status"])
+        self.queue.setHeaderLabels(["PR", "Title", "Status", "Estimated review"])
         self.queue.setRootIsDecorated(False)
         self.queue.setAlternatingRowColors(True)
         self.queue.setSelectionMode(QTreeWidget.ExtendedSelection)
         self.queue.setToolTip("Select multiple PRs with Ctrl-click or Shift-click to move them together.")
-        # Status follows the title instead of sitting at the far right; the
-        # cap keeps a very long title from pushing it out of view.
-        fit_columns(self.queue, fitted=(0, 1), stretch=2)
+        # Status and estimate follow the title instead of sitting at the far
+        # right; the cap keeps a very long title from pushing them out of view.
+        fit_columns(self.queue, fitted=(0, 1, 2), stretch=3)
         self.queue.header().setMaximumSectionSize(800)
-        enable_column_menu(self.queue, "queue", stretch=2)
+        enable_column_menu(self.queue, "queue", stretch=3)
         self.queue.itemDoubleClicked.connect(
             lambda item, _column: self.open_pr_number(item.data(0, Qt.UserRole))
         )
@@ -577,6 +577,8 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
         self.auto_refresh.start(60000)
         self.countdown_timer = QTimer(self)
         self.countdown_timer.timeout.connect(self.update_countdown_display)
+        # Keeps "now" and the relative times in the estimate tooltips current.
+        self.countdown_timer.timeout.connect(self.apply_review_estimates)
         self.countdown_timer.start(1000)
         self.tray_state: tuple[str, str, int] | None = None
         self.tray_animation_started = time.monotonic()

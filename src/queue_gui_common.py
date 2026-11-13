@@ -96,6 +96,19 @@ def compact_duration(seconds: int) -> str:
     return f"{hours}h {minutes}m"
 
 
+def relative_time(seconds: int) -> str:
+    """Time from now in words, e.g. "in 5 minutes" or "in 2h 5m"."""
+    if seconds <= 0:
+        return "now"
+    if seconds < 60:
+        return f"in {seconds} second{'s' if seconds != 1 else ''}"
+    minutes = (seconds + 59) // 60
+    if minutes < 60:
+        return f"in {minutes} minute{'s' if minutes != 1 else ''}"
+    hours, minutes = divmod(minutes, 60)
+    return f"in {hours}h {minutes}m"
+
+
 def live_review_number(activity: tuple[str, str, str, int] | None) -> str | None:
     if isinstance(activity, tuple) and activity[0] in {"checking", "triggering", "reviewing"}:
         return activity[1] or None
