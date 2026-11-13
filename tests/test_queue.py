@@ -1157,6 +1157,59 @@ defer_recent_review_request 2524 head Title
             with self.subTest(function=function):
                 self.assertEqual(self.rows(function, prs), [3])
 
+    def test_head_approved_or_summarized_by_coderabbit_is_not_queued(self):
+        # OpenTubeX#3139: `@coderabbitai approve` leaves an APPROVED review with
+        # an empty body on the head; the queue then requested another review.
+        def review(state, commit, body=''):
+            return {'author': {'login': 'coderabbitai'}, 'state': state,
+                    'commit': {'oid': commit}, 'body': body}
+        summary = ('<!-- walkthrough_start -->\nReviewing files that changed from the base of the PR '
+                   'and between 42e736211f and {}.\n')
+        cases = [
+            ('approved head', [review('APPROVED', 'head')], [], []),
+            ('approval of an older head', [review('APPROVED', 'old')], [], [1]),
+            ('dismissed approval', [review('DISMISSED', 'head')], [], [1]),
+            ('empty comment review', [review('COMMENTED', 'head')], [], [1]),
+            ('summary reviewed the head', [], [summary.format('head')], []),
+            ('summary reviewed an older head', [], [summary.format('old')], [1]),
+        ]
+        for name, reviews, comments, expected in cases:
+            with self.subTest(name):
+                pr = self.pr(1)
+                pr['reviews']['nodes'] = reviews
+                pr['comments']['nodes'] = [{'author': {'login': 'coderabbitai'}, 'body': body,
+                                            'updatedAt': '2026-11-13T16:00:00Z'} for body in comments]
+                self.assertEqual(self.rows('stale_rows', [pr]), expected)
+
+    def test_pr_approved_during_quota_check_is_not_triggered(self):
+        result = self.run_shell(r'''
+claim_monitor() { :; }
+cleanup_monitor() { :; }
+monitor_snapshot() { [[ -e $state_root/approved ]] && echo approved || echo open; }
+route_all_unresolved_async() { :; }
+process_approval_actions_async() { :; }
+process_thread_archives_async() { :; }
+prune_state_files() { :; }
+load_stale_rows() {
+  stale=()
+  [[ $1 == approved ]] || stale=($'1\tnow\tbranch-1\thead-1\tfirst\t-')
+}
+latest_expiry() { echo 0; }
+shared_expiry() { echo 0; }
+remember_shared_expiry() { :; }
+wait_until() { :; }
+recent_review_request_expiry() { echo 0; }
+desktop_notify() { :; }
+# CodeRabbit approves the PR while the quota check waits for its reply.
+query_quota() { : >"$state_root/approved"; quota_remaining=-1; }
+gh() { echo "POSTED $*"; }
+wait_on_empty_queue() { echo 'queue empty'; exit 0; }
+main --repo example/repo
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('POSTED', result.stdout)
+        self.assertIn('queue empty', result.stdout)
+
     def test_clearing_authors_includes_bots_even_with_pull_title(self):
         self.assertEqual(self.rows('stale_rows', [self.pr(1, 'pull')],
                                    ': >"$excluded_authors_file"'), [1])

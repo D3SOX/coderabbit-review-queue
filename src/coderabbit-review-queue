@@ -606,9 +606,11 @@ while true; do
   # An available review voids any remembered wait.
   (( quota_remaining == 0 )) || rm -f -- "$quota_expiry_file"
 
-  # The quota query can take long enough for the GUI order to change. Reapply
-  # the persisted order before choosing which PR receives the available slot.
+  # The quota query can take long enough for the GUI order to change, or for
+  # a PR to be approved, reviewed or merged. Recheck both with fresh GitHub
+  # state before choosing which PR receives the available slot.
   agent_review_decision_cache=()
+  state=$(monitor_snapshot)
   load_stale_rows "$state" 1
   if (( ${#stale[@]} == 0 )); then
     continue

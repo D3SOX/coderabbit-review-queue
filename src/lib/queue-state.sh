@@ -373,8 +373,12 @@ stale_rows() {
               .reviews.nodes[]?;
               (.author.login // "") == "coderabbitai"
               and (.commit.oid // "") == $pr.headRefOid
-              # Empty-body reviews are resolve/reply events, not a head review.
-              and ((.body // "") | gsub("^\\s+|\\s+$"; "") | length) > 0
+              # Empty-body reviews are resolve/reply events, not a head review,
+              # except an approval: `@coderabbitai approve` marks the head done.
+              and (
+                (.state // "") == "APPROVED"
+                or ((.body // "") | gsub("^\\s+|\\s+$"; "") | length) > 0
+              )
             )
             | not
           )
@@ -420,9 +424,10 @@ stale_rows() {
             any(
               .comments.nodes[]?;
               (.author.login // "") == "coderabbitai"
-              and (.body | contains("No actionable comments were generated in the recent review"))
-              # The reviewed range must end at the head; a skip notice elsewhere
-              # in the comment can also link the head.
+              # The summary names the range its last review covered. That range
+              # must end at the head; a skip notice elsewhere in the comment can
+              # also link the head.
+              and (.body | test("(No actionable comments were generated in the recent review|Reviewing files that changed from the base of the PR)"))
               and (.body | test("between [0-9a-f]+ and " + $pr.headRefOid))
               and ((.body | rate_limit_reply) | not)
             )
