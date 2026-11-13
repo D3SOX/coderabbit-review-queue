@@ -981,7 +981,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                     f"Next review: {expected} · Reviews in progress (#1, #2)"
                 )
 
-    def test_check_now_offered_only_while_a_running_monitor_waits(self):
+    def test_check_now_offered_in_countdown_menu_only_while_a_running_monitor_waits(self):
         later = queue_gui.QDateTime.currentDateTime().addSecs(53 * 60)
         for queued, next_review_at, activity, pid, visible in [
             (True, later, ("waiting", "", "", 0), 123, True),
@@ -1002,13 +1002,34 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 window.monitor_pid.return_value = pid
                 window.format_expiry.return_value = "Today"
                 queue_gui.QueueWindow.update_countdown_display(window)
-                window.check_quota_button.setVisible.assert_called_once_with(visible)
+                self.assertIs(window.can_check_quota, visible)
+                tooltip = window.timer_label.setToolTip.call_args.args[0]
+                self.assertEqual(tooltip.startswith("Right-click"), visible)
         window = Mock()
         window.selected_repo.return_value = "example/repo"
         with patch.object(queue_gui_status.QProcess, "startDetached") as start:
             queue_gui.QueueWindow.check_quota_now(window)
         start.assert_called_once_with(queue_gui_status.SCRIPT, ["--repo", "example/repo", "--check-quota-now"])
-        window.check_quota_button.hide.assert_called_once_with()
+        self.assertFalse(window.can_check_quota)
+
+    def test_countdown_menu_checks_coderabbit_now(self):
+        app = QApplication.instance() or QApplication([])
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                window = Mock()
+                window.timer_label = queue_gui.QLabel("Next review: Today at 16:52")
+                window.can_check_quota = enabled
+                with patch.object(queue_gui_status.QMenu, "popup"):
+                    queue_gui.QueueWindow.show_countdown_menu(window, queue_gui_status.QPoint(0, 0))
+                menu = window.timer_label.findChild(queue_gui_status.QMenu)
+                action = menu.actions()[0]
+                self.assertEqual(action.text(), "Check CodeRabbit now")
+                self.assertEqual(action.isEnabled(), enabled)
+                if enabled:
+                    action.trigger()
+                    window.check_quota_now.assert_called_once()
+                menu.deleteLater()
+        app.processEvents()
 
     def test_running_review_while_status_loads_says_so(self):
         window = Mock()

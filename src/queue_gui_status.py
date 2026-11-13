@@ -6,9 +6,9 @@ import re
 from functools import wraps
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, QItemSelectionModel, QLocale, QProcess, Qt
+from PySide6.QtCore import QDate, QDateTime, QItemSelectionModel, QLocale, QPoint, QProcess, Qt
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QMessageBox, QTreeWidget, QTreeWidgetItem
+from PySide6.QtWidgets import QMenu, QMessageBox, QTreeWidget, QTreeWidgetItem
 
 from queue_gui_common import (
     RUNTIME_ROOT, SCRIPT, STATE_ROOT, compact_duration, file_signature, live_review_number,
@@ -412,8 +412,17 @@ class StatusMixin:
             return
         # The monitor's host ends its wait and asks CodeRabbit once.
         QProcess.startDetached(SCRIPT, ["--repo", repo, "--check-quota-now"])
-        self.check_quota_button.hide()
+        self.can_check_quota = False
         self.show_transient_status("Asking CodeRabbit whether reviews are available")
+
+    def show_countdown_menu(self, position: QPoint) -> None:
+        menu = QMenu(self.timer_label)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
+        action = menu.addAction(QIcon.fromTheme("view-refresh"), "Check CodeRabbit now")
+        action.setToolTip("Posts one rate limit check on the first queued PR.")
+        action.setEnabled(self.can_check_quota)
+        action.triggered.connect(self.check_quota_now)
+        menu.popup(self.timer_label.mapToGlobal(position))
 
     def update_countdown_display(self) -> None:
         self.setWindowTitle(self.base_window_title)
@@ -424,7 +433,11 @@ class StatusMixin:
             and (self.monitor_activity is None
                  or self.monitor_activity[0] not in {"checking", "triggering"})
         )
-        self.check_quota_button.setVisible(bool(waiting) and self.monitor_pid() is not None)
+        self.can_check_quota = bool(waiting) and self.monitor_pid() is not None
+        self.timer_label.setToolTip(
+            "Right-click to ask CodeRabbit now instead of waiting, for example after a plan change."
+            if self.can_check_quota else ""
+        )
         repo = self.selected_repo() or self.base_window_title
         # The monitor writes one phase at a time, but several reviews can run
         # alongside it; keep every running review in the summary.
