@@ -16,6 +16,9 @@ from queue_gui_common import (
 )
 from queue_gui_tray import check_icon
 
+WAITING_FOR_BOTS = "Waiting for bots"
+# Rows the user can reorder; held PRs keep their place once released.
+MOVABLE_STATUSES = {"Queued", WAITING_FOR_BOTS}
 
 def preserve_viewport(table_name):
     """Keep refreshes anchored to content, not selection or a stale row index."""
@@ -375,7 +378,7 @@ class StatusMixin:
         for index in range(self.queue.topLevelItemCount()):
             item = self.queue.topLevelItem(index)
             start = None
-            if item.data(0, Qt.UserRole + 1) != "In progress":
+            if item.data(0, Qt.UserRole + 1) not in {"In progress", WAITING_FOR_BOTS}:
                 start = next(starts, None)
             if start is None:
                 item.setText(3, "")
@@ -555,6 +558,7 @@ class StatusMixin:
         section = ""
         expiry: QDateTime | None = None
         review_starts: list[int] = []
+        held_reasons: dict[str, str] = {}
         for line in status.splitlines():
             if line == "Active reviews:":
                 section = "active"
@@ -580,6 +584,10 @@ class StatusMixin:
                 number, _, title = line.strip().partition(" ")
                 number = number.removeprefix("#")
                 title = re.sub(r" \(in progress\)$", "", title)
+                held = re.search(r" \(waiting for other bots: (.*)\)$", title)
+                if held:
+                    title = title[: held.start()]
+                    held_reasons[number] = held.group(1)
                 if section == "active":
                     active.append((number, title))
                 else:
@@ -616,11 +624,15 @@ class StatusMixin:
         for number, title in queued:
             if number in active_numbers:
                 continue
-            display_rows.append((number, title, "Queued"))
+            display_rows.append(
+                (number, title, WAITING_FOR_BOTS if number in held_reasons else "Queued")
+            )
 
         self.queue.clear()
         for number, title, review_status in display_rows:
             item = QTreeWidgetItem([f"#{number}", title, review_status])
+            if number in held_reasons:
+                item.setToolTip(2, f"Not asking CodeRabbit yet: {held_reasons[number]}")
             item.setData(0, Qt.UserRole, number)
             item.setData(0, Qt.UserRole + 1, review_status)
             # Live monitor phases overlay this; an idle monitor restores it.
@@ -707,14 +719,15 @@ class StatusMixin:
     def queue_move_rows(self, offset: int) -> list[int]:
         selected = self.queue.selectedItems()
         if offset not in {-1, 1} or not selected or any(
-            item.data(0, Qt.UserRole + 1) != "Queued" for item in selected
+            item.data(0, Qt.UserRole + 1) not in MOVABLE_STATUSES for item in selected
         ):
             return []
         rows = sorted(self.queue.indexOfTopLevelItem(item) for item in selected)
         if not any(
             0 <= row + offset < self.queue.topLevelItemCount()
             and not self.queue.topLevelItem(row + offset).isSelected()
-            and self.queue.topLevelItem(row + offset).data(0, Qt.UserRole + 1) == "Queued"
+            and self.queue.topLevelItem(row + offset).data(0, Qt.UserRole + 1)
+            in MOVABLE_STATUSES
             for row in rows
         ):
             return []
@@ -842,7 +855,10 @@ class StatusMixin:
                 if not 0 <= target < self.queue.topLevelItemCount():
                     continue
                 other = self.queue.topLevelItem(target)
-                if other.isSelected() or other.data(0, Qt.UserRole + 1) != "Queued":
+                if (
+                    other.isSelected()
+                    or other.data(0, Qt.UserRole + 1) not in MOVABLE_STATUSES
+                ):
                     continue
                 item = self.queue.takeTopLevelItem(row)
                 self.queue.insertTopLevelItem(target, item)

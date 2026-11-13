@@ -22,6 +22,11 @@ requests.
   Once CodeRabbit accepts a review, the next PR is checked right away, so plans
   with more reviews can run several at once.
   Oversized PR heads are skipped rather than blocking the queue.
+- Can wait for other review bots, per repository. A PR then waits while a bot's
+  check run is still running on its head, while Codex has not finished
+  reviewing it, or while any reviewer other than CodeRabbit has an unresolved
+  thread. Codex gets 15 minutes after a push to start, so a bot that skips a
+  head does not hold the queue.
 - Estimates when each queued PR's review starts. The monitor learns how many
   reviews CodeRabbit allows per hour from its own requests and limit replies.
   While it waits, right-click the countdown and choose **Check CodeRabbit now**

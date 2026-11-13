@@ -787,6 +787,36 @@ class SettingsMixin:
         )
         self.refresh(manual=True)
 
+    def wait_for_other_bots_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-wait-for-other-bots"
+
+    def load_wait_for_other_bots(self, repo: str) -> None:
+        self.wait_for_other_bots.blockSignals(True)
+        self.wait_for_other_bots.setEnabled(bool(repo))
+        try:
+            enabled = bool(repo) and (
+                self.wait_for_other_bots_file(repo).read_text().strip() == "1"
+            )
+        except OSError:
+            enabled = False
+        self.wait_for_other_bots.setChecked(enabled)
+        self.wait_for_other_bots.blockSignals(False)
+
+    def wait_for_other_bots_changed(self, enabled: bool) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = self.wait_for_other_bots_file(repo)
+        temporary = target.with_name(target.name + ".tmp")
+        temporary.write_text("1\n" if enabled else "0\n")
+        os.replace(temporary, target)
+        self.show_transient_status(
+            "CodeRabbit waits for other review bots" if enabled
+            else "CodeRabbit no longer waits for other review bots"
+        )
+        self.refresh(manual=True)
+
     def requeued_items_at_top_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-requeued-items-at-top"
 

@@ -7,6 +7,7 @@ monitor_setting_suffixes=(
   ignore-drafts merge-admin merge-after-approval merge-after-delegation merge-method
   new-items-at-top notifications notify-sound notify-sound-path notify-sound-volume
   requeued-items-at-top resolve-merge-conflicts steer-running-agents stop-when-empty
+  wait-for-other-bots
 )
 # Queue progress that moves with the monitor.
 monitor_runtime_suffixes=(

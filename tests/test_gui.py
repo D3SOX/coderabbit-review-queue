@@ -562,6 +562,34 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual(window.queue.topLevelItem(2).toolTip(3), "Estimated review start: in 1h 0m")
         app.processEvents()
 
+    def test_queue_shows_prs_held_for_other_bots(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.queue.setColumnCount(4)
+        window.monitor_activity = None
+        window.selected_repo.return_value = ""
+        window.format_day = lambda local: queue_gui.QueueWindow.format_day(window, local)
+        window.format_time = lambda local: queue_gui.QueueWindow.format_time(window, local)
+        window.apply_review_estimates = lambda: queue_gui.QueueWindow.apply_review_estimates(window)
+        now = QDateTime.currentSecsSinceEpoch()
+        status = (
+            "Queued PRs:\n  #2 Ready\n"
+            "  #1 Fix (sync) (waiting for other bots: 1 unresolved thread from cubic-dev-ai)\n"
+            f"Estimated review starts: {now - 5}\n"
+        )
+        queue_gui.QueueWindow.populate_queue(window, status)
+        ready, held = (window.queue.topLevelItem(i) for i in range(2))
+        self.assertEqual([held.text(1), held.text(2)], ["Fix (sync)", "Waiting for bots"])
+        self.assertEqual(
+            held.toolTip(2), "Not asking CodeRabbit yet: 1 unresolved thread from cubic-dev-ai")
+        self.assertEqual(ready.toolTip(3), "Estimated review start: now")
+        self.assertEqual(held.text(3), "")
+        # A held PR can still be reordered.
+        window.queue.setCurrentItem(held)
+        self.assertEqual(queue_gui.QueueWindow.queue_move_rows(window, -1), [1])
+        app.processEvents()
+
     def test_move_buttons_scroll_selected_prs_into_view(self):
         app = QApplication.instance() or QApplication([])
         for offset, to_edge, selected in (

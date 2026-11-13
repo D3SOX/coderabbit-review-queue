@@ -1,5 +1,7 @@
+from datetime import datetime, timedelta, timezone
 import json
 import shlex
+import shutil
 import fcntl
 import os
 from pathlib import Path
@@ -1180,6 +1182,136 @@ defer_recent_review_request 2524 head Title
                 pr['comments']['nodes'] = [{'author': {'login': 'coderabbitai'}, 'body': body,
                                             'updatedAt': '2026-11-13T16:00:00Z'} for body in comments]
                 self.assertEqual(self.rows('stale_rows', [pr]), expected)
+
+    def test_waiting_for_other_bots_holds_prs_until_they_are_done(self):
+        now = datetime.now(timezone.utc)
+
+        def pr(number, minutes_ago, checks=(), codex=None):
+            node = self.pr(number, head=f'head-{number}')
+            committed = (now - timedelta(minutes=minutes_ago)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            commit = node['commits']['nodes'][0]['commit']
+            commit['committedDate'] = committed
+            commit['statusCheckRollup']['contexts']['nodes'] = [
+                {'name': name, 'status': status, 'checkSuite': {'app': {'slug': slug}}}
+                for slug, name, status in checks
+            ]
+            if codex:
+                commit_sha, status = codex
+                state = json.dumps({'code_review': {
+                    'commit_sha': commit_sha, 'status': status}}, separators=(',', ':'))
+                node['comments']['nodes'] = [{
+                    'author': {'login': 'chatgpt-codex-connector'},
+                    'body': '<!-- codex-pull-request-review-summary -->\n'
+                            f'<!-- codex-review-state:v1 {state} -->',
+                    'updatedAt': committed,
+                }]
+            return node
+
+        prs = [
+            pr(1, 5, checks=[('sourcery-ai', 'Sourcery review', 'IN_PROGRESS'),
+                             ('github-actions', 'lint', 'IN_PROGRESS')]),
+            pr(2, 5, codex=('head-old', 'completed')),
+            pr(3, 20, codex=('head-old', 'completed')),
+            pr(4, 5, codex=('head-4', 'completed')),
+            pr(5, 5, codex=('head-5', 'completed')),
+            pr(6, 90, checks=[('sourcery-ai', 'Sourcery review', 'QUEUED')]),
+            pr(7, 5, checks=[('github-actions', 'lint', 'IN_PROGRESS')]),
+            pr(8, 5, codex=('head-8', 'in_progress')),
+        ]
+        threads = {
+            '4': [('cubic-dev-ai', False), ('chatgpt-codex-connector', True),
+                  ('coderabbitai', False)],
+            '5': [('coderabbitai', False)],
+        }
+        fixtures = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, fixtures)
+        for number in threads:
+            (Path(fixtures) / f'threads-{number}.json').write_text(json.dumps(
+                {'data': {'repository': {'pullRequest': {'reviewThreads': {'nodes': [
+                    {'isResolved': resolved, 'comments': {'nodes': [{'author': {'login': login}}]}}
+                    for login, resolved in threads[number]
+                ]}}}}}))
+        result = self.run_shell(f'fixtures={shlex.quote(fixtures)}\n' + r'''
+gh() {
+  local arg number
+  for arg; do [[ $arg != number=* ]] || number=${arg#number=}; done
+  printf 'gh %s\n' "$number" >>"$state_root/gh-calls"
+  cat "$fixtures/threads-$number.json" 2>/dev/null ||
+    printf '%s\n' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}'
+}
+state=$(cat)
+show() {
+  load_stale_rows "$state" 1
+  for row in "${stale[@]}"; do printf 'queued %s\n' "${row%%$'\t'*}"; done
+  for row in "${held[@]}"; do
+    pr=${row%%$'\t'*}
+    printf 'held %s: %s\n' "$pr" "${held_reasons[$pr]}"
+  done
+  printf 'deferred %s\n' "$deferred_review_count"
+}
+show
+[[ ! -e $state_root/gh-calls ]] || exit 41
+echo ---
+printf '1\n' >"$wait_for_other_bots_file"
+show
+echo ---
+sort "$state_root/gh-calls"
+: >"$state_root/gh-calls"
+show >/dev/null
+echo ---
+cat "$state_root/gh-calls"
+# A new review from another bot can add threads, so its cache entry expires.
+state=$(jq '.data.repository.pullRequests.nodes |= map(if .number == 5 then
+  .reviews.nodes += [{author: {login: "cubic-dev-ai"}, state: "COMMENTED",
+    submittedAt: "2026-11-13T21:00:00Z", commit: {oid: "head-5"}, body: "x"}] else . end)' <<<"$state")
+show >/dev/null
+echo ---
+cat "$state_root/gh-calls"
+''', {'data': {'repository': {'pullRequests': {'nodes': prs}}}})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        disabled, enabled, first_calls, cached_calls, new_review_calls = (
+            part.splitlines() for part in result.stdout.split('---\n'))
+        # Off by default: every PR is queued.
+        self.assertEqual(sorted(disabled), sorted(
+            [f'queued {n}' for n in range(1, 9)] + ['deferred 0']))
+        self.assertEqual(sorted(line for line in enabled if line.startswith('queued')),
+                         ['queued 3', 'queued 5', 'queued 6', 'queued 7'])
+        self.assertEqual(sorted(line for line in enabled if line.startswith('held')), [
+            'held 1: sourcery-ai still reviewing',
+            'held 2: Codex has not reviewed this head yet',
+            'held 4: 1 unresolved thread from cubic-dev-ai',
+            'held 8: Codex still reviewing',
+        ])
+        self.assertIn('deferred 4', enabled)
+        # Threads are only fetched for PRs no bot is still reviewing.
+        self.assertEqual(first_calls, ['gh 3', 'gh 4', 'gh 5', 'gh 6', 'gh 7'])
+        self.assertEqual(cached_calls, [])
+        self.assertEqual(new_review_calls, ['gh 5'])
+
+    def test_status_lists_prs_held_for_other_bots_without_estimates(self):
+        result = self.run_shell(r'''
+snapshot() { printf '{}'; }
+status_quota_available() { :; }
+load_stale_rows() {
+  stale=($'1\tnow\tb\th1\tFirst\t-')
+  held=($'2\tnow\tb\th2\tSecond\t-')
+  held_reasons=([2]='Codex still reviewing')
+}
+active_review_rows() { :; }
+approved_review_rows() { :; }
+reviewed_rows() { :; }
+latest_expiry() { echo 0; }
+shared_expiry() { echo 0; }
+review_slot_estimates() { echo "slots for $1"; }
+local_monitor_pid() { echo 123; }
+show_status 60 | grep -E '^  #|Estimated'
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            '  #1 First',
+            '  #2 Second (waiting for other bots: Codex still reviewing)',
+            'Estimated review starts: slots for 1',
+        ])
 
     def test_pr_approved_during_quota_check_is_not_triggered(self):
         result = self.run_shell(r'''

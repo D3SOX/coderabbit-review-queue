@@ -370,10 +370,17 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
         self.requeued_items_at_top.toggled.connect(
             self.requeued_items_at_top_changed
         )
+        self.wait_for_other_bots = QCheckBox("Wait for other review bots")
+        self.wait_for_other_bots.setToolTip(
+            "Per repository. Asks CodeRabbit only after other review bots have "
+            "finished the head and every other reviewer's thread is resolved."
+        )
+        self.wait_for_other_bots.toggled.connect(self.wait_for_other_bots_changed)
         queue_placement_row = QHBoxLayout()
         queue_placement_row.setSpacing(12)
         queue_placement_row.addWidget(self.new_items_at_top)
         queue_placement_row.addWidget(self.requeued_items_at_top)
+        queue_placement_row.addWidget(self.wait_for_other_bots)
         queue_placement_row.addStretch()
 
         self.monitor_label = QLabel()
@@ -899,6 +906,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
         self.load_notify_sound(repo)
         self.load_new_items_at_top(repo)
         self.load_requeued_items_at_top(repo)
+        self.load_wait_for_other_bots(repo)
         cache_is_fresh = self.load_cached_status(repo)
         self.waiting_for_review_window = False
         self.update_monitor_state()

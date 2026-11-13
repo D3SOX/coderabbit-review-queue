@@ -21,7 +21,7 @@ MONITOR_SETTING_SUFFIXES = (
     "merge-after-approval", "merge-after-delegation", "merge-method",
     "new-items-at-top", "notifications", "notify-sound", "notify-sound-path",
     "notify-sound-volume", "requeued-items-at-top", "resolve-merge-conflicts",
-    "steer-running-agents", "stop-when-empty",
+    "steer-running-agents", "stop-when-empty", "wait-for-other-bots",
 )
 # Mirrors monitor_mirror_suffixes in lib/monitor-host.sh.
 MONITOR_MIRROR_SUFFIXES = (

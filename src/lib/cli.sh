@@ -20,7 +20,7 @@ show_status() {
   review_mode=$(merge_after_delegation_mode)
   _claude_agents_json=''
   load_stale_rows "$state" 1
-  for row in "${stale[@]}"; do
+  for row in "${stale[@]}" "${held[@]}"; do
     IFS=$'\t' read -r pr _ <<<"$row"
     queued_prs[$pr]=1
   done
@@ -153,7 +153,7 @@ show_status() {
 
   # Rebuild queue without unresolved PRs for display. load_stale_rows already
   # excludes them for the monitor; keep the same rule visible in --status.
-  if (( ${#stale[@]} == 0 )); then
+  if (( ${#stale[@]} + ${#held[@]} == 0 )); then
     if (( ${#active[@]} == 0 )) && [[ -z $finished ]]; then
       printf 'No eligible open PR has an outstanding CodeRabbit review request.\n'
     fi
@@ -170,6 +170,11 @@ show_status() {
         printf '  #%s %s\n' "$pr" "$title"
         ((waiting+=1))
       fi
+    done
+    for row in "${held[@]}"; do
+      IFS=$'\t' read -r pr _updated_at _branch_name _head_sha title _limit_at <<<"$row"
+      [[ -z ${unresolved_prs[$pr]:-} ]] || continue
+      printf '  #%s %s (waiting for other bots: %s)\n' "$pr" "$title" "${held_reasons[$pr]}"
     done
 
     expiry=$(latest_expiry "$state")

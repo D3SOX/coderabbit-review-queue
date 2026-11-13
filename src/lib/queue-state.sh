@@ -131,7 +131,7 @@ snapshot() {
 }
 
 # Every per-repository file name after "$repo_key-"; see configure_repo.
-repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|check-quota-now|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-history\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty'
+repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|check-quota-now|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|other-review-threads\.tsv|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-history\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty|wait-for-other-bots'
 
 configure_repo() {
   local selected=$1
@@ -175,6 +175,8 @@ configure_repo() {
   auto_delegate_file="$state_root/$repo_key-auto-delegate"
   stop_when_empty_file="$state_root/$repo_key-stop-when-empty"
   ignore_drafts_file="$state_root/$repo_key-ignore-drafts"
+  wait_for_other_bots_file="$state_root/$repo_key-wait-for-other-bots"
+  other_review_threads_file="$state_root/$repo_key-other-review-threads.tsv"
   excluded_branches_file="$state_root/$repo_key-excluded-branches"
   excluded_authors_file="$state_root/$repo_key-excluded-authors"
   notifications_file="$state_root/$repo_key-notifications"
@@ -261,6 +263,92 @@ ignore_drafts_enabled() {
     [[ $(head -n 1 "$ignore_drafts_file") != 0 ]]
   else
     return 0
+  fi
+}
+
+# Default off: hold a PR until other review bots finished and their threads
+# are resolved.
+wait_for_other_bots_enabled() {
+  [[ -f $wait_for_other_bots_file && $(head -n 1 "$wait_for_other_bots_file") == 1 ]]
+}
+
+# Prints "PR, reason another bot is still reviewing the head or -, cache key"
+# per PR. A bot may not start on a new head (quota, no automatic review), so
+# Codex gets 15 minutes to start and running bots one hour to finish.
+other_bot_activity() {
+  jq -r --argjson now "$(date -u +%s)" '
+    .data.repository.pullRequests.nodes[]
+    | . as $pr
+    | ($now - ((.commits.nodes[0].commit.committedDate // .updatedAt) | fromdateiso8601)) as $age
+    | ([.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?
+        | select((.checkSuite.app.slug // "") | IN("", "github-actions", "coderabbitai") | not)
+        | select((.status // "") != "COMPLETED")
+        | .checkSuite.app.slug] | unique) as $running
+    | ([.comments.nodes[]?
+        | select((.author.login // "") == "chatgpt-codex-connector")
+        | .body
+        | capture("codex-review-state:v1 (?<state>\\{.*?\\}) -->")?.state
+        | fromjson? | .code_review // empty] | last) as $codex
+    | (if $age < 3600 and ($running | length) > 0 then
+         ($running | join(", ")) + " still reviewing"
+       elif $codex == null then "-"
+       elif ($codex.commit_sha // "") != $pr.headRefOid then
+         if $age < 900 then "Codex has not reviewed this head yet" else "-" end
+       elif ($codex.status // "") != "completed" and $age < 3600 then "Codex still reviewing"
+       else "-" end) as $reason
+    # New review threads always arrive with a review, which changes the key.
+    | [.number, $reason,
+       $pr.headRefOid + ":" + ([.reviews.nodes[]?
+         | select((.author.login // "") != "coderabbitai") | .submittedAt // ""] | max // "")]
+    | @tsv
+  '
+}
+
+# Prints why unresolved threads from reviewers other than CodeRabbit hold the
+# PR, or nothing. other-review-threads.tsv caches "PR, key, epoch, count,
+# authors": a clear result until the key changes or for ten minutes, an
+# unresolved one for a minute so resolving threads releases the PR soon.
+other_review_threads() {
+  local pr=$1 key=$2 now cached count authors page temporary
+  now=$(date -u +%s)
+  if [[ -f $other_review_threads_file ]] && cached=$(awk -F '\t' \
+    -v pr="$pr" -v key="$key" -v now="$now" '
+      $1 == pr && $2 == key && now - $3 < ($4 > 0 ? 60 : 600) { print $4 "\t" $5; found = 1 }
+      END { exit !found }
+    ' "$other_review_threads_file"); then
+    IFS=$'\t' read -r count authors <<<"$cached"
+  else
+    page=$(gh api graphql -F owner="$owner" -F name="$name" -F number="$pr" -f query='
+      query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $number) {
+            reviewThreads(last: 100) {
+              nodes { isResolved comments(first: 1) { nodes { author { login } } } }
+            }
+          }
+        }
+      }') || return 1
+    IFS=$'\t' read -r count authors < <(jq -r '
+      [.data.repository.pullRequest.reviewThreads.nodes[]
+        | select(.isResolved == false)
+        | .comments.nodes[0].author.login // "unknown"
+        | select(. != "coderabbitai")]
+      | [length, (unique | join(", "))]
+      | @tsv
+    ' <<<"$page") || return 1
+    temporary=$(mktemp "$other_review_threads_file.XXXXXX")
+    {
+      [[ ! -f $other_review_threads_file ]] ||
+        awk -F '\t' -v pr="$pr" '$1 != pr' "$other_review_threads_file"
+      printf '%s\t%s\t%s\t%s\t%s\n' "$pr" "$key" "$now" "$count" "$authors"
+    } >"$temporary"
+    mv "$temporary" "$other_review_threads_file"
+  fi
+  (( count > 0 )) || return 0
+  if (( count == 1 )); then
+    printf '1 unresolved thread from %s\n' "$authors"
+  else
+    printf '%s unresolved threads from %s\n' "$count" "$authors"
   fi
 }
 
@@ -505,7 +593,17 @@ load_stale_rows() {
   local -a ordered=()
 
   deferred_review_count=0
+  held=()
+  held_reasons=()
   reap_review_watchers
+  local reason
+  local -A bot_activity=() bot_keys=()
+  if wait_for_other_bots_enabled; then
+    while IFS=$'\t' read -r pr reason row; do
+      bot_activity[$pr]=$reason
+      bot_keys[$pr]=$row
+    done < <(eligible_state <<<"$state" | other_bot_activity)
+  fi
 
   while IFS= read -r row; do
     [[ -n $row ]] || continue
@@ -520,6 +618,19 @@ load_stale_rows() {
       continue
     fi
     position_requeued_pr "$pr" "$head_sha"
+    if [[ -n ${bot_activity[$pr]+set} ]]; then
+      reason=${bot_activity[$pr]}
+      if [[ $reason == - ]]; then
+        reason=$(other_review_threads "$pr" "${bot_keys[$pr]}") ||
+          reason='Could not check other review threads'
+      fi
+      if [[ -n $reason ]]; then
+        held+=("$row")
+        held_reasons[$pr]=$reason
+        ((deferred_review_count+=1))
+        continue
+      fi
+    fi
     loaded+=("$row")
   done < <(stale_rows <<<"$state")
 
@@ -968,7 +1079,8 @@ prune_state_files() {
   local file order_lock_fd
   exec {order_lock_fd}>"$queue_order_file.lock"
   flock -x "$order_lock_fd"
-  for file in "$delegated_prs_file" "$queue_order_file" "$requeued_heads_file"; do
+  for file in "$delegated_prs_file" "$queue_order_file" "$requeued_heads_file" \
+    "$other_review_threads_file"; do
     [[ -f $file ]] || continue
     temporary=$(mktemp "$file.XXXXXX")
     tr ' ' '\n' <<<"$open_prs" |

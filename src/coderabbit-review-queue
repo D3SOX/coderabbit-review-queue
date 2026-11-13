@@ -33,6 +33,8 @@ check_quota_now_file=''
 auto_delegate_file=''
 stop_when_empty_file=''
 ignore_drafts_file=''
+wait_for_other_bots_file=''
+other_review_threads_file=''
 excluded_branches_file=''
 excluded_authors_file=''
 notifications_file=''
@@ -97,6 +99,8 @@ declare -A completed_review_heads=()
 declare -A review_watchers=()
 declare -A agent_review_decision_cache=()
 deferred_review_count=0
+held=()
+declare -A held_reasons=()
 
 source "$script_dir/lib/notifications.sh"
 source "$script_dir/lib/queue-state.sh"
