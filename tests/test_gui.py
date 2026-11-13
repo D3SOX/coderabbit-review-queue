@@ -938,15 +938,15 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 self.assertEqual((state, drawn_label, drawn_count), ("reviewing", label, count))
                 status_line = window.timer_label.setText.call_args.args[0]
                 if next_review_at is None:
-                    self.assertNotIn("·", status_line)
+                    self.assertTrue(status_line.startswith("Next review: — · Review"), status_line)
                 else:
                     self.assertTrue(status_line.startswith("Next review: Today · Reviews in progress"), status_line)
         app.processEvents()
 
     def test_live_monitor_phase_keeps_other_running_reviews_in_status(self):
         for activity, expected, tray in [
-            (("reviewing", "3", "Three", 0), "Next review: Reviews in progress (#3, #1, #2)", "reviewing"),
-            (("reviewing", "1", "One", 0), "Next review: Reviews in progress (#1, #2)", "reviewing"),
+            (("reviewing", "3", "Three", 0), "Next review: — · Reviews in progress (#3, #1, #2)", "reviewing"),
+            (("reviewing", "1", "One", 0), "Next review: — · Reviews in progress (#1, #2)", "reviewing"),
             (("checking", "4", "Four", 0),
              "Next review: Checking availability for #4 · Reviews in progress (#1, #2)", "busy"),
             (("triggering", "2", "Two", 0),
@@ -1009,6 +1009,19 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             queue_gui.QueueWindow.check_quota_now(window)
         start.assert_called_once_with(queue_gui_status.SCRIPT, ["--repo", "example/repo", "--check-quota-now"])
         window.check_quota_button.hide.assert_called_once_with()
+
+    def test_running_review_while_status_loads_says_so(self):
+        window = Mock()
+        window.base_window_title = "CodeRabbit Review Queue"
+        window.status_loading_repo = "example/repo"
+        window.monitor_activity = ("reviewing", "3", "Three", 0)
+        window.selected_repo.return_value = "example/repo"
+        window.active_reviews = []
+        window.has_queued_reviews = False
+        queue_gui.QueueWindow.update_countdown_display(window)
+        window.timer_label.setText.assert_called_once_with(
+            "Next review: Loading status… · Review in progress on #3"
+        )
 
     def test_uncached_repository_shows_loading_instead_of_old_availability(self):
         window = Mock()

@@ -486,10 +486,11 @@ class StatusMixin:
                 else:
                     next_review = "Available now"
                 tooltip += f"\nNext review: {next_review}"
-            if next_review:
-                self.timer_label.setText(f"Next review: {next_review} · {summary}")
+            elif self.status_loading_repo and self.status_loading_repo == self.selected_repo():
+                next_review = "Loading status…"
             else:
-                self.timer_label.setText(f"Next review: {summary}")
+                next_review = "—"
+            self.timer_label.setText(f"Next review: {next_review} · {summary}")
             self.set_tray_state("reviewing", tooltip, label, count)
             self.waiting_for_review_window = False
             return
