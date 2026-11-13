@@ -2069,6 +2069,34 @@ elapsed=$(( $(date +%s%3N) - started_at ))
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_quota_check_reply_does_not_hide_a_later_triggered_review(self):
+        # OpenTubeX#3164: a Fair Usage reply to an earlier quota check hid the
+        # running review from both the active list and the queue.
+        def reply(at, body):
+            return {'author': {'login': 'coderabbitai'}, 'body': body,
+                    'createdAt': at, 'updatedAt': at}
+        limited = reply('2026-11-13T22:17:50Z', "You're currently rate limited under our Fair Usage "
+                        'Limits Policy. Your next review will be available in 25 minutes.')
+        available = reply('2026-11-13T22:44:01Z', 'Your plan includes PR reviews subject to rate '
+                          'limits. Reviews are available now.')
+        triggered = reply('2026-11-13T22:44:12Z', '<summary>Action performed</summary> Review triggered.')
+        limited_again = reply('2026-11-13T22:45:00Z', "You're currently rate limited. Your next "
+                              'review will be available in 10 minutes.')
+        for name, comments, active in [
+            ('limit superseded by availability and trigger', [limited, available, triggered], True),
+            ('limit superseded by trigger alone', [limited, triggered], True),
+            ('limited after the trigger', [triggered, limited_again], False),
+        ]:
+            with self.subTest(name):
+                pr = self.pr(3164)
+                pr['comments']['nodes'] = comments
+                pr['commits']['nodes'][0]['commit']['statusCheckRollup']['contexts']['nodes'] = [{
+                    'name': 'CodeRabbit', 'status': 'IN_PROGRESS', 'conclusion': None,
+                    'checkSuite': {'app': {'slug': 'coderabbitai'}},
+                    'startedAt': '2026-11-13T22:44:29Z',
+                }]
+                self.assertEqual(bool(self.rows('active_review_rows "$(cat)"', [pr])), active)
+
     def test_completed_status_is_not_still_active(self):
         pr = self.pr(1535, description='Review completed')
         pr['comments']['nodes'] = [{

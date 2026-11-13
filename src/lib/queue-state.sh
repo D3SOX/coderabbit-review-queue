@@ -796,13 +796,7 @@ active_review_rows() {
           and (.creator.login // "") == "coderabbitai"
           and (.description // "") == "Review rate limited"
         )
-        or any(
-          .comments.nodes[]?;
-          (.author.login // "") == "coderabbitai"
-          and (
-            (.body | rate_limit_reply)
-          )
-        );
+        or current_rate_limit_reply != null;
 
       def is_reviewing:
         any(
@@ -870,13 +864,7 @@ active_review_rows() {
             and (.creator.login // "") == "coderabbitai"
             and (.description // "") == "Review rate limited"
           )
-          or any(
-            .comments.nodes[]?;
-            (.author.login // "") == "coderabbitai"
-            and (
-              (.body | rate_limit_reply)
-            )
-          );
+          or current_rate_limit_reply != null;
 
         .data.repository.pullRequests.nodes[]
         | select(.number == ($pr | tonumber) and .headRefOid == $head)
@@ -924,19 +912,6 @@ active_review_rows() {
 timer_rows() {
   jq -r -L "$script_dir/lib" '
     include "coderabbit-limits";
-    def latest_rate_limit:
-      [
-        .comments.nodes[]?
-        | select(
-            (.author.login // "") == "coderabbitai"
-            and (
-              (.body | rate_limit_reply)
-            )
-          )
-      ]
-      | sort_by(.updatedAt)
-      | last // null;
-
     # A later "Reviews are available now" reply voids older limits, for
     # example after a plan upgrade.
     ([
@@ -946,7 +921,7 @@ timer_rows() {
       | .updatedAt
     ] | max // "") as $available_at
     | .data.repository.pullRequests.nodes[]
-    | (latest_rate_limit) as $rate_limit
+    | current_rate_limit_reply as $rate_limit
     | (
         if $rate_limit == null then null
         else
