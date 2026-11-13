@@ -350,15 +350,15 @@ without_file_limit_skips() {
 }
 
 stale_rows() {
-  eligible_state | without_file_limit_skips | jq -r '
+  eligible_state | without_file_limit_skips | jq -r -L "$script_dir/lib" '
+    include "coderabbit-limits";
     def latest_rate_limit:
       [
         .comments.nodes[]?
         | select(
             (.author.login // "") == "coderabbitai"
             and (
-              (.body | contains("rate limited by coderabbit.ai"))
-              or (.body | test("More reviews will be available in"; "i"))
+              (.body | rate_limit_reply)
             )
           )
       ]
@@ -424,7 +424,7 @@ stale_rows() {
               # The reviewed range must end at the head; a skip notice elsewhere
               # in the comment can also link the head.
               and (.body | test("between [0-9a-f]+ and " + $pr.headRefOid))
-              and ((.body | contains("rate limited by coderabbit.ai")) | not)
+              and ((.body | rate_limit_reply) | not)
             )
             | not
           )
@@ -671,7 +671,8 @@ active_review_rows() {
     seen[$pr]=1
     printf '%s\t%s\n' "$pr" "$title"
   done < <(
-    jq -r '
+    jq -r -L "$script_dir/lib" '
+      include "coderabbit-limits";
       def is_rate_limited:
         any(
           .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
@@ -683,8 +684,7 @@ active_review_rows() {
           .comments.nodes[]?;
           (.author.login // "") == "coderabbitai"
           and (
-            (.body | contains("rate limited by coderabbit.ai"))
-            or (.body | test("More reviews will be available in"; "i"))
+            (.body | rate_limit_reply)
           )
         );
 
@@ -745,7 +745,8 @@ active_review_rows() {
     [[ -n ${pr:-} && -n ${head_sha:-} ]] || continue
     [[ -z ${seen[$pr]:-} ]] || continue
     title=$(
-      jq -r --argjson pr "$pr" --arg head "$head_sha" '
+      jq -r -L "$script_dir/lib" --argjson pr "$pr" --arg head "$head_sha" '
+        include "coderabbit-limits";
         def is_rate_limited:
           any(
             .commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
@@ -757,8 +758,7 @@ active_review_rows() {
             .comments.nodes[]?;
             (.author.login // "") == "coderabbitai"
             and (
-              (.body | contains("rate limited by coderabbit.ai"))
-              or (.body | test("More reviews will be available in"; "i"))
+              (.body | rate_limit_reply)
             )
           );
 
@@ -806,15 +806,15 @@ active_review_rows() {
 }
 
 timer_rows() {
-  jq -r '
+  jq -r -L "$script_dir/lib" '
+    include "coderabbit-limits";
     def latest_rate_limit:
       [
         .comments.nodes[]?
         | select(
             (.author.login // "") == "coderabbitai"
             and (
-              (.body | contains("rate limited by coderabbit.ai"))
-              or (.body | test("More reviews will be available in"; "i"))
+              (.body | rate_limit_reply)
             )
           )
       ]
@@ -834,14 +834,7 @@ timer_rows() {
     | (
         if $rate_limit == null then null
         else
-          (
-            $rate_limit.body
-            | try capture(
-                "(?:Next review available in:\\*{0,2}\\s*\\*{0,2}|More reviews will be available in\\s+)(?<amount>[0-9]+)\\s+(?<unit>seconds?|minutes?|hours?)";
-                "i"
-              )
-              catch null
-          )
+          $rate_limit.body | rate_limit_timer
         end
       ) as $timer
     | select(
@@ -1058,6 +1051,7 @@ recent_review_request_expiry() {
   github_at=$(
     jq -r -L "$script_dir/lib" --arg cutoff "$cutoff_iso" '
       include "review-feedback";
+      include "coderabbit-limits";
       . as $comments
       | [
           .[]
@@ -1077,8 +1071,7 @@ recent_review_request_expiry() {
           .user.login == "coderabbitai[bot]"
           and .updated_at >= $request.created_at
           and (
-            (.body | contains("rate limited by coderabbit.ai"))
-            or (.body | test("More reviews will be available in"; "i"))
+            (.body | rate_limit_reply)
           )
         ) then
           empty

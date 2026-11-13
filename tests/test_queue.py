@@ -1387,6 +1387,22 @@ echo "woke at $clock"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('woke at 130', result.stdout)
 
+    def test_fair_usage_rate_limit_reply_is_understood(self):
+        body = ("<!-- This is an auto-generated reply by CodeRabbit -->\n"
+                "You're currently rate limited under our [Fair Usage Limits Policy]"
+                "(https://docs.coderabbit.ai/management/rate-limits#fair-usage-limits-policy). "
+                "Your current included review allowance is based on your included PR review "
+                "attempts over the past 7 days. Your next review will be available in 47 minutes.")
+        comments = [{'user': {'login': 'coderabbitai[bot]'}, 'created_at': '2026-11-13T15:04:27Z',
+                     'updated_at': '2026-11-13T15:04:27Z', 'body': body}]
+        result = self.run_shell("quota_row_from_comments 2026-11-13T15:04:21Z", comments)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split('\t'), ['0', '2026-11-13T15:04:27Z', '47', 'minutes\n'])
+        pr = self.pr(3143)
+        pr['comments']['nodes'] = [{'author': {'login': 'coderabbitai'},
+                                    'updatedAt': '2026-11-13T15:04:27Z', 'body': body}]
+        self.assertEqual(self.rows('timer_rows', [pr]), [3143])
+
     def test_available_reply_voids_older_rate_limits(self):
         limited = {'author': {'login': 'coderabbitai'}, 'updatedAt': '2026-11-13T14:00:00Z',
                    'body': 'More reviews will be available in 59 minutes.'}

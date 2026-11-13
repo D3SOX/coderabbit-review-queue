@@ -147,7 +147,8 @@ issue_comments() {
 quota_row_from_comments() {
   local since=$1
 
-  jq -r --arg since "$since" '
+  jq -r -L "$script_dir/lib" --arg since "$since" '
+    include "coderabbit-limits";
     [
       .[]
       | select(
@@ -171,16 +172,7 @@ quota_row_from_comments() {
           else ($remaining_match.remaining | tonumber)
           end
         ) as $remaining
-      | (
-          [
-            $body
-            | capture(
-                "(?:refill(?:s)? in|next review available in:?\\*{0,2}|more reviews will be available in)\\s*\\*{0,2}(?<amount>[0-9]+)\\s+(?<unit>seconds?|minutes?|hours?)";
-                "i"
-              )
-          ]
-          | first // null
-        ) as $timer
+      | ($body | rate_limit_timer) as $timer
       | if ($body | test("reviews are available now"; "i")) then
           {
             remaining: -1,
@@ -196,11 +188,8 @@ quota_row_from_comments() {
         elif (
           $timer != null
           and (
-            $body
-            | test(
-                "review limit|no reviews? remaining|couldn.t start this review|more reviews will be available";
-                "i"
-              )
+            ($body | rate_limit_reply)
+            or ($body | test("review limit|no reviews? remaining|couldn.t start this review"; "i"))
           )
         ) then
           {
@@ -303,18 +292,18 @@ wait_for_acceptance() {
     comments=$(issue_comments "$pr")
     statuses=$(coderabbit_commit_statuses "$head_sha" "$triggered_at")
     result=$(
-      jq -r \
+      jq -r -L "$script_dir/lib" \
         --arg since "$triggered_at" \
         --arg head "$head_sha" \
         --slurpfile statuses <(printf '%s\n' "$statuses") '
+        include "coderabbit-limits";
         if (
           any(
             .[];
             .user.login == "coderabbitai[bot]"
             and .updated_at >= $since
             and (
-              (.body | contains("rate limited by coderabbit.ai"))
-              or (.body | test("More reviews will be available in"; "i"))
+              (.body | rate_limit_reply)
             )
           )
           or any(
@@ -338,7 +327,7 @@ wait_for_acceptance() {
                 .updated_at >= $since
                 and (.body | contains("No actionable comments were generated in the recent review"))
                 and (.body | test("between [0-9a-f]+ and " + $head))
-                and ((.body | contains("rate limited by coderabbit.ai")) | not)
+                and ((.body | rate_limit_reply) | not)
               )
             )
           )
@@ -448,9 +437,10 @@ wait_for_review_completion() {
     if [[ $result == completed ]]; then
       reviews=$(github_get --slurp "repos/$repo/pulls/$pr/reviews?per_page=100")
       comments=$(github_get --slurp "repos/$repo/issues/$pr/comments?per_page=100")
-      if jq -s -e \
+      if jq -s -e -L "$script_dir/lib" \
         --arg since "$triggered_at" \
         --arg head "$head_sha" '
+          include "coderabbit-limits";
           .[0] as $reviews | .[1] as $comments |
           any(
             $reviews[][];
@@ -473,7 +463,7 @@ wait_for_review_completion() {
               )
               or (.body | contains("No files to review."))
             )
-            and ((.body | contains("rate limited by coderabbit.ai")) | not)
+            and ((.body | rate_limit_reply) | not)
           )
         ' < <(printf '%s\n' "$reviews" "$comments") >/dev/null; then
         write_review_completion "$pr" "$head_sha" "$title"

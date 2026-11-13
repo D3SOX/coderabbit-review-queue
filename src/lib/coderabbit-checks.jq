@@ -19,7 +19,7 @@ def coderabbit_check_context:
                 elif $conclusion == "SUCCESS" or $nothing_new then "SUCCESS" else "ERROR" end),
         description: (
           if $status != "COMPLETED" then "Review in progress"
-          elif $detail | test("Review rate limited|rate limit exceeded|More reviews will be available"; "i") then "Review rate limited"
+          elif $detail | test("Review rate limited|rate limit exceeded|currently rate limited|(more reviews|next review) will be available"; "i") then "Review rate limited"
           elif $detail | test("Review skipped: [0-9]+ files exceed the limit of [0-9]+") then
             ($detail | capture("(?<reason>Review skipped: [0-9]+ files exceed the limit of [0-9]+)").reason)
           elif $conclusion == "SUCCESS" or $nothing_new then "Review completed"
