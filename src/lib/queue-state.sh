@@ -1074,12 +1074,15 @@ record_review_history() {
 # Prints the estimated start time (epoch) of the next COUNT queued reviews.
 # CodeRabbit allows a number of reviews per rolling hour; each "limited" event
 # shows that limit as the reviews accepted in the hour before it. Without one,
-# reviews only wait for each other's quota check and trigger.
+# reviews only wait for each other's quota check and trigger. A slot that opens
+# is used after the wait's safety margin and a quota check; the first review
+# after each limit shows how long that takes.
 review_slot_estimates() {
   local count=$1 expiry=$2 history=/dev/null
   (( count > 0 )) || return 0
   [[ ! -f $review_history_file ]] || history=$review_history_file
-  awk -F '\t' -v now="$(date -u +%s)" -v count="$count" -v expiry="$expiry" '
+  awk -F '\t' -v now="$(date -u +%s)" -v count="$count" -v expiry="$expiry" \
+    -v default_lag="$review_window_safety_minutes" '
     function in_window(t,    i, c) {
       c = 0; oldest = 0
       for (i = 1; i <= n; i++) if (accepted[i] > t - 3600) {
@@ -1091,16 +1094,21 @@ review_slot_estimates() {
     $2 == "accepted" {
       # Back-to-back triggers show how long a quota check and trigger take.
       if (n && $1 - accepted[n] < 600) { gaps += $1 - accepted[n]; gap_count++ }
+      # Ignore waits that ended long after the slot opened, such as an
+      # empty queue.
+      if (opens && $1 >= opens && $1 - opens < 300) { lags += $1 - opens; lag_count++ }
+      opens = 0
       accepted[++n] = $1
       # More reviews in an hour than the limit allows: the plan changed.
       if (capacity && in_window($1) > capacity) capacity = 0
     }
-    $2 == "limited" { c = in_window($1); if (c) capacity = c }
+    $2 == "limited" { c = in_window($1); if (c) { capacity = c; opens = oldest + 3600 } }
     END {
       gap = gap_count ? int(gaps / gap_count) : 60
+      lag = lag_count ? int(lags / lag_count) : default_lag
       t = expiry > now ? expiry : now
       for (k = 1; k <= count; k++) {
-        while (capacity && in_window(t) >= capacity) t = oldest + 3600
+        while (capacity && in_window(t) >= capacity) t = oldest + 3600 + lag
         printf "%s%d", (k > 1 ? " " : ""), t
         accepted[++n] = t
         t += gap

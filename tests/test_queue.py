@@ -1437,7 +1437,19 @@ review_slot_estimates 4 9600
 review_slot_estimates 0 9600
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ['6100 6160 6220', '9600 9635 13200 13235'])
+        # A slot that opens is used after the monitor's safety margin.
+        self.assertEqual(result.stdout.splitlines(), ['6100 6160 6220', '9600 9635 13260 13295'])
+
+    def test_review_slot_estimates_learn_how_late_an_open_slot_is_used(self):
+        result = self.run_shell(r'''
+date() { echo 4800; }
+# The 1000 slot opened at 4600; the monitor used it 57 s later.
+printf '%s\n' $'1000\taccepted' $'1035\taccepted' $'1060\tlimited' \
+  $'4657\taccepted' $'4680\taccepted' $'4700\tlimited' >"$review_history_file"
+review_slot_estimates 3 8320
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.split(), ['8320', '8349', '11977'])
 
     def test_review_slot_estimates_forget_a_limit_after_a_plan_upgrade(self):
         result = self.run_shell(r'''
