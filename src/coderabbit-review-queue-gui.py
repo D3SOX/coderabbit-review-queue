@@ -46,6 +46,7 @@ from queue_gui_common import (
 )
 from queue_gui_icons import RepoIconsMixin
 from queue_gui_monitor_host import MonitorHostMixin
+from queue_gui_repo_order import RepoOrderMixin, ordered_repos
 from queue_gui_settings import SettingsMixin
 from queue_gui_status import StatusMixin
 from queue_gui_tray import ANIMATED_TRAY_STATES, TRAY_FRAME_MS, render_tray_icon
@@ -152,7 +153,7 @@ def connect_process(process: QProcess, finished: Callable[[int], None]) -> None:
     process.errorOccurred.connect(failed_to_start)
 
 
-class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, QMainWindow):
+class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, RepoOrderMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.base_window_title = "CodeRabbit Review Queue"
@@ -238,11 +239,13 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
         self.repo_refresh_button.clicked.connect(self.load_repos)
 
         self.init_repo_icons()
+        self.init_repo_order()
 
         repo_row = QHBoxLayout()
         repo_row.addWidget(repo_label)
         repo_row.addWidget(self.repo_combo, 1)
         repo_row.addWidget(self.repo_icon_button)
+        repo_row.addWidget(self.repo_order_button)
         repo_row.addWidget(self.repo_refresh_button)
 
         self.auto_delegate_label = QLabel("Auto-delegate unresolved feedback:")
@@ -777,6 +780,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
         )
 
     def set_repositories(self, repos: list[str]) -> None:
+        repos = ordered_repos(repos)
         try:
             selected = SELECTED_REPO_FILE.read_text().strip()
         except OSError:

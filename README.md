@@ -42,7 +42,8 @@ requests.
 - Shows an icon for each repository in the repository selector and the tray's
   project menu. The GUI detects it from the repository's icon, logo, or favicon
   images and falls back to colored initials. **Project icon** lets you choose
-  another repository image, a local file, or the initials.
+  another repository image, a local file, or the initials. **Reorder
+  projects…** sets the order of both lists; newly found repositories go last.
 - Can delegate unresolved feedback to an idle Codex or Claude task, including
   tasks on an SSH host selected from your SSH config. Codex sessions started by
   the CLI or T3 Code are supported. You can delegate one PR or all reachable,
