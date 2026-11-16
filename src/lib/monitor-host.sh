@@ -4,8 +4,8 @@
 monitor_setting_suffixes=(
   agent-host archive-after-merge auto-delegate auto-merge delegation-prompt-mode
   delegation-prompt-template delete-branch excluded-authors excluded-branches
-  ignore-drafts merge-admin merge-after-approval merge-after-delegation merge-method
-  new-items-at-top notifications notify-sound notify-sound-path notify-sound-volume
+  excluded-titles ignore-drafts merge-admin merge-after-approval merge-after-delegation
+  merge-method new-items-at-top notifications notify-sound notify-sound-path notify-sound-volume
   requeued-items-at-top resolve-merge-conflicts steer-running-agents stop-when-empty
   wait-for-other-bots
 )

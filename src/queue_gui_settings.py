@@ -538,6 +538,51 @@ class SettingsMixin:
             self.show_transient_status("No branches excluded")
         self.refresh(manual=True)
 
+    def excluded_titles_file(self, repo: str) -> Path:
+        return STATE_ROOT / f"{repo.replace('/', '__')}-excluded-titles"
+
+    def load_excluded_titles(self, repo: str) -> None:
+        self.excluded_titles.setEnabled(bool(repo))
+        patterns = []
+        if repo:
+            try:
+                patterns = [
+                    line.strip()
+                    for line in self.excluded_titles_file(repo).read_text().splitlines()
+                    if line.strip() and not line.strip().startswith("#")
+                ]
+            except OSError:
+                patterns = []
+        self.excluded_titles.setText(", ".join(patterns))
+
+    def excluded_titles_changed(self) -> None:
+        repo = self.selected_repo()
+        if not repo:
+            return
+        patterns = []
+        for part in self.excluded_titles.text().replace("\n", ",").split(","):
+            pattern = part.strip()
+            if pattern and pattern.lower() not in (known.lower() for known in patterns):
+                patterns.append(pattern)
+        target = self.excluded_titles_file(repo)
+        try:
+            previous = target.read_text()
+        except OSError:
+            previous = ""
+        text = "".join(f"{pattern}\n" for pattern in patterns)
+        self.excluded_titles.setText(", ".join(patterns))
+        # Leaving the field unchanged must not refresh the queue.
+        if text == previous:
+            return
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + ".tmp")
+        temporary.write_text(text)
+        os.replace(temporary, target)
+        self.show_transient_status(
+            f"Excluded titles: {', '.join(patterns)}" if patterns else "No titles excluded"
+        )
+        self.refresh(manual=True)
+
     def excluded_authors_file(self, repo: str) -> Path:
         return STATE_ROOT / f"{repo.replace('/', '__')}-excluded-authors"
 

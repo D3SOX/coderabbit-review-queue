@@ -1658,7 +1658,7 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         window.close()
         app.processEvents()
 
-    def test_excluded_branches_and_authors_share_one_row(self):
+    def test_excluded_branches_authors_and_titles_share_one_row(self):
         app = QApplication.instance() or QApplication([])
         with patch.object(queue_gui.QueueWindow, "load_cached_repos", return_value=True):
             window = queue_gui.QueueWindow()
@@ -1670,12 +1670,39 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         )
         self.assertEqual(excluded_row.indexOf(window.excluded_branches), 1)
         self.assertEqual(excluded_row.indexOf(window.excluded_authors), 3)
+        self.assertEqual(excluded_row.indexOf(window.excluded_titles), 5)
         window.show()
         app.processEvents()
         self.assertGreater(window.excluded_branches.width(), 150)
         self.assertGreater(window.excluded_authors.width(), 150)
+        self.assertGreater(window.excluded_titles.width(), 150)
         window.close()
         app.processEvents()
+
+    def test_excluded_titles_are_saved_per_repository(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            queue_gui.QueueWindow, "load_cached_repos", return_value=True
+        ), patch.object(queue_gui_settings, "STATE_ROOT", Path(directory)):
+            window = queue_gui.QueueWindow()
+            window.selected_repo = lambda: "example/repo"
+            window.show_transient_status = Mock()
+            window.refresh = Mock()
+            target = Path(directory) / "example__repo-excluded-titles"
+            window.excluded_titles.setText(" chore(deps)*, *[skip review]*,CHORE(deps)*, ")
+            window.excluded_titles_changed()
+            self.assertEqual(target.read_text(), "chore(deps)*\n*[skip review]*\n")
+            self.assertEqual(window.excluded_titles.text(), "chore(deps)*, *[skip review]*")
+            window.refresh.assert_called_once_with(manual=True)
+            window.excluded_titles_changed()
+            window.refresh.assert_called_once_with(manual=True)
+            window.load_excluded_titles("")
+            self.assertEqual(window.excluded_titles.text(), "")
+            self.assertFalse(window.excluded_titles.isEnabled())
+            window.load_excluded_titles("example/repo")
+            self.assertEqual(window.excluded_titles.text(), "chore(deps)*, *[skip review]*")
+            window.close()
+            app.processEvents()
 
     def test_notifications_toggle_is_saved_per_repository(self):
         app = QApplication.instance() or QApplication([])

@@ -15,8 +15,9 @@ requests.
 
 - Queues unreviewed PR heads per repository, with manual ordering and separate
   top/bottom placement options for newly discovered and requeued PRs (both
-  default to the top). Drafts, branches, and authors can be excluded; `pull`
-  and `dependabot` are excluded by default.
+  default to the top). Drafts, branches, authors, and titles can be excluded;
+  `pull` and `dependabot` are excluded by default. Title patterns ignore case
+  and accept `*` and `?` wildcards, as in `chore(deps)*`.
 - Uses CodeRabbit's quota response to time the next request, rechecks before
   posting, and guards against duplicate `@coderabbitai review` comments.
   Once CodeRabbit accepts a review, the next PR is checked right away, so plans

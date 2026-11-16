@@ -131,7 +131,7 @@ snapshot() {
 }
 
 # Every per-repository file name after "$repo_key-"; see configure_repo.
-repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|check-quota-now|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|other-review-threads\.tsv|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-history\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty|wait-for-other-bots'
+repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|check-quota-now|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|excluded-titles|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|other-review-threads\.tsv|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-history\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty|wait-for-other-bots'
 
 configure_repo() {
   local selected=$1
@@ -179,6 +179,7 @@ configure_repo() {
   other_review_threads_file="$state_root/$repo_key-other-review-threads.tsv"
   excluded_branches_file="$state_root/$repo_key-excluded-branches"
   excluded_authors_file="$state_root/$repo_key-excluded-authors"
+  excluded_titles_file="$state_root/$repo_key-excluded-titles"
   notifications_file="$state_root/$repo_key-notifications"
   notify_sound_file="$state_root/$repo_key-notify-sound"
   notify_sound_path_file="$state_root/$repo_key-notify-sound-path"
@@ -391,6 +392,20 @@ excluded_branches_json() {
   fi
 }
 
+# One title pattern per line: case-insensitive, matching the whole title, with
+# * for any text and ? for one character.
+excluded_titles_json() {
+  if [[ -f $excluded_titles_file ]]; then
+    jq -R -s '
+      split("\n")
+      | map(gsub("^\\s+|\\s+$"; ""))
+      | map(select(length > 0 and (startswith("#") | not)))
+    ' <"$excluded_titles_file"
+  else
+    printf '[]\n'
+  fi
+}
+
 # Accept GraphQL logins, REST bot logins, and gh's app/name notation.
 normalize_authors() {
   jq -R -s '
@@ -412,13 +427,18 @@ excluded_authors_json() {
 eligible_state() {
   jq -L "$script_dir/lib" --argjson ignoreDrafts "$(ignore_drafts_json)" \
     --argjson excludedBranches "$(excluded_branches_json)" \
-    --argjson excludedAuthors "$(excluded_authors_json)" '
+    --argjson excludedAuthors "$(excluded_authors_json)" \
+    --argjson excludedTitles "$(excluded_titles_json)" '
     include "coderabbit-checks";
-    .data.repository.pullRequests.nodes |= map(
+    def glob_regex:
+      "^" + (gsub("(?<c>[.+^${}()|\\[\\]\\\\])"; "\\\(.c)") | gsub("\\*"; ".*") | gsub("\\?"; ".")) + "$";
+    ($excludedTitles | map(glob_regex)) as $titlePatterns
+    | .data.repository.pullRequests.nodes |= map(
       select($ignoreDrafts == false or (.isDraft | not))
       | select(.headRefName as $b | ($excludedBranches | index($b) | not))
       | select((.author.login // "" | ascii_downcase) as $a
           | ($excludedAuthors | index($a) | not))
+      | select((.title // "") as $t | any($titlePatterns[]; . as $p | $t | test($p; "i")) | not)
       | (.commits.nodes[]?.commit.statusCheckRollup.contexts.nodes[]? |= coderabbit_check_context)
     )
   '

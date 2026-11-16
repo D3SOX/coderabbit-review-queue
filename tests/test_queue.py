@@ -1375,6 +1375,19 @@ main --repo example/repo
         self.assertEqual(self.rows('eligible_rows', [self.pr(1), draft, self.pr(3)],
                          'printf "branch-1\\n" >"$excluded_branches_file"'), [3])
 
+    def test_excluded_title_patterns_leave_matching_prs_out(self):
+        prs = [self.pr(1), self.pr(2), self.pr(3), self.pr(4)]
+        prs[0]['title'] = 'chore(deps): bump gradle'
+        prs[1]['title'] = 'Fix crash [Skip Review] on start'
+        prs[2]['title'] = 'Release v1.2'
+        prs[3]['title'] = 'Release v1.23'
+        setup = ("printf '%s\\n' 'chore(deps)*' '*[skip review]*' 'release v1.?'"
+                 ' >"$excluded_titles_file"')
+        for function in ('stale_rows', 'eligible_rows'):
+            with self.subTest(function=function):
+                self.assertEqual(self.rows(function, prs, setup), [4])
+                self.assertEqual(sorted(self.rows(function, prs)), [1, 2, 3, 4])
+
     def test_bot_author_without_a_seat_is_not_requested_again(self):
         # Vegsnap#94: a github-actions PR was skipped and re-requested every ten minutes.
         pr = self.pr(94, 'github-actions')

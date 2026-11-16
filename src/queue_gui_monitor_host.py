@@ -17,8 +17,8 @@ from queue_gui_common import SCRIPT, STATE_ROOT, file_signature, ssh_config_host
 MONITOR_SETTING_SUFFIXES = (
     "agent-host", "archive-after-merge", "auto-delegate", "auto-merge",
     "delegation-prompt-mode", "delegation-prompt-template", "delete-branch",
-    "excluded-authors", "excluded-branches", "ignore-drafts", "merge-admin",
-    "merge-after-approval", "merge-after-delegation", "merge-method",
+    "excluded-authors", "excluded-branches", "excluded-titles", "ignore-drafts",
+    "merge-admin", "merge-after-approval", "merge-after-delegation", "merge-method",
     "new-items-at-top", "notifications", "notify-sound", "notify-sound-path",
     "notify-sound-volume", "requeued-items-at-top", "resolve-merge-conflicts",
     "steer-running-agents", "stop-when-empty", "wait-for-other-bots",

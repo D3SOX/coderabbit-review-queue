@@ -308,11 +308,10 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
         excluded_label = QLabel("Excluded &branches:")
         self.excluded_branches = QLineEdit()
         excluded_label.setBuddy(self.excluded_branches)
-        self.excluded_branches.setPlaceholderText(
-            "Comma-separated head branch names, e.g. weblate-translations"
-        )
+        self.excluded_branches.setPlaceholderText("e.g. weblate-translations")
         self.excluded_branches.setToolTip(
-            "Per repository. Open PRs whose head branch matches are left out of "
+            "Per repository. Comma-separated head branch names. Open PRs whose "
+            "head branch matches are left out of "
             "the review queue and unresolved-feedback list."
         )
         self.excluded_branches.editingFinished.connect(self.excluded_branches_changed)
@@ -333,6 +332,20 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
         self.excluded_authors.editingFinished.connect(self.excluded_authors_changed)
         excluded_row.addWidget(authors_label)
         excluded_row.addWidget(self.excluded_authors, 1)
+        titles_label = QLabel("Excluded &titles:")
+        self.excluded_titles = QLineEdit()
+        titles_label.setBuddy(self.excluded_titles)
+        self.excluded_titles.setAccessibleName("Excluded titles")
+        self.excluded_titles.setPlaceholderText("e.g. chore(deps)*, *[skip review]*")
+        self.excluded_titles.setToolTip(
+            "Per repository. Comma-separated title patterns, ignoring case. "
+            "* matches any text and ? one character; without them the whole "
+            "title must match. Matching PRs are left out of the review queue "
+            "and unresolved-feedback list."
+        )
+        self.excluded_titles.editingFinished.connect(self.excluded_titles_changed)
+        excluded_row.addWidget(titles_label)
+        excluded_row.addWidget(self.excluded_titles, 1)
         self.notifications = QCheckBox("Show desktop notifications")
         self.notifications.setToolTip(
             "Per repository. When disabled, the monitor shows no desktop "
@@ -915,6 +928,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
         self.load_ignore_drafts(repo)
         self.load_excluded_branches(repo)
         self.load_excluded_authors(repo)
+        self.load_excluded_titles(repo)
         self.load_notifications(repo)
         self.load_notify_sound(repo)
         self.load_new_items_at_top(repo)
