@@ -44,6 +44,11 @@ class IconCandidateTests(unittest.TestCase):
             "src/renderer/assets/img/invidious-logo-dark.svg",
         ])
 
+    def test_images_named_after_the_project_count_as_icons(self):
+        paths = ["packaging/nevumi.png", "docs/screenshot.png", "website/assets/icons.svg"]
+        self.assertEqual(icon_candidates(paths, "Nevumi"), ["packaging/nevumi.png"])
+        self.assertEqual(icon_candidates(paths, "other"), [])
+
     def test_initials_split_words_and_camel_case(self):
         self.assertEqual(initials("D3SOX/Nevumi"), "N")
         self.assertEqual(initials("OpenTubeX/sync-server"), "SS")
@@ -170,7 +175,10 @@ esac
             window.apply_repo_icons([])
             self.assertFalse(window.repo_combo.itemIcon(1).isNull())
             self.assertTrue(window.repo_icon_button.isEnabled())
-            window.build_repo_icon_menu()
+            self.assertIsNone(window.repo_icon_button.menu())
+            window.repo_icon_button.click()
+            self.assertTrue(window.repo_icon_menu.isVisible())
+            window.repo_icon_menu.hide()
             actions = [a for a in window.repo_icon_menu.actions() if a.text() and not a.isSeparator()]
             self.assertEqual([a.text() for a in actions], [
                 "Detect automatically", "assets/icon.png",

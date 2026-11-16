@@ -36,12 +36,13 @@ NAME_PREFIXES = ("icon", "logo", "appicon", "app-icon", "app_icon", "ic_launcher
 SKIPPED_NAME_PARTS = ("foreground", "background", "monochrome")
 EXTENSION_SCORES = {"svg": 8, "png": 6, "webp": 4, "ico": 2}
 DENSITY_SCORES = {"xxxhdpi": 5, "xxhdpi": 4, "xhdpi": 3, "hdpi": 2, "mdpi": 1}
-# Only the tree's icon-like files, so large repositories stay cheap to scan.
+# Only the tree's small images, so large repositories stay cheap to scan.
 TREE_FILTER = (
     '[.tree[] | select(.type == "blob" and (.size // 0) <= %d'
-    ' and (.path | test("(^|/)((icon|app[-_]?icon|ic_launcher|apple-touch-icon|favicon)[^/]*'
-    '|[^/]*logo[^/]*)\\\\.(png|svg|ico|webp)$"; "i"))) | .path]' % MAX_ICON_BYTES
+    ' and (.path | test("\\\\.(png|svg|ico|webp)$"; "i"))) | .path]' % MAX_ICON_BYTES
 )
+# An image named after the project, such as a desktop app's nevumi.png.
+PROJECT_NAME_SCORE = 38
 
 
 def icon_root() -> Path:
@@ -52,7 +53,11 @@ def repo_key(repo: str) -> str:
     return repo.replace("/", "__")
 
 
-def candidate_score(path: str) -> int | None:
+def name_key(name: str) -> str:
+    return re.sub(r"[-_.\s]+", "", name.lower())
+
+
+def candidate_score(path: str, project: str = "") -> int | None:
     parts = PurePosixPath(path)
     if any(part.lower() in SKIPPED_DIRECTORIES for part in parts.parts[:-1]):
         return None
@@ -63,6 +68,8 @@ def candidate_score(path: str) -> int | None:
     if any(part in stem for part in SKIPPED_NAME_PARTS):
         return None
     score = NAME_SCORES.get(stem)
+    if score is None and project and name_key(stem) == name_key(project):
+        score = PROJECT_NAME_SCORE
     if score is None:
         if stem.startswith(NAME_PREFIXES):
             score = 20
@@ -77,9 +84,9 @@ def candidate_score(path: str) -> int | None:
     return score - 2 * (len(parts.parts) - 1)
 
 
-def icon_candidates(paths: list[str]) -> list[str]:
+def icon_candidates(paths: list[str], project: str = "") -> list[str]:
     """Rank a repository's icon-like files, the likeliest project icon first."""
-    scored = [(score, path) for path in paths if (score := candidate_score(path)) is not None]
+    scored = [(score, path) for path in paths if (score := candidate_score(path, project)) is not None]
     scored.sort(key=lambda item: (-item[0], item[1]))
     # Of an Android icon's density variants, offer only the sharpest.
     variants = {}
@@ -235,7 +242,8 @@ class RepoIcons(QObject):
             except ValueError:
                 paths = None
             if isinstance(paths, list):
-                data["candidates"] = icon_candidates([path for path in paths if isinstance(path, str)])
+                data["candidates"] = icon_candidates(
+                    [path for path in paths if isinstance(path, str)], repo.rsplit("/", 1)[-1])
                 data["checked"] = time.time()
                 if data.get("choice", "auto") == "auto":
                     data["path"] = next(iter(data["candidates"]), None)
@@ -335,7 +343,12 @@ class RepoIconsMixin:
         self.repo_icon_button.setToolTip("Choose the icon shown for this repository")
         self.repo_icon_menu = QMenu(self.repo_icon_button)
         self.repo_icon_menu.aboutToShow.connect(self.build_repo_icon_menu)
-        self.repo_icon_button.setMenu(self.repo_icon_menu)
+        # A button with setMenu() reserves room for an arrow some styles leave empty.
+        self.repo_icon_button.clicked.connect(
+            lambda: self.repo_icon_menu.popup(
+                self.repo_icon_button.mapToGlobal(self.repo_icon_button.rect().bottomLeft())
+            )
+        )
         self.repo_icon_button.setEnabled(False)
 
     def apply_repo_icons(self, repos: list[str], force: bool = False) -> None:
