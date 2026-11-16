@@ -44,6 +44,7 @@ from queue_gui_common import (
     STATUS_CACHE_MAX_AGE, app_icon, monitor_is_running, monitor_pid_files,
     process_is_running, status_belongs_to_repo,
 )
+from queue_gui_icons import RepoIconsMixin
 from queue_gui_monitor_host import MonitorHostMixin
 from queue_gui_settings import SettingsMixin
 from queue_gui_status import StatusMixin
@@ -151,7 +152,7 @@ def connect_process(process: QProcess, finished: Callable[[int], None]) -> None:
     process.errorOccurred.connect(failed_to_start)
 
 
-class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
+class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.base_window_title = "CodeRabbit Review Queue"
@@ -236,9 +237,12 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
         )
         self.repo_refresh_button.clicked.connect(self.load_repos)
 
+        self.init_repo_icons()
+
         repo_row = QHBoxLayout()
         repo_row.addWidget(repo_label)
         repo_row.addWidget(self.repo_combo, 1)
+        repo_row.addWidget(self.repo_icon_button)
         repo_row.addWidget(self.repo_refresh_button)
 
         self.auto_delegate_label = QLabel("Auto-delegate unresolved feedback:")
@@ -605,6 +609,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
         return self.repo_combo.currentText().strip()
 
     def repository_text_changed(self, _text: str) -> None:
+        self.update_repo_icon_button()
         if self.selected_repo() == self.displayed_repo:
             return
         self.displayed_repo = ""
@@ -658,7 +663,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
             repos.append(selected)
         self.tray_project_menu.setEnabled(bool(repos) and self.repo_combo.isEnabled())
         for repo in repos:
-            action = self.tray_project_menu.addAction(repo)
+            action = self.tray_project_menu.addAction(self.repo_icons.icon(repo), repo)
             action.setCheckable(True)
             self.tray_project_actions.addAction(action)
             action.setChecked(repo == selected)
@@ -728,6 +733,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
         except OSError:
             return False
         self.set_repositories(repos)
+        self.apply_repo_icons(repos)
         self.show_transient_status(
             f"Loaded {len(repos)} cached CodeRabbit repositories"
         )
@@ -764,6 +770,8 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
         temporary.write_text("\n".join(repos) + ("\n" if repos else ""))
         os.replace(temporary, REPOSITORY_CACHE_FILE)
         self.set_repositories(repos)
+        # A refresh also looks for newly added or changed project icons.
+        self.apply_repo_icons(repos, force=True)
         self.show_transient_status(
             f"Found and cached {len(repos)} CodeRabbit repositories"
         )
@@ -861,6 +869,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, QMainWindow):
             self.repo_combo.addItem(repo)
             self.repo_combo.setCurrentText(repo)
             self.repo_combo.blockSignals(False)
+            self.apply_repo_icons([repo])
         self.activate_repo(repo)
 
     def restore_selected_repo(self) -> None:

@@ -39,6 +39,10 @@ requests.
   another one over SSH, and refuses to run two for the same repository. The GUI
   can start, stop, and move them; the tray icon shows the time to the next window, running reviews,
   available reviews, and a stopped monitor, and can show or hide the window.
+- Shows an icon for each repository in the repository selector and the tray's
+  project menu. The GUI detects it from the repository's icon, logo, or favicon
+  images and falls back to colored initials. **Project icon** lets you choose
+  another repository image, a local file, or the initials.
 - Can delegate unresolved feedback to an idle Codex or Claude task, including
   tasks on an SSH host selected from your SSH config. Codex sessions started by
   the CLI or T3 Code are supported. You can delegate one PR or all reachable,
@@ -201,6 +205,9 @@ telemetry.
 GitHub access goes through the authenticated `gh` CLI. CodeRabbit is controlled
 through comments and statuses on GitHub. Optional agent integration uses the
 selected host over SSH, the agent CLIs, or T3 Code's loopback server.
+
+The GUI downloads project icons through `gh` from each repository's default
+branch and caches them under the XDG state directory.
 
 For optional Codex and Claude integration, the tool scans session metadata to
 match a PR branch or head commit to a task. Agent session files stay where their
