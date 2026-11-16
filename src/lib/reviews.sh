@@ -395,7 +395,8 @@ wait_for_review_completion() {
     fi
     statuses=$(coderabbit_commit_statuses "$head_sha" "$triggered_at")
     result=$(
-      jq -r --arg since "$triggered_at" '
+      jq -r -L "$script_dir/lib" --arg since "$triggered_at" '
+        include "coderabbit-checks";
         [
           .statuses[]
           | select(
@@ -407,7 +408,7 @@ wait_for_review_completion() {
         | last // null
         | if .description == "Review completed" then "completed"
           elif .description == "Review rate limited" then "limited"
-          elif ((.description // "") | test("^Review skipped: [0-9]+ files exceed the limit of [0-9]+")) then .description
+          elif ((.description // "") | final_skip) then .description
           elif ((.description // "") | startswith("Review failed:")) then .description
           elif .description == "Review skipped" then .description
           else "waiting"
@@ -544,7 +545,12 @@ watch_review_completion() {
   review_skipped_polls=8
   wait_for_review_completion "$pr" "$triggered_at" "$head_sha" "$title" || status=$?
   case $status in
-    0|3|5) clear_review_request "$pr" "$head_sha" ;;
+    0|5) clear_review_request "$pr" "$head_sha" ;;
+    3)
+      # CodeRabbit does not count a skipped review against the limit.
+      record_review_history skipped
+      clear_review_request "$pr" "$head_sha"
+      ;;
     2)
       clear_review_request "$pr" "$head_sha"
       remember_shared_expiry "$(latest_expiry "$(monitor_snapshot)")"

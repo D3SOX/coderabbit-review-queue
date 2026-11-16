@@ -21,7 +21,8 @@ requests.
   posting, and guards against duplicate `@coderabbitai review` comments.
   Once CodeRabbit accepts a review, the next PR is checked right away, so plans
   with more reviews can run several at once.
-  Oversized PR heads are skipped rather than blocking the queue.
+  PR heads that CodeRabbit refuses to review, such as oversized PRs, are
+  skipped rather than blocking the queue.
 - Can wait for other review bots, per repository. A PR then waits while a bot's
   check run is still running on its head, while Codex has not finished
   reviewing it, or while any reviewer other than CodeRabbit has an unresolved
@@ -153,8 +154,9 @@ list, and unresolved-feedback delegation. They do not cancel an ongoing review.
 An empty saved list overrides the defaults. The old `[pull]` title filter is
 replaced by these author settings.
 
-If CodeRabbit reports that a PR exceeds its file limit, the monitor logs the
-reason and continues with the next PR. That head stays out of the queue while
+If CodeRabbit reports that a PR exceeds its file limit, or that the PR's bot
+author has no CodeRabbit review seat, the monitor logs the reason and continues
+with the next PR. That head stays out of the queue while
 its CodeRabbit status reports the rejection. Pushing a new head allows another
 attempt. The tool uses CodeRabbit's reported limit rather than imposing a
 limit on every PR's total changed files.

@@ -425,20 +425,21 @@ eligible_state() {
 }
 
 # This status belongs to the current head. A new head can be queued again.
-without_file_limit_skips() {
-  jq '
+without_final_skips() {
+  jq -L "$script_dir/lib" '
+    include "coderabbit-checks";
     .data.repository.pullRequests.nodes |= map(select(
       any(.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
         (.context // "") == "CodeRabbit"
         and (.creator.login // "") == "coderabbitai"
-        and ((.description // "") | test("^Review skipped: [0-9]+ files exceed the limit of [0-9]+"))
+        and ((.description // "") | final_skip)
       ) | not
     ))
   '
 }
 
 stale_rows() {
-  eligible_state | without_file_limit_skips | jq -r -L "$script_dir/lib" '
+  eligible_state | without_final_skips | jq -r -L "$script_dir/lib" '
     include "coderabbit-limits";
     def latest_rate_limit:
       [
@@ -773,7 +774,7 @@ approved_archive_rows() {
 # even if we still have a local outstanding @coderabbitai review request.
 active_review_rows() {
   local state
-  state=$(eligible_state <<<"$1" | without_file_limit_skips)
+  state=$(eligible_state <<<"$1" | without_final_skips)
   local pr head_sha title now completed_pr='' completed_head=''
   local -A seen=()
 
@@ -1066,7 +1067,8 @@ prune_state_files() {
 }
 
 # review-history.tsv: "epoch<TAB>accepted" when CodeRabbit accepts a queued
-# review and "epoch<TAB>limited" when it reports no review available.
+# review, "epoch<TAB>limited" when it reports no review available, and
+# "epoch<TAB>skipped" when it then skipped the latest accepted review.
 record_review_history() {
   printf '%s\t%s\n' "$(date -u +%s)" "$1" >>"$review_history_file"
 }
@@ -1103,6 +1105,7 @@ review_slot_estimates() {
       if (capacity && in_window($1) > capacity) capacity = 0
     }
     $2 == "limited" { c = in_window($1); if (c) { capacity = c; opens = oldest + 3600 } }
+    $2 == "skipped" && n { n-- }
     END {
       gap = gap_count ? int(gaps / gap_count) : 60
       lag = lag_count ? int(lags / lag_count) : default_lag

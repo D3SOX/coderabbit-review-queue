@@ -983,6 +983,24 @@ fi
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn('112 files exceed the limit of 100', result.stdout)
 
+    def test_bot_skip_ends_completion_wait_and_is_not_counted_as_a_review(self):
+        result = self.run_shell('''
+wait_for_github_quota() { :; }
+desktop_notify() { :; }
+snapshot() { return 1; }
+gh() {
+  printf '%s\\n' '{"statuses":[{"context":"CodeRabbit","created_at":"2026-11-16T14:05:43Z","state":"success","description":"Review skipped: bot user not eligible for review"}]}'
+}
+sleep() { echo 'Still waiting after the skip' >&2; exit 99; }
+status=0
+( watch_review_completion 94 2026-11-16T14:05:30Z head title ) || status=$?
+cut -f2 "$review_history_file"
+exit "$status"
+''')
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('bot user not eligible for review', result.stdout)
+        self.assertEqual(result.stdout.split()[-1], 'skipped')
+
     def test_failed_review_action_ends_completion_wait(self):
         result = self.run_shell(r'''
 wait_for_github_quota() { :; }
@@ -1357,6 +1375,18 @@ main --repo example/repo
         self.assertEqual(self.rows('eligible_rows', [self.pr(1), draft, self.pr(3)],
                          'printf "branch-1\\n" >"$excluded_branches_file"'), [3])
 
+    def test_bot_author_without_a_seat_is_not_requested_again(self):
+        # Vegsnap#94: a github-actions PR was skipped and re-requested every ten minutes.
+        pr = self.pr(94, 'github-actions')
+        pr['commits']['nodes'][0]['commit']['statusCheckRollup']['contexts']['nodes'] = [{
+            'name': 'CodeRabbit', 'status': 'COMPLETED', 'conclusion': 'SKIPPED',
+            'checkSuite': {'app': {'slug': 'coderabbitai'}}, 'startedAt': '2026-11-16T14:05:43Z',
+            'title': 'Review skipped: bot user not eligible for review',
+            'summary': 'Result: Skipped - Review skipped: bot user not eligible for review',
+        }]
+        self.assertEqual(self.rows('stale_rows', [pr, self.pr(2)]), [2])
+        self.assertEqual(self.rows('stale_rows', [self.pr(94, 'github-actions', head='new-head')]), [94])
+
     def test_file_limit_status_excludes_only_rejected_head(self):
         rejected = self.pr(1, description='Review skipped: 112 files exceed the limit of 100')
         self.assertEqual(self.rows('stale_rows', [rejected, self.pr(2)]), [2])
@@ -1439,6 +1469,16 @@ review_slot_estimates 0 9600
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         # A slot that opens is used after the monitor's safety margin.
         self.assertEqual(result.stdout.splitlines(), ['6100 6160 6220', '9600 9635 13260 13295'])
+
+    def test_review_slot_estimates_ignore_skipped_reviews(self):
+        result = self.run_shell(r'''
+date() { echo 2000; }
+# The second request was skipped, so the limit is one review an hour.
+printf '%s\n' $'1000\taccepted' $'1035\taccepted' $'1040\tskipped' $'1060\tlimited' >"$review_history_file"
+review_slot_estimates 3 4660
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.split(), ['4660', '8320', '11980'])
 
     def test_review_slot_estimates_learn_how_late_an_open_slot_is_used(self):
         result = self.run_shell(r'''
@@ -1584,21 +1624,28 @@ echo "woke at $clock"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('woke at 130', result.stdout)
 
-    def test_fair_usage_rate_limit_reply_is_understood(self):
-        body = ("<!-- This is an auto-generated reply by CodeRabbit -->\n"
-                "You're currently rate limited under our [Fair Usage Limits Policy]"
-                "(https://docs.coderabbit.ai/management/rate-limits#fair-usage-limits-policy). "
-                "Your current included review allowance is based on your included PR review "
-                "attempts over the past 7 days. Your next review will be available in 47 minutes.")
-        comments = [{'user': {'login': 'coderabbitai[bot]'}, 'created_at': '2026-11-13T15:04:27Z',
-                     'updated_at': '2026-11-13T15:04:27Z', 'body': body}]
-        result = self.run_shell("quota_row_from_comments 2026-11-13T15:04:21Z", comments)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.split('\t'), ['0', '2026-11-13T15:04:27Z', '47', 'minutes\n'])
-        pr = self.pr(3143)
-        pr['comments']['nodes'] = [{'author': {'login': 'coderabbitai'},
-                                    'updatedAt': '2026-11-13T15:04:27Z', 'body': body}]
-        self.assertEqual(self.rows('timer_rows', [pr]), [3143])
+    def test_fair_usage_and_free_plan_rate_limit_replies_are_understood(self):
+        fair_usage = ("<!-- This is an auto-generated reply by CodeRabbit -->\n"
+                      "You're currently rate limited under our [Fair Usage Limits Policy]"
+                      "(https://docs.coderabbit.ai/management/rate-limits#fair-usage-limits-policy). "
+                      "Your current included review allowance is based on your included PR review "
+                      "attempts over the past 7 days. Your next review will be available in 47 minutes.")
+        free_plan = ("> [!WARNING]\n> ## Review limit reached\n>\n"
+                     "> You've used all free OSS reviews for now. Wait for the free limit to reset "
+                     "to keep reviewing this public repository.\n>\n"
+                     "> **Next included review available in 47 minutes.**")
+        for body in (fair_usage, free_plan):
+            with self.subTest(body=body[:40]):
+                comments = [{'user': {'login': 'coderabbitai[bot]'}, 'created_at': '2026-11-13T15:04:27Z',
+                             'updated_at': '2026-11-13T15:04:27Z', 'body': body}]
+                result = self.run_shell("quota_row_from_comments 2026-11-13T15:04:21Z", comments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.split('\t'),
+                                 ['0', '2026-11-13T15:04:27Z', '47', 'minutes\n'])
+                pr = self.pr(3143)
+                pr['comments']['nodes'] = [{'author': {'login': 'coderabbitai'},
+                                            'updatedAt': '2026-11-13T15:04:27Z', 'body': body}]
+                self.assertEqual(self.rows('timer_rows', [pr]), [3143])
 
     def test_available_reply_voids_older_rate_limits(self):
         limited = {'author': {'login': 'coderabbitai'}, 'updatedAt': '2026-11-13T14:00:00Z',
