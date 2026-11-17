@@ -46,6 +46,8 @@ requests.
   images and falls back to colored initials. **Project icon** lets you choose
   another repository image, a local file, or the initials. **Reorder
   projects…** sets the order of both lists; newly found repositories go last.
+- Shows the images from a PR's description in a grid when you hover its row in
+  either table.
 - Can delegate unresolved feedback to an idle Codex or Claude task, including
   tasks on an SSH host selected from your SSH config. Codex sessions started by
   the CLI or T3 Code are supported. You can delegate one PR or all reachable,
@@ -211,7 +213,9 @@ through comments and statuses on GitHub. Optional agent integration uses the
 selected host over SSH, the agent CLIs, or T3 Code's loopback server.
 
 The GUI downloads project icons through `gh` from each repository's default
-branch and caches them under the XDG state directory.
+branch and caches them under the XDG state directory. Hovering a PR loads its
+description through `gh` and downloads its images from GitHub's image hosts.
+The GUI keeps their thumbnails in a temporary directory until it exits.
 
 For optional Codex and Claude integration, the tool scans session metadata to
 match a PR branch or head commit to a task. Agent session files stay where their

@@ -46,6 +46,7 @@ from queue_gui_common import (
 )
 from queue_gui_icons import RepoIconsMixin
 from queue_gui_monitor_host import MonitorHostMixin
+from queue_gui_pr_images import PrImageTooltips
 from queue_gui_repo_order import RepoOrderMixin, ordered_repos
 from queue_gui_settings import SettingsMixin
 from queue_gui_status import StatusMixin
@@ -481,6 +482,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
             lambda item, _column: self.open_pr_number(item.data(0, Qt.UserRole))
         )
         self.tasks.itemSelectionChanged.connect(self.update_delegate_button)
+        self.pr_image_tooltips = PrImageTooltips(self.selected_repo, [self.queue, self.tasks], self)
 
         self.up_button = QPushButton(QIcon.fromTheme("go-up"), "Move up")
         self.down_button = QPushButton(QIcon.fromTheme("go-down"), "Move down")
