@@ -189,7 +189,9 @@ agent_task_progress() {
   fi
   mode=${agent_mode_override:-$(auto_delegation_mode)}
   [[ $mode != disabled ]] || mode=auto
-  if output=$(remote_command_timeout=20 remote_agent_command \
+  # A high-latency link spends seconds on the SSH handshake alone, and
+  # approved PRs look up their tasks in parallel on the agent host.
+  if output=$(remote_command_timeout=45 remote_agent_command \
     --task-progress "$branch_name" "$head_sha" --agent-mode "$mode" 2>/dev/null); then
     printf '%s\n' "$output"
   else
