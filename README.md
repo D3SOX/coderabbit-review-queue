@@ -165,8 +165,8 @@ attempt. The tool uses CodeRabbit's reported limit rather than imposing a
 limit on every PR's total changed files.
 
 Repository discovery uses GitHub App installation information visible to the
-authenticated account. An `OWNER/REPOSITORY` value can also be entered
-manually.
+authenticated account and leaves out archived repositories. An
+`OWNER/REPOSITORY` value can also be entered manually.
 
 Automatic delegation is disabled by default. For each repository, choose Auto
 (Codex + Claude), Codex only, or Claude only. Auto prefers Codex when both are

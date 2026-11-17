@@ -244,7 +244,7 @@ list_repositories() {
 
   # Personal repos are not covered by orgs/*/installations. Discover them the
   # same way as org installs with repository_selection=selected: via PRs that
-  # CodeRabbit has already commented on.
+  # CodeRabbit has already commented on. Archived repositories take no PRs.
   login=$(gh api user --jq .login)
   while IFS= read -r candidate; do
     [[ -n $candidate && -z ${seen[$candidate]:-} ]] || continue
@@ -252,7 +252,7 @@ list_repositories() {
     printf '%s\n' "$candidate"
   done < <(
     gh api --paginate -X GET search/issues \
-      -f "q=user:$login is:pr commenter:coderabbitai[bot]" \
+      -f "q=user:$login is:pr commenter:coderabbitai[bot] archived:false" \
       -f per_page=100 \
       --jq '.items[].repository_url | split("/")[-2:] | join("/")'
   )
@@ -283,7 +283,7 @@ list_repositories() {
           -f type=all \
           -f sort=updated \
           -f per_page=100 \
-          --jq '.[].full_name'
+          --jq '.[] | select(.archived | not) | .full_name'
       )
     else
       while IFS= read -r candidate; do
@@ -292,7 +292,7 @@ list_repositories() {
         printf '%s\n' "$candidate"
       done < <(
         gh api --paginate -X GET search/issues \
-          -f "q=org:$org is:pr commenter:coderabbitai[bot]" \
+          -f "q=org:$org is:pr commenter:coderabbitai[bot] archived:false" \
           -f per_page=100 \
           --jq '.items[].repository_url | split("/")[-2:] | join("/")'
       )

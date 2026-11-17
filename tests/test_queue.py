@@ -1315,6 +1315,26 @@ cat "$state_root/gh-calls"
         self.assertEqual(cached_calls, [])
         self.assertEqual(new_review_calls, ['gh 5'])
 
+    def test_repository_list_leaves_out_archived_repositories(self):
+        result = self.run_shell(r'''
+gh() {
+  case "$*" in
+    'api user --jq .login') echo me ;;
+    *'q=user:me '*) [[ $* == *archived:false* ]] && echo me/active ;;
+    *user/orgs*) printf '%s\n' all-org selected-org ;;
+    *orgs/all-org/installations*) echo all ;;
+    *orgs/selected-org/installations*) echo selected ;;
+    *orgs/all-org/repos*)
+      jq -r "${@: -1}" <<<'[{"full_name": "all-org/live", "archived": false},
+                            {"full_name": "all-org/old", "archived": true}]' ;;
+    *'q=org:selected-org '*) [[ $* == *archived:false* ]] && echo selected-org/live ;;
+  esac
+}
+list_repositories
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ['me/active', 'all-org/live', 'selected-org/live'])
+
     def test_status_lists_prs_held_for_other_bots_without_estimates(self):
         result = self.run_shell(r'''
 snapshot() { printf '{}'; }
