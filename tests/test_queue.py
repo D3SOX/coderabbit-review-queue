@@ -1235,19 +1235,25 @@ defer_recent_review_request 2524 head Title
             pr(6, 90, checks=[('sourcery-ai', 'Sourcery review', 'QUEUED')]),
             pr(7, 5, checks=[('github-actions', 'lint', 'IN_PROGRESS')]),
             pr(8, 5, codex=('head-8', 'in_progress')),
+            pr(9, 5, codex=('head-9', 'completed')),
+            pr(10, 5, codex=('head-10', 'completed')),
         ]
+        # (opener, resolved, author type of the latest comment)
         threads = {
-            '4': [('cubic-dev-ai', False), ('chatgpt-codex-connector', True),
-                  ('coderabbitai', False)],
-            '5': [('coderabbitai', False)],
+            '4': [('cubic-dev-ai', False, 'Bot'), ('chatgpt-codex-connector', True, 'User'),
+                  ('coderabbitai', False, 'Bot')],
+            '5': [('coderabbitai', False, 'User')],
+            '9': [('revix-ai-review', False, 'User'), ('revix-ai-review', False, 'User')],
+            '10': [('revix-ai-review', False, 'User'), ('cubic-dev-ai', False, 'Bot')],
         }
         fixtures = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, fixtures)
         for number in threads:
             (Path(fixtures) / f'threads-{number}.json').write_text(json.dumps(
                 {'data': {'repository': {'pullRequest': {'reviewThreads': {'nodes': [
-                    {'isResolved': resolved, 'comments': {'nodes': [{'author': {'login': login}}]}}
-                    for login, resolved in threads[number]
+                    {'isResolved': resolved, 'comments': {'nodes': [{'author': {'login': login}}]},
+                     'latest': {'nodes': [{'author': {'__typename': latest}}]}}
+                    for login, resolved, latest in threads[number]
                 ]}}}}}))
         result = self.run_shell(f'fixtures={shlex.quote(fixtures)}\n' + r'''
 gh() {
@@ -1291,18 +1297,21 @@ cat "$state_root/gh-calls"
             part.splitlines() for part in result.stdout.split('---\n'))
         # Off by default: every PR is queued.
         self.assertEqual(sorted(disabled), sorted(
-            [f'queued {n}' for n in range(1, 9)] + ['deferred 0']))
+            [f'queued {n}' for n in range(1, 11)] + ['deferred 0']))
         self.assertEqual(sorted(line for line in enabled if line.startswith('queued')),
                          ['queued 3', 'queued 5', 'queued 6', 'queued 7'])
-        self.assertEqual(sorted(line for line in enabled if line.startswith('held')), [
+        self.assertEqual(sorted(line for line in enabled if line.startswith('held')), sorted([
             'held 1: sourcery-ai still reviewing',
             'held 2: Codex has not reviewed this head yet',
             'held 4: 1 unresolved thread from cubic-dev-ai',
             'held 8: Codex still reviewing',
-        ])
-        self.assertIn('deferred 4', enabled)
+            'held 9: 2 unresolved threads from revix-ai-review, answered but not resolved',
+            'held 10: 2 unresolved threads from cubic-dev-ai, revix-ai-review '
+            '(1 answered but not resolved)',
+        ]))
+        self.assertIn('deferred 6', enabled)
         # Threads are only fetched for PRs no bot is still reviewing.
-        self.assertEqual(first_calls, ['gh 3', 'gh 4', 'gh 5', 'gh 6', 'gh 7'])
+        self.assertEqual(first_calls, ['gh 10', 'gh 3', 'gh 4', 'gh 5', 'gh 6', 'gh 7', 'gh 9'])
         self.assertEqual(cached_calls, [])
         self.assertEqual(new_review_calls, ['gh 5'])
 

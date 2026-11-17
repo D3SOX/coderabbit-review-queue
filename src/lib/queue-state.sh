@@ -307,49 +307,61 @@ other_bot_activity() {
 
 # Prints why unresolved threads from reviewers other than CodeRabbit hold the
 # PR, or nothing. other-review-threads.tsv caches "PR, key, epoch, count,
-# authors": a clear result until the key changes or for ten minutes, an
-# unresolved one for a minute so resolving threads releases the PR soon.
+# authors, answered": a clear result until the key changes or for ten minutes,
+# an unresolved one for a minute so resolving threads releases the PR soon.
+# Answered threads end with a person's reply and only wait to be resolved.
 other_review_threads() {
-  local pr=$1 key=$2 now cached count authors page temporary
+  local pr=$1 key=$2 now cached count authors answered page temporary threads
   now=$(date -u +%s)
   if [[ -f $other_review_threads_file ]] && cached=$(awk -F '\t' \
     -v pr="$pr" -v key="$key" -v now="$now" '
-      $1 == pr && $2 == key && now - $3 < ($4 > 0 ? 60 : 600) { print $4 "\t" $5; found = 1 }
+      $1 == pr && $2 == key && now - $3 < ($4 > 0 ? 60 : 600) { print $4 "\t" $5 "\t" $6; found = 1 }
       END { exit !found }
     ' "$other_review_threads_file"); then
-    IFS=$'\t' read -r count authors <<<"$cached"
+    IFS=$'\t' read -r count authors answered <<<"$cached"
   else
     page=$(gh api graphql -F owner="$owner" -F name="$name" -F number="$pr" -f query='
       query($owner: String!, $name: String!, $number: Int!) {
         repository(owner: $owner, name: $name) {
           pullRequest(number: $number) {
             reviewThreads(last: 100) {
-              nodes { isResolved comments(first: 1) { nodes { author { login } } } }
+              nodes {
+                isResolved
+                comments(first: 1) { nodes { author { login } } }
+                latest: comments(last: 1) { nodes { author { __typename } } }
+              }
             }
           }
         }
       }') || return 1
-    IFS=$'\t' read -r count authors < <(jq -r '
+    IFS=$'\t' read -r count authors answered < <(jq -r '
       [.data.repository.pullRequest.reviewThreads.nodes[]
         | select(.isResolved == false)
-        | .comments.nodes[0].author.login // "unknown"
-        | select(. != "coderabbitai")]
-      | [length, (unique | join(", "))]
+        | {author: (.comments.nodes[0].author.login // "unknown"),
+           answered: (.latest.nodes[0].author.__typename == "User")}
+        | select(.author != "coderabbitai")]
+      | [length, (map(.author) | unique | join(", ")), (map(select(.answered)) | length)]
       | @tsv
     ' <<<"$page") || return 1
     temporary=$(mktemp "$other_review_threads_file.XXXXXX")
     {
       [[ ! -f $other_review_threads_file ]] ||
         awk -F '\t' -v pr="$pr" '$1 != pr' "$other_review_threads_file"
-      printf '%s\t%s\t%s\t%s\t%s\n' "$pr" "$key" "$now" "$count" "$authors"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pr" "$key" "$now" "$count" "$authors" "$answered"
     } >"$temporary"
     mv "$temporary" "$other_review_threads_file"
   fi
   (( count > 0 )) || return 0
-  if (( count == 1 )); then
-    printf '1 unresolved thread from %s\n' "$authors"
+  threads='threads'
+  (( count > 1 )) || threads='thread'
+  answered=${answered:-0}
+  if (( answered == count )); then
+    printf '%s unresolved %s from %s, answered but not resolved\n' "$count" "$threads" "$authors"
+  elif (( answered > 0 )); then
+    printf '%s unresolved %s from %s (%s answered but not resolved)\n' \
+      "$count" "$threads" "$authors" "$answered"
   else
-    printf '%s unresolved threads from %s\n' "$count" "$authors"
+    printf '%s unresolved %s from %s\n' "$count" "$threads" "$authors"
   fi
 }
 
