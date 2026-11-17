@@ -4,18 +4,6 @@ matching_codex_session() {
   local branch_name=$1
   local head_sha=$2
   local repo_lower=${repo,,}
-  local file meta parsed timestamp session_id cwd metadata_branch metadata_head
-  local event_cwd
-  local live_branch live_head remote key candidate_path candidate_session
-  local -A branch_sessions=()
-  local -A branch_timestamps=()
-  local -A head_sessions=()
-  local -A head_timestamps=()
-  local -A metadata_branch_sessions=()
-  local -A metadata_branch_timestamps=()
-  local -A metadata_head_sessions=()
-  local -A metadata_head_timestamps=()
-  local -A unique_sessions=()
   local excluded_sessions
   excluded_sessions=$(python3 "$script_dir/t3-delegate.py" --subagent-sessions 2>/dev/null) || return 1
 
@@ -122,127 +110,105 @@ PY
     fi
   fi
 
-  while IFS= read -r file; do
-    [[ -n ${file:-} ]] || continue
-    meta=$(head -n 1 "$file")
-    parsed=$(
-      jq -r \
-        --arg repo "$repo_lower" --argjson excluded "$excluded_sessions" '
-        (.payload.git.repository_url // "" | ascii_downcase) as $url
-        | select(
-          .type == "session_meta"
-          and (.payload.originator | IN("Codex Desktop", "t3code_desktop", "T3 Code", "codex-tui", "codex_exec"))
-          and (.payload.thread_source // "") != "subagent"
-          and ((.payload.session_id // .payload.id // "") as $id | $excluded | index($id) | not)
-          and (
-            ($url | endswith("github.com:" + $repo + ".git"))
-            or ($url | endswith("github.com/" + $repo + ".git"))
-            or ($url | endswith("github.com/" + $repo))
-          )
+  # One rg pass and one Python process for the whole history: a head, jq,
+  # and git pipeline per rollout took most of the remote status budget once
+  # hundreds of tasks existed.
+  python3 - "$codex_sessions_root" "$repo_lower" "$branch_name" "$head_sha" "$excluded_sessions" <<'PY'
+import json
+import subprocess
+import sys
+
+root, repo, branch, head, excluded = sys.argv[1:]
+excluded = set(json.loads(excluded))
+originators = {'Codex Desktop', 't3code_desktop', 'T3 Code', 'codex-tui', 'codex_exec'}
+worktrees = {}
+
+
+def origin_matches(url):
+    return url.lower().endswith((f'github.com:{repo}.git', f'github.com/{repo}.git', f'github.com/{repo}'))
+
+
+def git(cwd, *args):
+    try:
+        result = subprocess.run(['git', '-C', cwd, *args], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return ''
+    return result.stdout.strip() if result.returncode == 0 else ''
+
+
+def worktree(cwd):
+    """The live (branch, head) of a checkout of this repository, else None."""
+    if cwd not in worktrees:
+        worktrees[cwd] = (
+            (git(cwd, 'branch', '--show-current'), git(cwd, 'rev-parse', 'HEAD'))
+            if origin_matches(git(cwd, 'remote', 'get-url', 'origin')) else None
         )
-        | [
-            (.timestamp // ""),
-            (.payload.session_id // .payload.id // ""),
-            (.payload.cwd // ""),
-            (.payload.git.branch // ""),
-            (.payload.git.commit_hash // "")
-          ]
-        | @tsv
-      ' <<<"$meta"
-    )
-    [[ -n $parsed ]] || continue
-    IFS=$'\t' read -r timestamp session_id cwd metadata_branch metadata_head <<<"$parsed"
-    [[ -n $timestamp && -n $session_id && -n $cwd ]] || continue
+    return worktrees[cwd]
 
-    if [[ $metadata_branch == "$branch_name" ]]; then
-      if [[ $timestamp > ${metadata_branch_timestamps[$cwd]:-} ]]; then
-        metadata_branch_timestamps["$cwd"]=$timestamp
-        metadata_branch_sessions["$cwd"]=$session_id
-      fi
-    fi
-    if [[ $metadata_head == "$head_sha" ]]; then
-      if [[ $timestamp > ${metadata_head_timestamps[$cwd]:-} ]]; then
-        metadata_head_timestamps["$cwd"]=$timestamp
-        metadata_head_sessions["$cwd"]=$session_id
-      fi
-    fi
 
-    if ! git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
-      continue
-    fi
-    remote=$(git -C "$cwd" remote get-url origin 2>/dev/null || true)
-    if [[ ${remote,,} != *"github.com:$repo_lower.git" &&
-      ${remote,,} != *"github.com/$repo_lower.git" &&
-      ${remote,,} != *"github.com/$repo_lower" ]]; then
-      continue
-    fi
-    live_branch=$(git -C "$cwd" branch --show-current 2>/dev/null || true)
-    live_head=$(git -C "$cwd" rev-parse HEAD 2>/dev/null || true)
-    if [[ $live_branch == "$branch_name" ]]; then
-      if [[ $timestamp > ${branch_timestamps[$cwd]:-} ]]; then
-        branch_timestamps["$cwd"]=$timestamp
-        branch_sessions["$cwd"]=$session_id
-      fi
-    fi
-    if [[ $live_head == "$head_sha" ]]; then
-      if [[ $timestamp > ${head_timestamps[$cwd]:-} ]]; then
-        head_timestamps["$cwd"]=$timestamp
-        head_sessions["$cwd"]=$session_id
-      fi
-    fi
+def rg(*args):
+    result = subprocess.run(['rg', *args], capture_output=True, text=True, errors='replace')
+    return result.stdout
 
-    while IFS= read -r event_cwd; do
-      [[ -n $event_cwd && $event_cwd != "$cwd" ]] || continue
-      if ! git -C "$event_cwd" rev-parse --git-dir >/dev/null 2>&1; then
+
+files = [path for path in rg('-i', '-l', '-0', '--fixed-strings', repo, root).split('\0') if path]
+# Agents can resolve reviews in another worktree than the session's cwd.
+event_cwds = {}
+for start in range(0, len(files), 500):
+    output = rg('-o', '-r', '$1', '--with-filename', '--null', '--no-line-number',
+                r'"item":\{.*?"cwd":"([^"]*)"', '--', *files[start:start + 500])
+    for line in output.splitlines():
+        path, _, cwd = line.partition('\0')
+        event_cwds.setdefault(path, set()).add(cwd.removeprefix('file://'))
+
+# Each group maps a worktree to the newest matching (timestamp, session).
+groups = {name: {} for name in ('branch', 'head', 'metadata_branch', 'metadata_head')}
+
+
+def record(name, cwd, timestamp, session):
+    if timestamp > groups[name].get(cwd, ('',))[0]:
+        groups[name][cwd] = (timestamp, session)
+
+
+for path in files:
+    try:
+        with open(path, errors='replace') as events:
+            meta = json.loads(events.readline())
+    except (OSError, ValueError):
         continue
-      fi
-      remote=$(git -C "$event_cwd" remote get-url origin 2>/dev/null || true)
-      if [[ ${remote,,} != *"github.com:$repo_lower.git" &&
-        ${remote,,} != *"github.com/$repo_lower.git" &&
-        ${remote,,} != *"github.com/$repo_lower" ]]; then
+    if not isinstance(meta, dict) or meta.get('type') != 'session_meta':
         continue
-      fi
-      live_branch=$(git -C "$event_cwd" branch --show-current 2>/dev/null || true)
-      live_head=$(git -C "$event_cwd" rev-parse HEAD 2>/dev/null || true)
-      if [[ $live_branch == "$branch_name" &&
-        $timestamp > ${branch_timestamps[$event_cwd]:-} ]]; then
-        branch_timestamps["$event_cwd"]=$timestamp
-        branch_sessions["$event_cwd"]=$session_id
-      fi
-      if [[ $live_head == "$head_sha" &&
-        $timestamp > ${head_timestamps[$event_cwd]:-} ]]; then
-        head_timestamps["$event_cwd"]=$timestamp
-        head_sessions["$event_cwd"]=$session_id
-      fi
-    done < <(
-      jq -R -r '
-        fromjson?
-        | .payload.item.cwd? // empty
-        | sub("^file://"; "")
-      ' "$file" 2>/dev/null | sort -u
-    )
-  done < <(
-    rg -i -l --fixed-strings \
-      "$repo" \
-      "$codex_sessions_root" 2>/dev/null || true
-  )
+    payload = meta.get('payload') or {}
+    git_meta = payload.get('git') or {}
+    session = payload.get('session_id') or payload.get('id') or ''
+    if (payload.get('originator') not in originators or payload.get('thread_source') == 'subagent'
+            or session in excluded or not origin_matches(git_meta.get('repository_url') or '')):
+        continue
+    timestamp, cwd = meta.get('timestamp') or '', payload.get('cwd') or ''
+    if not (timestamp and session and cwd):
+        continue
+    if git_meta.get('branch') == branch:
+        record('metadata_branch', cwd, timestamp, session)
+    if git_meta.get('commit_hash') == head:
+        record('metadata_head', cwd, timestamp, session)
+    if worktree(cwd) is None:
+        continue
+    for checkout in [cwd, *sorted(event_cwds.get(path, set()) - {cwd})]:
+        current = worktree(checkout)
+        if current and current[0] == branch:
+            record('branch', checkout, timestamp, session)
+        if current and current[1] == head:
+            record('head', checkout, timestamp, session)
 
-  for key in branch_sessions head_sessions metadata_branch_sessions metadata_head_sessions; do
-    local -n candidates=$key
-    unique_sessions=()
-    for candidate_path in "${!candidates[@]}"; do
-      candidate_session=${candidates[$candidate_path]}
-      unique_sessions["$candidate_session"]=$candidate_path
-    done
-    if (( ${#unique_sessions[@]} == 1 )); then
-      printf '%s\t%s\n' "${!unique_sessions[@]}" "${unique_sessions[@]}"
-      return 0
-    fi
-    if (( ${#unique_sessions[@]} > 1 )); then
-      return 1
-    fi
-  done
-  return 1
+for group in groups.values():
+    sessions = {session: cwd for cwd, (_timestamp, session) in group.items()}
+    if len(sessions) == 1:
+        print(*next(iter(sessions.items())), sep='\t')
+        sys.exit(0)
+    if sessions:
+        sys.exit(1)
+sys.exit(1)
+PY
 }
 
 claude_agents_json() {
