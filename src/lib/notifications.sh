@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-only
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 notify_sound_enabled() {
   # Default on: missing file or anything other than 0.

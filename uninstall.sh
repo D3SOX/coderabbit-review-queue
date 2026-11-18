@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0-only
+# SPDX-License-Identifier: GPL-3.0-or-later
 set -euo pipefail
 
 data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}

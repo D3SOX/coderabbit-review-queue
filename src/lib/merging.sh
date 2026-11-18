@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-only
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 merge_review_threads_clear() {
   local pr=$1 cursor='' page has_next query unresolved author path thread_id

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-only
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 # CodeRabbit has worded its rate-limit replies in several ways: "rate limited
 # by coderabbit.ai", "More reviews will be available in N minutes", "Next review

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-only
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 # Settings that follow the monitor to its host. The GUI pushes them on change.
 monitor_setting_suffixes=(
