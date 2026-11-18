@@ -504,8 +504,13 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
         self.refresh_button.clicked.connect(lambda: self.refresh(manual=True))
 
         header_buttons = QHBoxLayout()
-        header_buttons.addWidget(self.monitor_label)
-        header_buttons.addWidget(self.timer_label)
+        # Spaced like the " · " inside the timer text that follows.
+        status_line = QHBoxLayout()
+        status_line.setSpacing(0)
+        status_line.addWidget(self.monitor_label)
+        status_line.addWidget(QLabel(" · "))
+        status_line.addWidget(self.timer_label)
+        header_buttons.addLayout(status_line)
         header_buttons.addStretch()
         header_buttons.addWidget(self.devices_button)
         header_buttons.addWidget(self.sync_button)
