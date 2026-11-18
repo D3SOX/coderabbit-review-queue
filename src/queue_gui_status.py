@@ -726,6 +726,9 @@ class StatusMixin:
         if selected_number == number:
             self.queue.setCurrentItem(live_item, 0, QItemSelectionModel.NoUpdate)
         live_item.setSelected(number in selected_numbers)
+        # The replaced row had its estimate and opened time; fill them in before
+        # the next paint instead of leaving the cells empty until the next tick.
+        self.apply_review_estimates()
 
     def update_queue_buttons(self) -> None:
         can_move_up = bool(self.queue_move_rows(-1))
