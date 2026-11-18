@@ -2640,6 +2640,21 @@ show_status 60 | grep 'Estimated review starts'
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ['0', 'Estimated review starts: slots for 2'])
 
+    def test_status_lists_when_each_pr_was_opened(self):
+        result = self.run_shell(r'''
+snapshot() { printf '%s' '{"data":{"repository":{"pullRequests":{"nodes":[
+  {"number":7,"createdAt":"2026-11-18T09:40:03Z"},{"number":8}]}}}}'; }
+status_quota_available() { :; }
+load_stale_rows() { stale=(); held=(); }
+active_review_rows() { :; }
+approved_review_rows() { :; }
+reviewed_rows() { :; }
+check_summary_rows() { :; }
+show_status 60 | grep 'PRs opened'
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'PRs opened: 7=1794994803')
+
     def test_status_estimates_start_after_the_monitors_own_wait(self):
         result = self.run_shell(r'''
 snapshot() { printf '{}'; }

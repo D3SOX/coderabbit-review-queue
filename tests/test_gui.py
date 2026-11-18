@@ -173,11 +173,11 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                              ['PR', 'Checks', 'Task', 'Title', 'Result', 'Agent status', 'Latest progress'])
             self.assertTrue(header.isSectionHidden(3))
 
-            for label in ['PR', 'Title', 'Status']:
+            for label in ['PR', 'Title', 'Opened', 'Status']:
                 pick(window, window.queue, label)
             pick(window, window.queue, 'Estimated review')
-            self.assertEqual([window.queue.header().isSectionHidden(c) for c in range(4)],
-                             [True, True, True, False])
+            self.assertEqual([window.queue.header().isSectionHidden(c) for c in range(5)],
+                             [True, True, True, False, True])
             window.close()
 
     def test_finished_reviews_support_ctrl_and_shift_selection(self):
@@ -544,9 +544,12 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         status = (
             "Active reviews:\n  #7 Reviewing\nQueued PRs:\n  #7 Reviewing (in progress)\n"
             f"  #1 First\n  #2 Second\n  #3 Third\nEstimated review starts: {now - 5} {now + 3600}\n"
+            f"PRs opened: 7={now - 30} 1={now - 3 * 3600 - 5} 2={now - 9 * 86400}\n"
         )
         queue_gui.QueueWindow.populate_queue(window, status)
         rows = [window.queue.topLevelItem(i) for i in range(4)]
+        self.assertEqual([row.text(4) for row in rows], ["just now", "3 hours ago", "9 days ago", ""])
+        self.assertTrue(rows[0].toolTip(4).startswith("Opened today at "))
         self.assertEqual([row.text(0) for row in rows], ["#7", "#1", "#2", "#3"])
         self.assertEqual(rows[0].text(3), "")
         self.assertEqual(rows[1].toolTip(3), "Estimated review start: now")

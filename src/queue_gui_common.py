@@ -109,6 +109,20 @@ def relative_time(seconds: int) -> str:
     return f"in {hours}h {minutes}m"
 
 
+def time_ago(seconds: int) -> str:
+    """Time since an event in words, e.g. "5 minutes ago" or "3 days ago"."""
+    if seconds < 60:
+        return "just now"
+    for limit, size, unit in (
+        (3600, 60, "minute"), (86400, 3600, "hour"), (14 * 86400, 86400, "day"),
+        (60 * 86400, 7 * 86400, "week"), (None, 30 * 86400, "month"),
+    ):
+        if limit is None or seconds < limit:
+            count = seconds // size
+            return f"{count} {unit}{'s' if count != 1 else ''} ago"
+    return ""
+
+
 def live_review_number(activity: tuple[str, str, str, int] | None) -> str | None:
     if isinstance(activity, tuple) and activity[0] in {"checking", "triggering", "reviewing"}:
         return activity[1] or None

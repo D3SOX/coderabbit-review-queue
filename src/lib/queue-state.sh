@@ -27,6 +27,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
         author {
           login
         }
+        createdAt
         updatedAt
         headRefOid
         headRefName

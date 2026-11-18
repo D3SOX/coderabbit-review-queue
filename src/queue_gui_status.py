@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QMenu, QMessageBox, QTreeWidget, QTreeWidgetItem
 
 from queue_gui_common import (
     RUNTIME_ROOT, SCRIPT, STATE_ROOT, compact_duration, file_signature, live_review_number,
-    monitor_is_running, relative_time, status_belongs_to_repo,
+    monitor_is_running, relative_time, status_belongs_to_repo, time_ago,
 )
 from queue_gui_tray import check_icon
 
@@ -372,11 +372,23 @@ class StatusMixin:
         return f"{self.format_day(local)} at {self.format_time(local)} ({remaining})"
 
     def apply_review_estimates(self) -> None:
-        """Give each waiting row the monitor's estimate for its queue position."""
+        """Give each waiting row the monitor's estimate for its queue position,
+        and each row the time since its PR was opened."""
         starts = iter(getattr(self, "review_starts", []))
+        opened_times = getattr(self, "pr_opened", {})
         now = QDateTime.currentSecsSinceEpoch()
         for index in range(self.queue.topLevelItemCount()):
             item = self.queue.topLevelItem(index)
+            opened = opened_times.get(item.data(0, Qt.UserRole))
+            if opened is None:
+                item.setText(4, "")
+                item.setToolTip(4, "")
+            else:
+                local = QDateTime.fromSecsSinceEpoch(opened)
+                item.setText(4, time_ago(now - opened))
+                day = self.format_day(local)
+                day = "today" if day == "Today" else f"on {day}"
+                item.setToolTip(4, f"Opened {day} at {self.format_time(local)}")
             start = None
             if item.data(0, Qt.UserRole + 1) not in {"In progress", WAITING_FOR_BOTS}:
                 start = next(starts, None)
@@ -559,8 +571,14 @@ class StatusMixin:
         expiry: QDateTime | None = None
         review_starts: list[int] = []
         held_reasons: dict[str, str] = {}
+        opened: dict[str, int] = {}
         for line in status.splitlines():
-            if line == "Active reviews:":
+            if line.startswith("PRs opened: "):
+                for value in line.removeprefix("PRs opened: ").split():
+                    number, _, epoch = value.partition("=")
+                    if epoch.isdigit():
+                        opened[number] = int(epoch)
+            elif line == "Active reviews:":
                 section = "active"
             elif line == "Queued PRs:":
                 section = "queue"
@@ -615,6 +633,7 @@ class StatusMixin:
         self.has_queued_reviews = bool(queued)
         self.next_review_at = expiry
         self.review_starts = review_starts
+        self.pr_opened = opened
         self.update_countdown_display()
 
         active_numbers = {number for number, _title in active}

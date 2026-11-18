@@ -28,6 +28,10 @@ show_status() {
     check_summaries[$pr]=$row
   done < <(check_summary_rows <<<"$state")
   printf 'Repository: %s\n' "$repo"
+  printf 'PRs opened: %s\n' "$(jq -r '
+    [.data.repository.pullRequests.nodes[]? | select(.createdAt)
+      | "\(.number)=\(.createdAt | fromdateiso8601)"] | join(" ")
+  ' <<<"$state")"
 
   while IFS=$'\t' read -r pr title; do
     [[ -n ${pr:-} ]] || continue
