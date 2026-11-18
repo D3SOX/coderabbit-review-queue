@@ -9,12 +9,13 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QDateTime, QProcess, QSignalBlocker, QSize, QTimer, Qt, QUrl
+from PySide6.QtCore import QDateTime, QPointF, QProcess, QRectF, QSignalBlocker, QSize, QTimer, Qt, QUrl
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QDesktopServices,
     QIcon,
+    QPainter,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -86,27 +87,56 @@ def fit_columns(
 COUNT_BADGE_MIN_ROWS = 6
 
 
-class CountBadge(QLabel):
+class CountBadge(QWidget):
     """A table's row count, shown once the table is long."""
 
     def __init__(self, tree: QTreeWidget) -> None:
         super().__init__()
-        self.setObjectName("countBadge")
-        self.setStyleSheet(
-            "#countBadge { background: palette(highlight); color: palette(highlighted-text);"
-            " border-radius: 8px; padding: 0 6px; font-weight: bold; }"
-        )
+        bold = self.font()
+        bold.setBold(True)
+        self.setFont(bold)
+        self.count_text = ""
         # The model, unlike the tree, still answers while the tree is destroyed.
         self.model = tree.model()
         for signal in (self.model.rowsInserted, self.model.rowsRemoved, self.model.modelReset):
             signal.connect(self.update_count)
         self.update_count()
 
+    def text(self) -> str:
+        return self.count_text
+
     def update_count(self) -> None:
         count = self.model.rowCount()
-        self.setText(str(count))
+        self.count_text = str(count)
         self.setToolTip(f"{count} rows")
         self.setVisible(count >= COUNT_BADGE_MIN_ROWS)
+        self.updateGeometry()
+        self.update()
+
+    def sizeHint(self) -> QSize:
+        metrics = self.fontMetrics()
+        height = metrics.height()
+        return QSize(max(height, metrics.tightBoundingRect(self.count_text).width() + 12), height)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self.palette().highlight())
+        bounds = QRectF(self.rect())
+        painter.drawRoundedRect(bounds, bounds.height() / 2, bounds.height() / 2)
+        # Center the digits' ink: their advance width ends in empty space,
+        # which would push them left of center.
+        ink = self.fontMetrics().tightBoundingRect(self.count_text)
+        painter.setPen(self.palette().highlightedText().color())
+        painter.drawText(
+            QPointF((bounds.width() - ink.width()) / 2 - ink.left(),
+                    (bounds.height() - ink.height()) / 2 - ink.top()),
+            self.count_text,
+        )
 
 
 def counted_label(text: str, tree: QTreeWidget) -> QHBoxLayout:
