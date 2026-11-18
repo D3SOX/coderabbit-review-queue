@@ -88,6 +88,14 @@ query($owner: String!, $name: String!, $endCursor: String) {
             submittedAt
           }
         }
+        reactions(content: THUMBS_UP, last: 10) {
+          nodes {
+            createdAt
+            user {
+              login
+            }
+          }
+        }
       }
     }
   }
@@ -289,9 +297,16 @@ other_bot_activity() {
         | .checkSuite.app.slug] | unique) as $running
     | ([.comments.nodes[]?
         | select((.author.login // "") == "chatgpt-codex-connector")
+        | .updatedAt as $updated
         | .body
         | capture("codex-review-state:v1 (?<state>\\{.*?\\}) -->")?.state
-        | fromjson? | .code_review // empty] | last) as $codex
+        | fromjson? | .code_review // empty
+        | .updated = $updated] | last) as $codex
+    # Codex reacts 👍 once its reviews finish without findings, but can leave
+    # its summary on "running".
+    | ([.reactions.nodes[]?
+        | select((.user.login // "") | startswith("chatgpt-codex-connector"))
+        | .createdAt] | max // "") as $codex_thumbs_up
     | (if $age < 3600 and ($running | length) > 0 then
          ($running | join(", ")) + " still reviewing"
        elif $codex == null then "-"
@@ -299,6 +314,7 @@ other_bot_activity() {
          if $age < 900 then "Codex has not reviewed this head yet" else "-" end
        # A failed review is as final as a completed one.
        elif ($codex.status // "" | IN("completed", "failed", "cancelled", "canceled", "skipped", "error") | not)
+         and $codex_thumbs_up <= ($codex.updated // "")
          and $age < 3600 then "Codex still reviewing"
        else "-" end) as $reason
     # New review threads always arrive with a review, which changes the key.

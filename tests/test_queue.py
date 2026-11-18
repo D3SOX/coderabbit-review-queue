@@ -1234,7 +1234,7 @@ defer_recent_review_request 2524 head Title
     def test_waiting_for_other_bots_holds_prs_until_they_are_done(self):
         now = datetime.now(timezone.utc)
 
-        def pr(number, minutes_ago, checks=(), codex=None):
+        def pr(number, minutes_ago, checks=(), codex=None, thumbs_up_after=None):
             node = self.pr(number, head=f'head-{number}')
             committed = (now - timedelta(minutes=minutes_ago)).strftime('%Y-%m-%dT%H:%M:%SZ')
             commit = node['commits']['nodes'][0]['commit']
@@ -1253,6 +1253,11 @@ defer_recent_review_request 2524 head Title
                             f'<!-- codex-review-state:v1 {state} -->',
                     'updatedAt': committed,
                 }]
+            if thumbs_up_after is not None:
+                reacted = now - timedelta(minutes=minutes_ago - thumbs_up_after)
+                node['reactions'] = {'nodes': [{
+                    'createdAt': reacted.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    'user': {'login': 'chatgpt-codex-connector[bot]'}}]}
             return node
 
         prs = [
@@ -1269,6 +1274,10 @@ defer_recent_review_request 2524 head Title
             pr(10, 5, codex=('head-10', 'completed')),
             # OpenTubeX#3369: a failed Codex review held the PR for an hour.
             pr(11, 5, codex=('head-11', 'failed')),
+            # OpenTubeX#3379: Codex reacted 👍 after reviewing the head but left
+            # its summary on "running".
+            pr(12, 5, codex=('head-12', 'running'), thumbs_up_after=2),
+            pr(13, 5, codex=('head-13', 'running'), thumbs_up_after=-1),
         ]
         # (opener, resolved, author type of the latest comment)
         threads = {
@@ -1329,21 +1338,22 @@ cat "$state_root/gh-calls"
             part.splitlines() for part in result.stdout.split('---\n'))
         # Off by default: every PR is queued.
         self.assertEqual(sorted(disabled), sorted(
-            [f'queued {n}' for n in range(1, 12)] + ['deferred 0']))
+            [f'queued {n}' for n in range(1, 14)] + ['deferred 0']))
         self.assertEqual(sorted(line for line in enabled if line.startswith('queued')),
-                         ['queued 11', 'queued 3', 'queued 5', 'queued 6', 'queued 7'])
+                         ['queued 11', 'queued 12', 'queued 3', 'queued 5', 'queued 6', 'queued 7'])
         self.assertEqual(sorted(line for line in enabled if line.startswith('held')), sorted([
             'held 1: sourcery-ai still reviewing',
             'held 2: Codex has not reviewed this head yet',
             'held 4: 1 unresolved thread from cubic-dev-ai',
             'held 8: Codex still reviewing',
+            'held 13: Codex still reviewing',
             'held 9: 2 unresolved threads from revix-ai-review, answered but not resolved',
             'held 10: 2 unresolved threads from cubic-dev-ai, revix-ai-review '
             '(1 answered but not resolved)',
         ]))
-        self.assertIn('deferred 6', enabled)
+        self.assertIn('deferred 7', enabled)
         # Threads are only fetched for PRs no bot is still reviewing.
-        self.assertEqual(first_calls, ['gh 10', 'gh 11', 'gh 3', 'gh 4', 'gh 5', 'gh 6', 'gh 7', 'gh 9'])
+        self.assertEqual(first_calls, ['gh 10', 'gh 11', 'gh 12', 'gh 3', 'gh 4', 'gh 5', 'gh 6', 'gh 7', 'gh 9'])
         self.assertEqual(cached_calls, [])
         self.assertEqual(new_review_calls, ['gh 5'])
 
