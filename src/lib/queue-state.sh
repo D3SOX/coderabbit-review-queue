@@ -296,7 +296,9 @@ other_bot_activity() {
        elif $codex == null then "-"
        elif ($codex.commit_sha // "") != $pr.headRefOid then
          if $age < 900 then "Codex has not reviewed this head yet" else "-" end
-       elif ($codex.status // "") != "completed" and $age < 3600 then "Codex still reviewing"
+       # A failed review is as final as a completed one.
+       elif ($codex.status // "" | IN("completed", "failed", "cancelled", "canceled", "skipped", "error") | not)
+         and $age < 3600 then "Codex still reviewing"
        else "-" end) as $reason
     # New review threads always arrive with a review, which changes the key.
     | [.number, $reason,

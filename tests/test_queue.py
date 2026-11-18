@@ -1267,6 +1267,8 @@ defer_recent_review_request 2524 head Title
             pr(8, 5, codex=('head-8', 'in_progress')),
             pr(9, 5, codex=('head-9', 'completed')),
             pr(10, 5, codex=('head-10', 'completed')),
+            # OpenTubeX#3369: a failed Codex review held the PR for an hour.
+            pr(11, 5, codex=('head-11', 'failed')),
         ]
         # (opener, resolved, author type of the latest comment)
         threads = {
@@ -1327,9 +1329,9 @@ cat "$state_root/gh-calls"
             part.splitlines() for part in result.stdout.split('---\n'))
         # Off by default: every PR is queued.
         self.assertEqual(sorted(disabled), sorted(
-            [f'queued {n}' for n in range(1, 11)] + ['deferred 0']))
+            [f'queued {n}' for n in range(1, 12)] + ['deferred 0']))
         self.assertEqual(sorted(line for line in enabled if line.startswith('queued')),
-                         ['queued 3', 'queued 5', 'queued 6', 'queued 7'])
+                         ['queued 11', 'queued 3', 'queued 5', 'queued 6', 'queued 7'])
         self.assertEqual(sorted(line for line in enabled if line.startswith('held')), sorted([
             'held 1: sourcery-ai still reviewing',
             'held 2: Codex has not reviewed this head yet',
@@ -1341,7 +1343,7 @@ cat "$state_root/gh-calls"
         ]))
         self.assertIn('deferred 6', enabled)
         # Threads are only fetched for PRs no bot is still reviewing.
-        self.assertEqual(first_calls, ['gh 10', 'gh 3', 'gh 4', 'gh 5', 'gh 6', 'gh 7', 'gh 9'])
+        self.assertEqual(first_calls, ['gh 10', 'gh 11', 'gh 3', 'gh 4', 'gh 5', 'gh 6', 'gh 7', 'gh 9'])
         self.assertEqual(cached_calls, [])
         self.assertEqual(new_review_calls, ['gh 5'])
 
