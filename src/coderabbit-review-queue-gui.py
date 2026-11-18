@@ -82,6 +82,42 @@ def fit_columns(
         header.resizeSection(column, width)
 
 
+# Short tables need no count; longer ones may scroll rows out of view.
+COUNT_BADGE_MIN_ROWS = 6
+
+
+class CountBadge(QLabel):
+    """A table's row count, shown once the table is long."""
+
+    def __init__(self, tree: QTreeWidget) -> None:
+        super().__init__()
+        self.setObjectName("countBadge")
+        self.setStyleSheet(
+            "#countBadge { background: palette(highlight); color: palette(highlighted-text);"
+            " border-radius: 8px; padding: 0 6px; font-weight: bold; }"
+        )
+        # The model, unlike the tree, still answers while the tree is destroyed.
+        self.model = tree.model()
+        for signal in (self.model.rowsInserted, self.model.rowsRemoved, self.model.modelReset):
+            signal.connect(self.update_count)
+        self.update_count()
+
+    def update_count(self) -> None:
+        count = self.model.rowCount()
+        self.setText(str(count))
+        self.setToolTip(f"{count} rows")
+        self.setVisible(count >= COUNT_BADGE_MIN_ROWS)
+
+
+def counted_label(text: str, tree: QTreeWidget) -> QHBoxLayout:
+    """The table's title, with a badge for its row count once the table is long."""
+    row = QHBoxLayout()
+    row.addWidget(QLabel(text))
+    row.addWidget(CountBadge(tree))
+    row.addStretch()
+    return row
+
+
 def write_state(path: Path, lines: list[str]) -> None:
     STATE_ROOT.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
@@ -447,7 +483,6 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
         header_buttons.addWidget(self.monitor_button)
         header_buttons.addWidget(self.refresh_button)
 
-        queue_label = QLabel("CodeRabbit review queue")
         self.queue = QTreeWidget()
         self.queue.setHeaderLabels(["PR", "Title", "Status", "Estimated review", "Opened"])
         # Shown after the title; added last so the other column numbers stay.
@@ -466,7 +501,6 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
         )
         self.queue.itemSelectionChanged.connect(self.update_queue_buttons)
 
-        task_label = QLabel("Finished CodeRabbit reviews")
         self.tasks = QTreeWidget()
         self.tasks.setHeaderLabels(
             ["PR", "Title", "Result", "Checks", "Agent status", "Task", "Latest progress"]
@@ -527,14 +561,14 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
         queue_panel = QWidget()
         queue_layout = QVBoxLayout(queue_panel)
         queue_layout.setContentsMargins(0, 0, 0, 0)
-        queue_layout.addWidget(queue_label)
+        queue_layout.addLayout(counted_label("CodeRabbit review queue", self.queue))
         queue_layout.addWidget(self.queue)
         queue_layout.addLayout(queue_buttons)
 
         task_panel = QWidget()
         task_layout = QVBoxLayout(task_panel)
         task_layout.setContentsMargins(0, 0, 0, 0)
-        task_layout.addWidget(task_label)
+        task_layout.addLayout(counted_label("Finished CodeRabbit reviews", self.tasks))
         task_layout.addWidget(self.tasks)
         task_layout.addLayout(task_buttons)
 

@@ -565,6 +565,50 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual(window.queue.topLevelItem(2).toolTip(3), "Estimated review start: in 1h 0m")
         app.processEvents()
 
+    def test_table_title_counts_rows_once_the_table_is_long(self):
+        app = QApplication.instance() or QApplication([])
+        tree = queue_gui.QTreeWidget()
+        row = queue_gui.counted_label("Queue", tree)
+        container = queue_gui.QWidget()
+        container.setLayout(row)
+        badge = row.itemAt(1).widget()
+        for n in range(5):
+            tree.addTopLevelItem(queue_gui.QTreeWidgetItem([str(n)]))
+        self.assertTrue(badge.isHidden())
+        tree.addTopLevelItem(queue_gui.QTreeWidgetItem(["5"]))
+        self.assertFalse(badge.isHidden())
+        self.assertEqual(badge.text(), "6")
+        tree.takeTopLevelItem(0)
+        self.assertTrue(badge.isHidden())
+        tree.clear()
+        self.assertEqual(badge.text(), "0")
+        app.processEvents()
+
+    def test_live_monitor_row_keeps_its_estimate_and_opened_time(self):
+        app = QApplication.instance() or QApplication([])
+        window = Mock()
+        window.queue = queue_gui.QTreeWidget()
+        window.queue.setColumnCount(5)
+        window.tasks = queue_gui.QTreeWidget()
+        window.monitor_activity = None
+        window.selected_repo.return_value = ""
+        window.format_day = lambda local: queue_gui.QueueWindow.format_day(window, local)
+        window.format_time = lambda local: queue_gui.QueueWindow.format_time(window, local)
+        window.apply_review_estimates = lambda: queue_gui.QueueWindow.apply_review_estimates(window)
+        window.apply_monitor_activity_to_queue = lambda: queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        now = QDateTime.currentSecsSinceEpoch()
+        queue_gui.QueueWindow.populate_queue(window, (
+            f"Queued PRs:\n  #1 First\n  #2 Second\nEstimated review starts: {now + 60} {now + 1800}\n"
+            f"PRs opened: 1={now - 7200} 2={now - 3600}\n"
+        ))
+        # The monitor checks the second PR first; it moves to the top.
+        window.monitor_activity = ("checking", "2", "Second", 0)
+        queue_gui.QueueWindow.apply_monitor_activity_to_queue(window)
+        live = window.queue.topLevelItem(0)
+        self.assertEqual((live.text(0), live.text(2), live.text(4)), ("#2", "Checking availability", "1 hour ago"))
+        self.assertEqual(live.toolTip(3), "Estimated review start: in 1 minute")
+        app.processEvents()
+
     def test_queue_shows_prs_held_for_other_bots(self):
         app = QApplication.instance() or QApplication([])
         window = Mock()
