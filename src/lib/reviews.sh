@@ -375,6 +375,14 @@ wait_for_acceptance() {
   return 1
 }
 
+# Leaves a head CodeRabbit refuses to review out of the queue until a new push.
+skip_head() {
+  local pr=$1 head_sha=$2 title=$3 reason=$4
+  printf '%s\t%s\t%s\n' "$pr" "$head_sha" "$reason" >>"$skipped_heads_file"
+  printf 'Skipping PR #%s: %s. Continuing with the queue.\n' "$pr" "$reason"
+  desktop_notify 'CodeRabbit review skipped' "PR #$pr: $title"$'\n'"$reason"
+}
+
 wait_for_review_completion() {
   local pr=$1
   local triggered_at=$2
@@ -427,8 +435,7 @@ wait_for_review_completion() {
       skipped_polls=0
     fi
     if [[ $result == "Review skipped:"* ]]; then
-      printf 'Skipping PR #%s: %s. Continuing with the queue.\n' "$pr" "$result"
-      desktop_notify 'CodeRabbit review skipped' "PR #$pr: $title"$'\n'"$result"
+      skip_head "$pr" "$head_sha" "$title" "$result"
       return 3
     fi
     if [[ $result == "Review failed:"* ]]; then
@@ -496,14 +503,22 @@ wait_for_review_completion() {
     fi
     if (( attempt % 3 == 1 )); then
       comments=$(github_get --slurp "repos/$repo/issues/$pr/comments?per_page=100")
-      failure_reason=$(jq -r --arg since "$triggered_at" '
+      failure_reason=$(jq -r -L "$script_dir/lib" --arg since "$triggered_at" '
+        include "coderabbit-checks";
         [ .[][]
           | select(.user.login == "coderabbitai[bot]"
               and .created_at >= $since
               and (.body | contains("Action not completed")))
           | {at: .created_at, reason: ((.body | split("</summary>") | .[1] // "") | gsub("<[^>]*>"; "") | split("\n") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0)) | first // "CodeRabbit could not complete the action.")}
         ] | sort_by(.at) | last | .reason // empty
+        | if final_skip then "final\t" + . else . end
       ' <<<"$comments")
+      # Without a CodeRabbit check on the head, only this reply shows that
+      # another request would be refused the same way.
+      if [[ $failure_reason == final$'\t'* ]]; then
+        skip_head "$pr" "$head_sha" "$title" "${failure_reason#final$'\t'}"
+        return 3
+      fi
       # Re-requesting a head without new files gets the same reply forever.
       if [[ $failure_reason == 'No files to review.' ]]; then
         write_review_completion "$pr" "$head_sha" "$title"

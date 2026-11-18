@@ -159,9 +159,10 @@ replaced by these author settings.
 
 If CodeRabbit reports that a PR exceeds its file limit, or that the PR's bot
 author has no CodeRabbit review seat, the monitor logs the reason and continues
-with the next PR. That head stays out of the queue while
-its CodeRabbit status reports the rejection. Pushing a new head allows another
-attempt. The tool uses CodeRabbit's reported limit rather than imposing a
+with the next PR. The queue then leaves that head out, whether CodeRabbit
+reported the rejection in its status or in its reply to the review request, and
+the rejection does not count toward the estimated review times. Pushing a new
+head allows another attempt. The tool uses CodeRabbit's reported limit rather than imposing a
 limit on every PR's total changed files.
 
 Repository discovery uses GitHub App installation information visible to the

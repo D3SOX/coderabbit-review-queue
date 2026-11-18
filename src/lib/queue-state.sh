@@ -131,7 +131,7 @@ snapshot() {
 }
 
 # Every per-repository file name after "$repo_key-"; see configure_repo.
-repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|check-quota-now|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|excluded-titles|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|other-review-threads\.tsv|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-history\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty|wait-for-other-bots'
+repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|check-quota-now|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|excluded-titles|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|other-review-threads\.tsv|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-history\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|skipped-heads\.tsv|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty|wait-for-other-bots'
 
 configure_repo() {
   local selected=$1
@@ -177,6 +177,7 @@ configure_repo() {
   ignore_drafts_file="$state_root/$repo_key-ignore-drafts"
   wait_for_other_bots_file="$state_root/$repo_key-wait-for-other-bots"
   other_review_threads_file="$state_root/$repo_key-other-review-threads.tsv"
+  skipped_heads_file="$state_root/$repo_key-skipped-heads.tsv"
   excluded_branches_file="$state_root/$repo_key-excluded-branches"
   excluded_authors_file="$state_root/$repo_key-excluded-authors"
   excluded_titles_file="$state_root/$repo_key-excluded-titles"
@@ -456,17 +457,23 @@ eligible_state() {
   '
 }
 
-# This status belongs to the current head. A new head can be queued again.
+# The status, or a reply remembered in skipped-heads.tsv, belongs to the
+# current head. A new head can be queued again.
 without_final_skips() {
-  jq -L "$script_dir/lib" '
+  local skipped=''
+  [[ ! -f $skipped_heads_file ]] || skipped=$(<"$skipped_heads_file")
+  jq -L "$script_dir/lib" --arg skipped "$skipped" '
     include "coderabbit-checks";
-    .data.repository.pullRequests.nodes |= map(select(
-      any(.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
-        (.context // "") == "CodeRabbit"
-        and (.creator.login // "") == "coderabbitai"
-        and ((.description // "") | final_skip)
-      ) | not
-    ))
+    ($skipped | split("\n") | map(split("\t") | select(length >= 2) | .[0] + " " + .[1])) as $heads
+    | .data.repository.pullRequests.nodes |= map(
+      "\(.number) \(.headRefOid)" as $head
+      | select(
+        (any(.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]?;
+          (.context // "") == "CodeRabbit"
+          and (.creator.login // "") == "coderabbitai"
+          and ((.description // "") | final_skip)
+        ) or any($heads[]; . == $head)) | not
+      ))
   '
 }
 
@@ -1088,7 +1095,7 @@ prune_state_files() {
   exec {order_lock_fd}>"$queue_order_file.lock"
   flock -x "$order_lock_fd"
   for file in "$delegated_prs_file" "$queue_order_file" "$requeued_heads_file" \
-    "$other_review_threads_file"; do
+    "$other_review_threads_file" "$skipped_heads_file"; do
     [[ -f $file ]] || continue
     temporary=$(mktemp "$file.XXXXXX")
     tr ' ' '\n' <<<"$open_prs" |
@@ -1133,8 +1140,9 @@ review_slot_estimates() {
       if (opens && $1 >= opens && $1 - opens < 300) { lags += $1 - opens; lag_count++ }
       opens = 0
       accepted[++n] = $1
-      # More reviews in an hour than the limit allows: the plan changed.
-      if (capacity && in_window($1) > capacity) capacity = 0
+      # More reviews in an hour than the limit allows: the plan changed. Until
+      # the next limit reply, assume the new limit is what has been seen.
+      if (capacity && (c = in_window($1)) > capacity) capacity = c
     }
     $2 == "limited" { c = in_window($1); if (c) { capacity = c; opens = oldest + 3600 } }
     $2 == "skipped" && n { n-- }

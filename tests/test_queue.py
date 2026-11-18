@@ -1018,6 +1018,36 @@ wait_for_review_completion 1506 2026-09-23T07:43:46Z old-head title
         self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
         self.assertIn('base or head changed', result.stdout)
 
+    def test_file_limit_reply_skips_the_head_without_counting_a_review(self):
+        # OpenTubeX#3325: CodeRabbit refused the file limit only in a reply, so
+        # the head was requested again every ten minutes and counted as a review.
+        result = self.run_shell(r'''
+poll_wait_background_actions() { :; }
+desktop_notify() { :; }
+snapshot() { return 1; }
+gh() {
+  case "$*" in
+    *'/status') echo '{"statuses":[]}' ;;
+    *'/check-runs'*) echo '{"check_runs":[]}' ;;
+    *'/comments?'*) jq -cn '[[{user: {login: "coderabbitai[bot]"}, created_at: "2026-11-18T06:06:36Z", body: "<details>\n<summary>Action not completed</summary>\n<dl>\n<dd>\n<br>\n\nReview skipped: 101 files exceed the limit of 100.\n\n> Note: CodeRabbit is an incremental review system.\n\n</dd>\n</dl>\n</details>"}]]' ;;
+    *) return 99 ;;
+  esac
+}
+sleep() { echo 'Still waiting after the reply' >&2; exit 99; }
+printf '1\taccepted\n' >"$review_history_file"
+status=0
+( watch_review_completion 3325 2026-11-18T06:06:29Z c09cff75 title ) || status=$?
+cut -f2 "$review_history_file" | tail -1
+eligible_state() { cat; }
+jq -n '{data: {repository: {pullRequests: {nodes: [
+  {number: 3325, headRefOid: "c09cff75"}, {number: 3325, headRefOid: "newer"}]}}}}' |
+  without_final_skips | jq -r '.data.repository.pullRequests.nodes[].headRefOid'
+exit "$status"
+''')
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('Skipping PR #3325: Review skipped: 101 files exceed the limit of 100.', result.stdout)
+        self.assertEqual(result.stdout.split()[-2:], ['skipped', 'newer'])
+
     def test_no_files_to_review_reply_completes_review(self):
         result = self.run_shell(r'''
 poll_wait_background_actions() { :; }
@@ -1533,16 +1563,17 @@ review_slot_estimates 3 8320
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.split(), ['8320', '8349', '11977'])
 
-    def test_review_slot_estimates_forget_a_limit_after_a_plan_upgrade(self):
+    def test_review_slot_estimates_raise_the_limit_after_a_plan_upgrade(self):
         result = self.run_shell(r'''
 date() { echo 6400; }
-# The old limit was two an hour; then three reviews ran within minutes.
+# The old limit was two an hour; then three reviews ran within minutes. A
+# fourth waits for the first of them to leave the hour.
 printf '%s\n' $'1000\taccepted' $'1035\taccepted' $'1060\tlimited' \
   $'6000\taccepted' $'6035\taccepted' $'6070\taccepted' >"$review_history_file"
 review_slot_estimates 2 0
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.split(), ['6400', '6435'])
+        self.assertEqual(result.stdout.split(), ['9660', '9695'])
 
     def test_recording_review_request_keeps_queue_position(self):
         # A request CodeRabbit rejects for quota leaves the PR at the queue's head.
