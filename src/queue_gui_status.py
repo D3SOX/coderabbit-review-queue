@@ -913,8 +913,10 @@ class StatusMixin:
         numbers = [
             self.queue.topLevelItem(index).data(0, Qt.UserRole)
             for index in range(self.queue.topLevelItemCount())
+            # A PR the monitor is checking or reviewing is shown first, but
+            # keeps its saved slot.
             if self.queue.topLevelItem(index).data(0, Qt.UserRole + 1)
-            != "In progress"
+            in MOVABLE_STATUSES
         ]
         repo = self.selected_repo()
         if not repo:

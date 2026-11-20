@@ -101,7 +101,9 @@ declare -A completed_review_heads=()
 declare -A review_watchers=()
 declare -A agent_review_decision_cache=()
 deferred_review_count=0
+stale=()
 held=()
+queue_rows=()
 declare -A held_reasons=()
 
 source "$script_dir/lib/notifications.sh"

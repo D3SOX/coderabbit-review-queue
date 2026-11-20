@@ -20,7 +20,7 @@ show_status() {
   review_mode=$(merge_after_delegation_mode)
   _claude_agents_json=''
   load_stale_rows "$state" 1
-  for row in "${stale[@]}" "${held[@]}"; do
+  for row in "${queue_rows[@]}"; do
     IFS=$'\t' read -r pr _ <<<"$row"
     queued_prs[$pr]=1
   done
@@ -164,21 +164,18 @@ show_status() {
   else
     local waiting=0
     printf 'Queued PRs:\n'
-    for row in "${stale[@]}"; do
+    for row in "${queue_rows[@]}"; do
       IFS=$'\t' read -r pr _updated_at _branch_name _head_sha title _limit_at <<<"$row"
       [[ -z ${unresolved_prs[$pr]:-} ]] || continue
       # Still listed for ordering, but mark in-flight reviews clearly.
-      if [[ -n ${active_prs[$pr]:-} ]]; then
+      if [[ -n ${held_reasons[$pr]+set} ]]; then
+        printf '  #%s %s (waiting for other bots: %s)\n' "$pr" "$title" "${held_reasons[$pr]}"
+      elif [[ -n ${active_prs[$pr]:-} ]]; then
         printf '  #%s %s (in progress)\n' "$pr" "$title"
       else
         printf '  #%s %s\n' "$pr" "$title"
         ((waiting+=1))
       fi
-    done
-    for row in "${held[@]}"; do
-      IFS=$'\t' read -r pr _updated_at _branch_name _head_sha title _limit_at <<<"$row"
-      [[ -z ${unresolved_prs[$pr]:-} ]] || continue
-      printf '  #%s %s (waiting for other bots: %s)\n' "$pr" "$title" "${held_reasons[$pr]}"
     done
 
     expiry=$(latest_expiry "$state")

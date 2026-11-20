@@ -614,6 +614,39 @@ printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(result.stdout.splitlines(), [expected, '9 2 4'])
 
+    def test_new_prs_are_placed_once_even_while_held_for_other_bots(self):
+        # OpenTubeX#3446: a new PR held for other bots was listed after every
+        # queued PR despite "Add new queue items at the top".
+        for new_top, expected in [('1', ['5 3 4 9', '3 5 4 9', '5 3 4 9']),
+                                  ('0', ['4 9 3 5', '3 4 9 5', '4 9 3 5'])]:
+            with self.subTest(new_top=new_top):
+                result = self.run_shell(r'''
+printf '%s\n' ''' + new_top + r''' >"$new_items_at_top_file"
+printf '4\n9\n12\n' >"$queue_order_file"
+state='{"data":{"repository":{"pullRequests":{"nodes":[
+  {"number":3},{"number":4},{"number":5},{"number":9}]}}}}'
+# Newest head first; 3 and 5 are new and 5 waits for other bots.
+stale_rows() { printf '5\tnow\tb\th5\tT\t-\n3\tnow\tb\th3\tT\t-\n4\tnow\tb\th4\tT\t-\n9\tnow\tb\th9\tT\t-\n'; }
+wait_for_other_bots_enabled() { :; }
+other_bot_activity() { printf '5\tCodex still reviewing\tkey\n'; }
+show() {
+  load_stale_rows "$state"
+  printf '%s\n' "${queue_rows[@]}" | cut -f1 | paste -sd ' '
+}
+show
+# A manual move keeps both placements; 12 was closed and left the order.
+paste -sd ' ' "$queue_order_file" >"$state_root/saved"
+printf '3\n%s\n' "$(grep -vx 3 "$queue_order_file")" >"$queue_order_file"
+show
+# The hold ends; the PR keeps its slot.
+other_bot_activity() { :; }
+printf '%s\n' $(<"$state_root/saved") >"$queue_order_file"
+show
+printf '%s\n' "${stale[@]}" | cut -f1 | paste -sd ' '
+''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.splitlines(), expected + [expected[2]])
+
     def test_requeue_waits_for_agent_and_recovers_missing_saved_position(self):
         result = self.run_shell(r'''
 printf '0\n' >"$new_items_at_top_file"
@@ -1385,6 +1418,7 @@ load_stale_rows() {
   stale=($'1\tnow\tb\th1\tFirst\t-')
   held=($'2\tnow\tb\th2\tSecond\t-')
   held_reasons=([2]='Codex still reviewing')
+  queue_rows=("${held[@]}" "${stale[@]}")
 }
 active_review_rows() { :; }
 approved_review_rows() { :; }
@@ -1396,9 +1430,10 @@ local_monitor_pid() { echo 123; }
 show_status 60 | grep -E '^  #|Estimated'
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # Held rows keep their place in the queue order.
         self.assertEqual(result.stdout.splitlines(), [
-            '  #1 First',
             '  #2 Second (waiting for other bots: Codex still reviewing)',
+            '  #1 First',
             'Estimated review starts: slots for 1',
         ])
 
@@ -2635,7 +2670,7 @@ cat "$state_root/snapshot-age"
         result = self.run_shell(r'''
 snapshot() { printf '{}'; }
 status_quota_available() { :; }
-load_stale_rows() { stale=($'7\tnow\tb\th7\tReviewing\t-' $'1\tnow\tb\th1\tFirst\t-' $'2\tnow\tb\th2\tSecond\t-'); }
+load_stale_rows() { stale=($'7\tnow\tb\th7\tReviewing\t-' $'1\tnow\tb\th1\tFirst\t-' $'2\tnow\tb\th2\tSecond\t-'); queue_rows=("${stale[@]}"); }
 active_review_rows() { printf '7\tReviewing\n'; }
 approved_review_rows() { :; }
 reviewed_rows() { :; }
@@ -2669,7 +2704,7 @@ show_status 60 | grep 'PRs opened'
         result = self.run_shell(r'''
 snapshot() { printf '{}'; }
 status_quota_available() { :; }
-load_stale_rows() { stale=($'1\tnow\tb\th1\tFirst\t-'); }
+load_stale_rows() { stale=($'1\tnow\tb\th1\tFirst\t-'); queue_rows=("${stale[@]}"); }
 active_review_rows() { :; }
 approved_review_rows() { :; }
 reviewed_rows() { :; }
@@ -2760,7 +2795,7 @@ snapshot() { printf '%s\n' '{"data":{"repository":{"pullRequests":{"nodes":[
   {"number":2574,"title":"active","headRefName":"b","headRefOid":"bbb"},
   {"number":2575,"title":"done","headRefName":"c","headRefOid":"ccc"}]}}}}'; }
 status_quota_available() { :; }
-load_stale_rows() { stale=($'2573\tupdated\ta\taaa\tqueued\t-'); }
+load_stale_rows() { stale=($'2573\tupdated\ta\taaa\tqueued\t-'); queue_rows=("${stale[@]}"); }
 active_review_rows() { printf '2574\tactive\n'; }
 approved_review_rows() { printf '2573\tqueued\n2574\tactive\n2575\tdone\n'; }
 reviewed_rows() { :; }

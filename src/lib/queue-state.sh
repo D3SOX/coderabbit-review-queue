@@ -644,15 +644,18 @@ write_requeued_head() {
   mv "$requeued_heads_file.tmp.$$" "$requeued_heads_file"
 }
 
+# Sets stale (rows to review, in queue order), held (rows waiting for other
+# bots, with held_reasons), and queue_rows (both, in queue order).
 load_stale_rows() {
   local state=$1
   local defer_agent_decisions=${2:-0}
-  local row wanted pr index head_sha completed_key
-  local -a loaded=()
-  local -a ordered=()
+  local row pr head_sha completed_key
+  local -a candidates=()
 
   deferred_review_count=0
+  stale=()
   held=()
+  queue_rows=()
   held_reasons=()
   reap_review_watchers
   local reason
@@ -684,35 +687,61 @@ load_stale_rows() {
           reason='Could not check other review threads'
       fi
       if [[ -n $reason ]]; then
-        held+=("$row")
         held_reasons[$pr]=$reason
         ((deferred_review_count+=1))
-        continue
       fi
     fi
-    loaded+=("$row")
+    candidates+=("$row")
   done < <(stale_rows <<<"$state")
 
-  if [[ -f $queue_order_file ]]; then
-    while IFS= read -r wanted; do
-      [[ $wanted =~ ^[0-9]+$ ]] || continue
-      for index in "${!loaded[@]}"; do
-        IFS=$'\t' read -r pr _ <<<"${loaded[$index]}"
-        if [[ $pr == "$wanted" ]]; then
-          ordered+=("${loaded[$index]}")
-          unset 'loaded[index]'
-          break
-        fi
-      done
-    done <"$queue_order_file"
-  fi
+  (( ${#candidates[@]} )) || return 0
+  local -A rows_by_pr=()
+  for row in "${candidates[@]}"; do
+    rows_by_pr[${row%%$'\t'*}]=$row
+  done
+  while IFS= read -r pr; do
+    row=${rows_by_pr[$pr]}
+    queue_rows+=("$row")
+    if [[ -n ${held_reasons[$pr]+set} ]]; then
+      held+=("$row")
+    else
+      stale+=("$row")
+    fi
+  done < <(for row in "${candidates[@]}"; do printf '%s\n' "${row%%$'\t'*}"; done |
+    place_queue_rows "$state")
+}
 
-  # Rows absent from the saved order are new; insert at top (default) or bottom.
-  if new_items_at_top_enabled; then
-    stale=("${loaded[@]}" "${ordered[@]}")
-  else
-    stale=("${ordered[@]}" "${loaded[@]}")
+# Reads the queue's PR numbers, newest head first, and prints them in queue
+# order. A PR missing from the saved order is new: it is saved at the top or
+# bottom once, held or not, so later moves and refreshes keep its slot. PRs that
+# are no longer open leave the saved order; others keep their slots while
+# they are out of the queue, for example in review.
+place_queue_rows() {
+  local state=$1 order_lock_fd at_top=false saved='' result
+  local queued
+  queued=$(jq -R . | jq -sc .)
+  ! new_items_at_top_enabled || at_top=true
+  exec {order_lock_fd}>"$queue_order_file.lock"
+  flock -x "$order_lock_fd"
+  [[ ! -f $queue_order_file ]] || saved=$(<"$queue_order_file")
+  result=$(jq -c --arg saved "$saved" --argjson top "$at_top" --argjson queued "$queued" '
+    # Without a PR list, as in a partial snapshot, keep every saved slot.
+    (.data.repository.pullRequests.nodes // null
+      | if . then map(.number | tostring) + $queued else null end) as $open
+    | ($saved | split("\n")) as $lines
+    | (reduce ($lines[] | select(test("^[0-9]+$") and ($open == null or IN($open[])))) as $n
+        ([]; if any(.[]; . == $n) then . else . + [$n] end)) as $kept
+    | ($queued - $kept) as $new
+    | (if $top then $new + $kept else $kept + ($new | reverse) end) as $order
+    | {save: ($order != ($lines | map(select(length > 0)))), order: $order,
+       queue: [$order[] | select(IN($queued[]))]}
+  ' <<<"$state")
+  if [[ $(jq -r .save <<<"$result") == true ]]; then
+    jq -r '.order[]' <<<"$result" >"$queue_order_file.tmp.$$"
+    mv "$queue_order_file.tmp.$$" "$queue_order_file"
   fi
+  exec {order_lock_fd}>&-
+  jq -r '.queue[]' <<<"$result"
 }
 
 agent_review_decision_pending() {

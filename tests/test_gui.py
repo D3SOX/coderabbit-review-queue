@@ -530,6 +530,28 @@ class ReviewRequestRefreshTests(unittest.TestCase):
                 self.assertEqual(shown(), ["#3", "#2", "#1", "#4"])
         app.processEvents()
 
+    def test_saving_the_order_keeps_the_slot_of_the_pr_being_checked(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            order_file = root / "order.txt"
+            order_file.write_text("1\n2\n3\n")
+            window = Mock()
+            window.queue = queue_gui.QTreeWidget()
+            window.selected_repo.return_value = "example/repo"
+            window.monitor_host.return_value = ""
+            window.queue_order_file.return_value = order_file
+            # The monitor checks #3, so the window shows it first.
+            for number, status in (("3", "Checking availability"), ("2", "Queued"), ("1", "Queued")):
+                item = queue_gui.QTreeWidgetItem([f"#{number}", "", status])
+                item.setData(0, Qt.UserRole, number)
+                item.setData(0, Qt.UserRole + 1, status)
+                window.queue.addTopLevelItem(item)
+            with patch.object(queue_gui_status, "STATE_ROOT", root):
+                queue_gui.QueueWindow.save_order(window)
+            self.assertEqual(order_file.read_text().split(), ["2", "1", "3"])
+        app.processEvents()
+
     def test_queue_shows_estimated_review_start_per_position(self):
         app = QApplication.instance() or QApplication([])
         window = Mock()
