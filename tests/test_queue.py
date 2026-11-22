@@ -3606,6 +3606,46 @@ echo "host file: $(<"$monitor_host_file")"
             'host file: pi',
         ])
 
+    def test_move_monitor_adopts_a_monitor_already_running_there(self):
+        result = self.run_shell(r'''
+machine_id() { echo here; }
+local_monitor_pid() { return 1; }
+monitors_elsewhere() { :; }
+ssh_queue_command() {
+  case $2 in
+    --monitor-info) echo '{"machineId":"pi-id","pid":20}' ;;
+    *) echo "UNEXPECTED ssh $*" ;;
+  esac
+}
+move_monitor pi
+echo "host file: $(<"$monitor_host_file") hosts: $(queue_hosts)"
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('UNEXPECTED', result.stdout)
+        self.assertEqual(result.stdout.splitlines(), [
+            'The monitor for example/repo already runs on pi (PID 20); it now belongs there.',
+            'host file: pi hosts: pi',
+        ])
+
+    def test_move_monitor_refuses_when_both_devices_run_it(self):
+        result = self.run_shell(r'''
+machine_id() { echo here; }
+local_monitor_pid() { echo 77; }
+monitors_elsewhere() { :; }
+stop_local_monitor() { echo UNEXPECTED STOP; }
+ssh_queue_command() {
+  case $2 in
+    --monitor-info) echo '{"machineId":"pi-id","pid":20}' ;;
+    *) echo "UNEXPECTED ssh $*" ;;
+  esac
+}
+move_monitor pi
+''')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('UNEXPECTED', result.stdout)
+        self.assertIn('Monitors for example/repo run on both this device and pi. Stop one first.',
+                      result.stderr)
+
     def test_move_monitor_needs_a_reachable_agent_host(self):
         result = self.run_shell(r'''
 machine_id() { echo here; }

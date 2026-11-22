@@ -319,7 +319,7 @@ set_monitor_host() {
 }
 
 move_monitor() {
-  local target=$1 only_running=${2:-0} source info source_id target_id local_id state was_running=0
+  local target=$1 only_running=${2:-0} source info source_id target_id target_pid local_id state was_running=0
   [[ $target != local ]] || target=''
   [[ -z $target || $target =~ ^[A-Za-z0-9_.@-]+$ ]] || {
     printf 'Use an SSH config alias or a host name without spaces.\n' >&2
@@ -357,6 +357,26 @@ move_monitor() {
       printf '%s is this device; choose this device instead.\n' "$target" >&2
       return 1
     fi
+    target_pid=$(jq -r '.pid // empty' <<<"$info")
+  else
+    target_pid=$(local_monitor_pid) || target_pid=''
+  fi
+  # A monitor already running there owns newer state; adopt it instead of
+  # overwriting it with this copy.
+  if [[ -n $target_pid ]]; then
+    refuse_monitors_elsewhere "$source_id" "$target_id" || return 1
+    if (( was_running )); then
+      printf 'Monitors for %s run on both %s and %s. Stop one first.\n' \
+        "$repo" "$(monitor_location "$source")" "$(monitor_location "$target")" >&2
+      return 1
+    fi
+    set_monitor_host "$target"
+    add_queue_host "$target"
+    printf 'The monitor for %s already runs on %s (PID %s); it now belongs there.\n' \
+      "$repo" "$(monitor_location "$target")" "$target_pid"
+    return 0
+  fi
+  if [[ -n $target ]]; then
     if [[ -z $(agent_host) ]]; then
       printf 'Agent tasks for %s run on this device. Set the agent host to this device'"'"'s SSH name first, so the monitor on %s can reach them.\n' \
         "$repo" "$target" >&2
