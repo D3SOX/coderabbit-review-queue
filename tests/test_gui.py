@@ -552,6 +552,33 @@ class ReviewRequestRefreshTests(unittest.TestCase):
             self.assertEqual(order_file.read_text().split(), ["2", "1", "3"])
         app.processEvents()
 
+    def test_repository_list_marks_projects_with_a_running_monitor(self):
+        app = QApplication.instance() or QApplication([])
+        import queue_gui_icons
+        window = Mock()
+        window.repo_combo = queue_gui.QComboBox()
+        window.repo_combo.addItems(["me/local", "me/remote", "me/stopped"])
+        window.repo_icons.icon = queue_gui_icons.initials_icon
+        window.running_repos = set()
+        running = {"me/local": 11, "me/remote": 22}
+        window.monitor_pid = lambda repo: running.get(repo)
+        window.monitor_host = lambda repo: "pi" if repo == "me/remote" else ""
+        for name in ("repo_display_icon", "set_repo_item_icon", "repos_with_running_monitor"):
+            setattr(window, name, getattr(queue_gui.QueueWindow, name).__get__(window))
+        icons = lambda: [window.repo_combo.itemIcon(i).pixmap(64, 64).toImage() for i in range(3)]
+        tips = lambda: [window.repo_combo.itemData(i, Qt.ToolTipRole) for i in range(3)]
+        plain = [queue_gui_icons.initials_icon(repo).pixmap(64, 64).toImage()
+                 for repo in ("me/local", "me/remote", "me/stopped")]
+        queue_gui.QueueWindow.apply_repo_icons(window, [])
+        self.assertEqual(window.running_repos, {"me/local", "me/remote"})
+        self.assertEqual(tips(), ["Monitor running", "Monitor running on pi", None])
+        self.assertEqual([a == b for a, b in zip(icons(), plain)], [False, False, True])
+        del running["me/local"]
+        queue_gui.QueueWindow.update_running_indicators(window)
+        self.assertEqual(tips(), [None, "Monitor running on pi", None])
+        self.assertEqual(icons()[0], plain[0])
+        app.processEvents()
+
     def test_queue_shows_estimated_review_start_per_position(self):
         app = QApplication.instance() or QApplication([])
         window = Mock()

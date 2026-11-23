@@ -43,7 +43,8 @@ requests.
   available reviews, and a stopped monitor, and can show or hide the window.
 - Shows an icon for each repository in the repository selector and the tray's
   project menu. The GUI detects it from the repository's icon, logo, or favicon
-  images and falls back to colored initials. **Project icon** lets you choose
+  images and falls back to colored initials. A green dot marks repositories
+  whose monitor is running, here or on another device. **Project icon** lets you choose
   another repository image, a local file, or the initials. **Reorder
   projects…** sets the order of both lists; newly found repositories go last.
 - Shows the images from a PR's description in a grid when you hover its row in

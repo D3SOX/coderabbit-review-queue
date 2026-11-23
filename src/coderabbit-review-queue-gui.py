@@ -752,7 +752,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
             repos.append(selected)
         self.tray_project_menu.setEnabled(bool(repos) and self.repo_combo.isEnabled())
         for repo in repos:
-            action = self.tray_project_menu.addAction(self.repo_icons.icon(repo), repo)
+            action = self.tray_project_menu.addAction(self.repo_display_icon(repo), repo)
             action.setCheckable(True)
             self.tray_project_actions.addAction(action)
             action.setChecked(repo == selected)

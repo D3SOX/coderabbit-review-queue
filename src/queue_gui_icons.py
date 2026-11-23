@@ -134,6 +134,24 @@ def initials_icon(repo: str) -> QIcon:
     return QIcon(pixmap)
 
 
+def running_icon(icon: QIcon) -> QIcon:
+    """ICON with a green dot in its lower right corner."""
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    icon.paint(painter, pixmap.rect())
+    painter.setPen(Qt.NoPen)
+    # A transparent ring keeps the dot apart from the icon behind it.
+    painter.setCompositionMode(QPainter.CompositionMode_Clear)
+    painter.drawEllipse(QRectF(28, 28, 36, 36))
+    painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+    painter.setBrush(QColor("#2ea043"))
+    painter.drawEllipse(QRectF(33, 33, 28, 28))
+    painter.end()
+    return QIcon(pixmap)
+
+
 class RepoIcons(QObject):
     """Detects, caches and loads each repository's icon.
 
@@ -351,12 +369,43 @@ class RepoIconsMixin:
         )
         self.repo_icon_button.setEnabled(False)
 
+    def repo_display_icon(self, repo: str) -> QIcon:
+        icon = self.repo_icons.icon(repo)
+        return running_icon(icon) if repo in self.running_repos else icon
+
+    def set_repo_item_icon(self, index: int) -> None:
+        repo = self.repo_combo.itemText(index)
+        self.repo_combo.setItemIcon(index, self.repo_display_icon(repo))
+        if repo in self.running_repos:
+            host = self.monitor_host(repo)
+            tip = f"Monitor running on {host}" if host else "Monitor running"
+        else:
+            tip = None
+        self.repo_combo.setItemData(index, tip, Qt.ToolTipRole)
+
     def apply_repo_icons(self, repos: list[str], force: bool = False) -> None:
+        self.running_repos = self.repos_with_running_monitor()
         for index in range(self.repo_combo.count()):
-            repo = self.repo_combo.itemText(index)
-            self.repo_combo.setItemIcon(index, self.repo_icons.icon(repo))
+            self.set_repo_item_icon(index)
         self.update_repo_icon_button()
         self.repo_icons.ensure(repos, force)
+
+    def repos_with_running_monitor(self) -> set[str]:
+        return {
+            repo
+            for repo in (self.repo_combo.itemText(index) for index in range(self.repo_combo.count()))
+            if repo and self.monitor_pid(repo) is not None
+        }
+
+    def update_running_indicators(self) -> None:
+        running = self.repos_with_running_monitor()
+        if running == self.running_repos:
+            return
+        changed = running ^ self.running_repos
+        self.running_repos = running
+        for index in range(self.repo_combo.count()):
+            if self.repo_combo.itemText(index) in changed:
+                self.set_repo_item_icon(index)
 
     def update_repo_icon_button(self) -> None:
         self.repo_icon_button.setEnabled(bool(self.selected_repo()))
@@ -364,7 +413,7 @@ class RepoIconsMixin:
     def repo_icon_changed(self, repo: str) -> None:
         index = self.repo_combo.findText(repo)
         if index >= 0:
-            self.repo_combo.setItemIcon(index, self.repo_icons.icon(repo))
+            self.set_repo_item_icon(index)
 
     def build_repo_icon_menu(self) -> None:
         menu = self.repo_icon_menu

@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QSignalBlocker, Qt
@@ -14,6 +15,9 @@ from PySide6.QtWidgets import (
 from queue_gui_common import SCRIPT, STATE_ROOT, file_signature, ssh_config_hosts
 
 # Mirrors monitor_setting_suffixes in lib/monitor-host.sh.
+# Seconds between polls of a remote monitor that is not selected.
+REMOTE_POLL_INTERVAL = 30
+
 MONITOR_SETTING_SUFFIXES = (
     "agent-host", "archive-after-merge", "auto-delegate", "auto-merge",
     "delegation-prompt-mode", "delegation-prompt-template", "delete-branch",
@@ -81,6 +85,14 @@ class MonitorHostMixin:
         self.monitor_info_process.finished.connect(self.monitor_info_finished)
         self.monitor_info_repo = ""
         self.monitor_info_host = ""
+        # Other repositories' remote monitors, polled less often for the
+        # running indicators in the repository list.
+        self.background_info_process = QProcess(self)
+        self.background_info_process.finished.connect(self.background_info_finished)
+        self.background_info_repo = ""
+        self.background_info_host = ""
+        self.remote_monitor_polled: dict[str, float] = {}
+        self.running_repos: set[str] = set()
         self.settings_push_process = QProcess(self)
         self.settings_push_process.finished.connect(self.settings_push_finished)
         self.settings_push_repo = ""
@@ -153,11 +165,45 @@ class MonitorHostMixin:
         self.monitor_info_process.setArguments(["--repo", repo, "--monitor-info"])
         self.monitor_info_process.start()
 
+    def poll_other_remote_monitors(self) -> None:
+        if self.background_info_process.state() != QProcess.NotRunning:
+            return
+        selected = self.selected_repo()
+        now = time.monotonic()
+        due = [
+            repo
+            for repo in (self.repo_combo.itemText(index) for index in range(self.repo_combo.count()))
+            if repo and repo != selected and self.monitor_host(repo)
+            and now - self.remote_monitor_polled.get(repo, -REMOTE_POLL_INTERVAL) >= REMOTE_POLL_INTERVAL
+        ]
+        if not due:
+            return
+        repo = min(due, key=lambda repo: self.remote_monitor_polled.get(repo, -REMOTE_POLL_INTERVAL))
+        self.remote_monitor_polled[repo] = now
+        self.background_info_repo = repo
+        self.background_info_host = self.monitor_host(repo)
+        self.background_info_process.setProgram(SCRIPT)
+        self.background_info_process.setArguments(["--repo", repo, "--monitor-info"])
+        self.background_info_process.start()
+
+    def background_info_finished(self, exit_code: int) -> None:
+        stdout, stderr = command_output(self.background_info_process)
+        self.apply_monitor_info(
+            self.background_info_repo, self.background_info_host, exit_code, stdout, stderr
+        )
+
     def monitor_info_finished(self, exit_code: int) -> None:
         stdout, stderr = command_output(self.monitor_info_process)
-        repo, host = self.monitor_info_repo, self.monitor_info_host
+        self.apply_monitor_info(
+            self.monitor_info_repo, self.monitor_info_host, exit_code, stdout, stderr
+        )
+
+    def apply_monitor_info(
+        self, repo: str, host: str, exit_code: int, stdout: str, stderr: str
+    ) -> None:
         if self.monitor_host(repo) != host:
             return
+        self.remote_monitor_polled[repo] = time.monotonic()
         try:
             info = json.loads(stdout) if exit_code == 0 else None
         except json.JSONDecodeError:
@@ -172,6 +218,7 @@ class MonitorHostMixin:
             self.write_remote_mirror(repo, files if isinstance(files, dict) else {})
         if repo == self.selected_repo():
             self.render_monitor_state()
+        self.update_running_indicators()
 
     def write_remote_mirror(self, repo: str, files: dict) -> None:
         REMOTE_MIRROR_ROOT.mkdir(parents=True, exist_ok=True)

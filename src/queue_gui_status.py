@@ -98,7 +98,9 @@ class StatusMixin:
         repo = self.selected_repo()
         if repo:
             self.poll_remote_monitor(repo)
+        self.poll_other_remote_monitors()
         self.render_monitor_state()
+        self.update_running_indicators()
 
     def render_monitor_state(self) -> None:
         repo = self.selected_repo()
