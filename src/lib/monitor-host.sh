@@ -269,6 +269,8 @@ start_local_monitor() {
 
 stop_local_monitor() {
   local pid attempt target
+  # A deliberate stop: do not start it again after a reboot.
+  rm -f -- "$monitor_wanted_file"
   if ! pid=$(local_monitor_pid); then
     printf 'The monitor for %s is not running on %s.\n' "$repo" "$(hostname)"
     return 0
@@ -518,4 +520,22 @@ rename_repo() {
     start_local_monitor >/dev/null || return 1
   fi
   printf 'Renamed %s to %s on %s.\n' "$old" "$repo" "$(hostname)"
+}
+
+# Start the monitors that ran here before a reboot or crash. Each monitor marks
+# itself in monitor-wanted while it runs; stopping it on purpose clears that.
+resume_monitors() {
+  local file key host status=0
+  shopt -s nullglob
+  for file in "$state_root"/*__*-monitor-wanted; do
+    key=${file##*/}
+    key=${key%-monitor-wanted}
+    [[ $key =~ ^[A-Za-z0-9-]+__[A-Za-z0-9_.-]+$ ]] || continue
+    # A monitor that moved to another device belongs there.
+    host=''
+    [[ ! -f $state_root/$key-monitor-host ]] || host=$(head -n 1 "$state_root/$key-monitor-host")
+    [[ -z $host ]] || continue
+    "$script_path" --repo "${key%%__*}/${key#*__}" --start-monitor --local-monitor || status=1
+  done
+  return "$status"
 }

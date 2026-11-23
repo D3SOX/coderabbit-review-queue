@@ -3625,6 +3625,55 @@ ls "$state_root" | sort | paste -sd ' '
         self.assertEqual(result.stdout.splitlines()[0], 'ssh pi --rename-repo example/renamed --local-monitor')
         self.assertIn('example__renamed-monitor-host example__renamed-order.txt', result.stdout)
 
+    def test_a_running_monitor_is_remembered_until_it_is_stopped_on_purpose(self):
+        result = self.run_shell(r'''
+claim_monitor() { :; }
+# The real one also stops the test shell's children.
+cleanup_monitor() { rm -f "$monitor_pid_file"; }
+monitor_snapshot() { echo open; }
+route_all_unresolved_async() { :; }
+process_approval_actions_async() { :; }
+process_thread_archives_async() { :; }
+prune_state_files() { :; }
+load_stale_rows() { stale=(); }
+desktop_notify() { :; }
+# A reboot stops the monitor without a deliberate stop.
+wait_on_empty_queue() { exit 0; }
+( main --repo example/repo )
+[[ -f $monitor_wanted_file ]] && echo 'remembered after the monitor exited'
+stop_local_monitor >/dev/null
+[[ -f $monitor_wanted_file ]] || echo 'forgotten after a deliberate stop'
+: >"$monitor_wanted_file"
+printf '1\n' >"$stop_when_empty_file"
+unset -f wait_on_empty_queue
+source "$script_dir/lib/delegation.sh"
+wait_on_empty_queue >/dev/null || [[ -f $monitor_wanted_file ]] || echo 'forgotten when it stops on an empty queue'
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            'remembered after the monitor exited',
+            'forgotten after a deliberate stop',
+            'forgotten when it stops on an empty queue',
+        ])
+
+    def test_resume_starts_the_remembered_monitors_of_this_device(self):
+        result = self.run_shell(r'''
+script_path=$state_root/fake-queue
+printf '#!/bin/bash\necho "$*"\n' >"$script_path"
+chmod +x "$script_path"
+: >"$state_root/me__first-monitor-wanted"
+: >"$state_root/other-org__second.repo-monitor-wanted"
+# A monitor that moved to another device belongs there.
+: >"$state_root/me__moved-monitor-wanted"
+printf 'pi\n' >"$state_root/me__moved-monitor-host"
+resume_monitors
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(result.stdout.splitlines()), [
+            '--repo me/first --start-monitor --local-monitor',
+            '--repo other-org/second.repo --start-monitor --local-monitor',
+        ])
+
     def test_move_monitor_to_another_device_carries_its_state(self):
         result = self.run_shell(r'''
 machine_id() { echo here; }

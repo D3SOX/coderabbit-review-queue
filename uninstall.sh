@@ -9,12 +9,15 @@ applications_dir="$data_home/applications"
 icons_dir="$data_home/icons/hicolor"
 state_dir="${XDG_STATE_HOME:-"$HOME/.local/state"}/coderabbit-review-queue"
 
-web_unit="${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user/coderabbit-review-queue-web.service"
-# Stop the web page only if systemd runs the unit this removes.
-if command -v systemctl >/dev/null 2>&1 &&
-  [[ $(systemctl --user show -p FragmentPath --value coderabbit-review-queue-web.service 2>/dev/null) == "$web_unit" ]]; then
-  systemctl --user disable --now coderabbit-review-queue-web.service >/dev/null 2>&1 || true
-fi
+systemd_user_dir="${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user"
+# Disable a unit only if systemd runs the file this removes. Disabling the
+# monitors unit does not stop running monitors (KillMode=process).
+for unit in coderabbit-review-queue-web.service coderabbit-review-queue-monitors.service; do
+  if command -v systemctl >/dev/null 2>&1 &&
+    [[ $(systemctl --user show -p FragmentPath --value "$unit" 2>/dev/null) == "$systemd_user_dir/$unit" ]]; then
+    systemctl --user disable --now "$unit" >/dev/null 2>&1 || true
+  fi
+done
 rm -f \
   "$bin_dir/coderabbit-review-queue" \
   "$bin_dir/coderabbit-review-queue-uninstall" \
@@ -22,7 +25,8 @@ rm -f \
   "$lib_dir/coderabbit-review-queue" \
   "$lib_dir/coderabbit-review-queue-gui.py" \
   "$lib_dir/coderabbit-review-queue-web.py" \
-  "$web_unit" \
+  "$systemd_user_dir/coderabbit-review-queue-web.service" \
+  "$systemd_user_dir/coderabbit-review-queue-monitors.service" \
   "$lib_dir/t3-delegate.py" \
   "$lib_dir/codex-steer.py" \
   "$lib_dir/claude-steer.py" \

@@ -1,0 +1,12 @@
+[Unit]
+Description=Start the CodeRabbit Review Queue monitors that ran before shutdown
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/coderabbit-review-queue --resume-monitors
+RemainAfterExit=yes
+# The monitors keep running after this start command exits.
+KillMode=process
+
+[Install]
+WantedBy=default.target

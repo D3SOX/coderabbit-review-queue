@@ -61,6 +61,7 @@ archive_after_merge_file=''
 archived_heads_file=''
 pending_archives_file=''
 monitor_state_file=''
+monitor_wanted_file=''
 review_completion_file=''
 snapshot_cache_file=''
 snapshot_cache_lock_file=''
@@ -168,7 +169,7 @@ main() {
         selected_repo=$2
         shift 2
         ;;
-      --status|--gui|--list-repos|--play-notify-sound|--validate-repo)
+      --status|--gui|--list-repos|--play-notify-sound|--validate-repo|--resume-monitors)
         action=${1#--}
         shift
         ;;
@@ -403,6 +404,10 @@ main() {
     list_repositories
     return 0
   fi
+  if [[ $action == resume-monitors ]]; then
+    resume_monitors
+    return
+  fi
   if [[ $action == detect-queue-hosts ]]; then
     detect_queue_hosts
     return 0
@@ -529,6 +534,8 @@ main() {
     return 1
   fi
   trap cleanup_monitor EXIT
+  # Remember to start again after a reboot; only a deliberate stop forgets it.
+  : >"$monitor_wanted_file"
   write_monitor_state idle
 
   # Agent and merge work is independent of CodeRabbit's review quota. Process

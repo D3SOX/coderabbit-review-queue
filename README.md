@@ -185,6 +185,17 @@ Before any monitor starts, the queue asks each SSH host whether it already runs
 a monitor for that repository and refuses to start a second one. Desktop
 notifications and sounds from a remote monitor appear on that device.
 
+A monitor that was running when its device shut down or crashed starts again
+at boot, once you enable the unit the installer adds:
+
+```bash
+systemctl --user enable coderabbit-review-queue-monitors.service
+```
+
+Stopping a monitor on purpose, or letting it stop on an empty queue, keeps it
+stopped after a reboot. On a device without a desktop session, also run
+`loginctl enable-linger` so user services start at boot.
+
 After you rename a repository on GitHub, enter its old name in the window. It
 offers to move the repository's settings, queue, and monitor to the new name,
 on this device and on the monitor's device. Do the same in the window on each

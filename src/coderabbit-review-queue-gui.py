@@ -208,6 +208,11 @@ def enable_column_menu(tree: QTreeWidget, name: str, stretch: int) -> None:
     header.sectionMoved.connect(save_order)
 
 
+def forget_monitor(key: str) -> None:
+    """A monitor stopped on purpose does not start again after a reboot."""
+    (STATE_ROOT / f"{key}-monitor-wanted").unlink(missing_ok=True)
+
+
 def rename_gui_state(old: str, new: str) -> None:
     """Point this window's own records for OLD at NEW; the CLI moved the rest."""
     def replace_lines(path: Path) -> None:
@@ -1293,6 +1298,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
         # open, and its pid could now belong to an unrelated process.
         pid = self.monitor_pid(repo)
         if answer == QMessageBox.Yes and pid is not None:
+            forget_monitor(repo.replace("/", "__"))
             try:
                 # Monitors are started in a new session, so kill the whole group
                 # and any waiting sleep children that inherited the lock fd.
@@ -1322,6 +1328,7 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
                 pid = int(pid_file.read_text().strip())
                 if not monitor_is_running(pid):
                     continue
+                forget_monitor(pid_file.stem.removeprefix("coderabbit-review-queue-"))
                 process_group = os.getpgid(pid)
                 if process_group == pid:
                     os.killpg(process_group, signal.SIGTERM)

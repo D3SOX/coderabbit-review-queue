@@ -201,6 +201,8 @@ stop_when_empty_enabled() {
 wait_on_empty_queue() {
   if stop_when_empty_enabled; then
     printf 'Every open PR has a current CodeRabbit review.\n'
+    # Stopping here is deliberate; a reboot does not start it again.
+    rm -f -- "$monitor_wanted_file"
     desktop_notify \
       'CodeRabbit queue complete' \
       "Every queued $repo PR has a current CodeRabbit review."

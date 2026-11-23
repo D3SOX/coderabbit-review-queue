@@ -17,6 +17,7 @@ class InstalledIconTests(unittest.TestCase):
             bin_dir = Path(directory) / 'bin'
             config_dir = Path(directory) / 'config'
             unit = config_dir / 'systemd/user/coderabbit-review-queue-web.service'
+            monitors_unit = config_dir / 'systemd/user/coderabbit-review-queue-monitors.service'
             result = subprocess.run(
                 [str(ROOT / 'install.sh')],
                 env={**os.environ, 'XDG_DATA_HOME': str(data_dir),
@@ -33,6 +34,7 @@ class InstalledIconTests(unittest.TestCase):
                 with self.subTest(runtime_file=filename):
                     self.assertTrue((app_dir / filename).is_file())
             self.assertTrue(unit.is_file())
+            self.assertTrue(monitors_unit.is_file())
             for size in (16, 22, 24, 32, 48, 64):
                 icon = data_dir / 'icons/hicolor' / f'{size}x{size}' / 'apps/coderabbit-review-queue.png'
                 with self.subTest(size=size):
@@ -52,6 +54,7 @@ class InstalledIconTests(unittest.TestCase):
             self.assertFalse((app_dir / 'claude-steer.py').exists())
             self.assertFalse((app_dir / 'lib').exists())
             self.assertFalse(unit.exists())
+            self.assertFalse(monitors_unit.exists())
             self.assertFalse(app_dir.exists())
 
 

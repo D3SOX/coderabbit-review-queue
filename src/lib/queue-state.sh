@@ -140,7 +140,7 @@ snapshot() {
 }
 
 # Every per-repository file name after "$repo_key-"; see configure_repo.
-repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|check-quota-now|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|excluded-titles|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|other-review-threads\.tsv|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-history\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|skipped-heads\.tsv|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty|wait-for-other-bots'
+repo_state_suffixes='agent-host|approval-actions\.lock|archive-after-merge|archived-heads\.tsv|auto-delegate|auto-merge|check-quota-now|delegated-prs\.txt|delegation-prompt-mode|delegation-prompt-template|delete-branch|excluded-authors|excluded-branches|excluded-titles|ignore-drafts|merge-admin|merge-after-approval|merge-after-delegation|merge-method|monitor-host|monitor\.log|monitor-state\.tsv|monitor-wanted|new-items-at-top|notifications|notify-sound|notify-sound-path|notify-sound-volume|order\.txt|other-review-threads\.tsv|pending-archives\.tsv|quota-expiry\.txt|requeued-heads\.tsv|requeued-items-at-top|resolve-merge-conflicts|review-completion\.tsv|review-history\.tsv|review-requests\.tsv|routed-threads\.txt|routing-failure-[0-9]+|skipped-heads\.tsv|snapshot\.json|snapshot\.lock|status\.txt|steer-running-agents|stop-when-empty|wait-for-other-bots'
 
 configure_repo() {
   local selected=$1
@@ -214,6 +214,7 @@ configure_repo() {
   archived_heads_file="$state_root/$repo_key-archived-heads.tsv"
   pending_archives_file="$state_root/$repo_key-pending-archives.tsv"
   monitor_state_file="$state_root/$repo_key-monitor-state.tsv"
+  monitor_wanted_file="$state_root/$repo_key-monitor-wanted"
   review_completion_file="$state_root/$repo_key-review-completion.tsv"
   snapshot_cache_file="$state_root/$repo_key-snapshot.json"
   snapshot_cache_lock_file="$state_root/$repo_key-snapshot.lock"

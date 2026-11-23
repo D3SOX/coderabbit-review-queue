@@ -1593,6 +1593,22 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         killpg.assert_not_called()
         kill.assert_not_called()
 
+    def test_stopping_a_monitor_keeps_it_from_starting_after_a_reboot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wanted = root / "me__repo-monitor-wanted"
+            wanted.touch()
+            window = Mock()
+            window.selected_repo.return_value = "me/repo"
+            window.monitor_host.return_value = ""
+            window.monitor_pid.return_value = 1234
+            with patch.object(queue_gui, "STATE_ROOT", root), \
+                 patch.object(queue_gui.QMessageBox, "question", return_value=queue_gui.QMessageBox.Yes), \
+                 patch.object(queue_gui.os, "killpg") as killpg:
+                queue_gui.QueueWindow.stop_monitor(window)
+            killpg.assert_called_once()
+            self.assertFalse(wanted.exists())
+
     def test_settings_temp_file_is_unique_for_dotted_repository_names(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "example__site.js-column-state"

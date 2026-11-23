@@ -49,7 +49,8 @@ install -m 755 \
 install -d "$systemd_user_dir"
 install -m 644 \
   "$source_dir/assets/coderabbit-review-queue-web.service" \
-  "$systemd_user_dir/coderabbit-review-queue-web.service"
+  "$source_dir/assets/coderabbit-review-queue-monitors.service" \
+  "$systemd_user_dir/"
 install -m 755 \
   "$source_dir/src/t3-delegate.py" \
   "$lib_dir/t3-delegate.py"
