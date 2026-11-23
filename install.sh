@@ -9,6 +9,7 @@ bin_dir=${XDG_BIN_HOME:-"$HOME/.local/bin"}
 lib_dir="$data_home/coderabbit-review-queue"
 applications_dir="$data_home/applications"
 icons_dir="$data_home/icons/hicolor"
+systemd_user_dir="${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user"
 desktop_tmp=$(mktemp)
 
 cleanup() {
@@ -41,6 +42,13 @@ install -m 755 \
   "$source_dir/src/coderabbit-review-queue-gui.py" \
   "$lib_dir/coderabbit-review-queue-gui.py"
 install -m 644 "$source_dir"/src/queue_gui_*.py "$lib_dir/"
+install -m 755 \
+  "$source_dir/src/coderabbit-review-queue-web.py" \
+  "$lib_dir/coderabbit-review-queue-web.py"
+install -d "$systemd_user_dir"
+install -m 644 \
+  "$source_dir/assets/coderabbit-review-queue-web.service" \
+  "$systemd_user_dir/coderabbit-review-queue-web.service"
 install -m 755 \
   "$source_dir/src/t3-delegate.py" \
   "$lib_dir/t3-delegate.py"

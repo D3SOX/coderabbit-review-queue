@@ -156,6 +156,7 @@ main() {
   local merge_pr='' merge_head='' merge_method_arg='' merge_delete='0' merge_admin_arg='0'
   local move_target='' move_if_running=0 sync_host='' sync_direction=''
   local -a queue_order=()
+  local web_port=''
 
   while (( $# > 0 )); do
     case $1 in
@@ -170,6 +171,14 @@ main() {
       --status|--gui|--list-repos|--play-notify-sound|--validate-repo)
         action=${1#--}
         shift
+        ;;
+      --web)
+        action='web'
+        shift
+        if [[ ${1:-} =~ ^[0-9]+$ ]]; then
+          web_port=$1
+          shift
+        fi
         ;;
       --preview-notify-sound)
         (( $# >= 3 )) && [[ $3 =~ ^[0-9]+$ ]] || {
@@ -368,12 +377,15 @@ main() {
         shift 6
         ;;
       *)
-        printf 'Usage: %s [--repo OWNER/NAME] [--status|--gui|--list-repos|--play-notify-sound|--delegate PR|--set-excluded-authors LIST]\n' "$0" >&2
+        printf 'Usage: %s [--repo OWNER/NAME] [--status|--gui|--web [PORT]|--list-repos|--play-notify-sound|--delegate PR|--set-excluded-authors LIST]\n' "$0" >&2
         return 2
         ;;
     esac
   done
 
+  if [[ $action == web ]]; then
+    exec python3 "$script_dir/coderabbit-review-queue-web.py" ${web_port:+"$web_port"}
+  fi
   if [[ $action == gui ]]; then
     show_gui
     return 0

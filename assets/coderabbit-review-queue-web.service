@@ -1,0 +1,12 @@
+[Unit]
+Description=CodeRabbit Review Queue web interface
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/coderabbit-review-queue --web
+# Monitors started from the page run on after the page stops or restarts.
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

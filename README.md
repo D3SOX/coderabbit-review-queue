@@ -205,6 +205,29 @@ with a PR comment after that review. If those checks fail, it does not merge.
 An approved PR whose agent task is still running merges after the agent stops. Archiving waits until a merge is confirmed and the matching Codex task
 is idle.
 
+### Web page
+
+`coderabbit-review-queue --web [PORT]` serves a small page for phones. It lists
+the repositories with queue state on this device and starts or stops their
+monitors. It also shows each queue and moves PRs in it, and it can start a
+monitor for another repository. It listens on `127.0.0.1:8765` only. It runs
+every action through the CLI, so it controls monitors on other devices over SSH
+like the GUI does.
+
+The installer adds a systemd user unit. To keep the page running and reach it
+from your tailnet:
+
+```bash
+systemctl --user enable --now coderabbit-review-queue-web.service
+tailscale serve --bg --tcp 8765 tcp://127.0.0.1:8765
+```
+
+Then open `http://DEVICE.TAILNET.ts.net:8765/`. The page has no login. Anyone
+who can reach the port can start, stop, and reorder monitors. The page answers
+only to local, IP, and `.ts.net` host names, and it refuses form posts from
+other sites. The unit stops only the page, so monitors started from it keep
+running when the page restarts.
+
 ## Privacy
 
 The source contains no account identifiers, credentials, analytics, or

@@ -15,10 +15,12 @@ class InstalledIconTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory) / 'data'
             bin_dir = Path(directory) / 'bin'
+            config_dir = Path(directory) / 'config'
+            unit = config_dir / 'systemd/user/coderabbit-review-queue-web.service'
             result = subprocess.run(
                 [str(ROOT / 'install.sh')],
                 env={**os.environ, 'XDG_DATA_HOME': str(data_dir),
-                     'XDG_BIN_HOME': str(bin_dir)},
+                     'XDG_BIN_HOME': str(bin_dir), 'XDG_CONFIG_HOME': str(config_dir)},
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -26,9 +28,11 @@ class InstalledIconTests(unittest.TestCase):
             for filename in ('coderabbit-review-queue', 'coderabbit-review-queue-gui.py',
                              'queue_gui_common.py', 'queue_gui_settings.py',
                              'queue_gui_status.py', 'queue_gui_tray.py', 'lib/queue-state.sh', 'lib/coderabbit-checks.jq',
-                             't3-delegate.py', 'codex-steer.py', 'claude-steer.py', 'coderabbit-logomark.svg'):
+                             't3-delegate.py', 'codex-steer.py', 'claude-steer.py', 'coderabbit-logomark.svg',
+                             'coderabbit-review-queue-web.py', 'queue_gui_icons.py'):
                 with self.subTest(runtime_file=filename):
                     self.assertTrue((app_dir / filename).is_file())
+            self.assertTrue(unit.is_file())
             for size in (16, 22, 24, 32, 48, 64):
                 icon = data_dir / 'icons/hicolor' / f'{size}x{size}' / 'apps/coderabbit-review-queue.png'
                 with self.subTest(size=size):
@@ -39,7 +43,7 @@ class InstalledIconTests(unittest.TestCase):
             removed = subprocess.run(
                 [str(ROOT / 'uninstall.sh')],
                 env={**os.environ, 'XDG_DATA_HOME': str(data_dir),
-                     'XDG_BIN_HOME': str(bin_dir)},
+                     'XDG_BIN_HOME': str(bin_dir), 'XDG_CONFIG_HOME': str(config_dir)},
                 capture_output=True, text=True,
             )
             self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
@@ -47,6 +51,8 @@ class InstalledIconTests(unittest.TestCase):
             self.assertFalse((app_dir / 'codex-steer.py').exists())
             self.assertFalse((app_dir / 'claude-steer.py').exists())
             self.assertFalse((app_dir / 'lib').exists())
+            self.assertFalse(unit.exists())
+            self.assertFalse(app_dir.exists())
 
 
 if __name__ == '__main__':
