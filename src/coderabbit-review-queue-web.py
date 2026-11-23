@@ -404,8 +404,10 @@ button:disabled { opacity: .3; cursor: default; }
 .next .time { font-size: 3.4rem; line-height: 1; font-weight: 700; letter-spacing: -.03em;
   font-variant-numeric: tabular-nums; }
 .next .label { color: var(--muted); }
-.queue { list-style: none; margin: 0; padding: 0; }
-.stop { display: grid; grid-template-columns: 4.3rem 1.4rem 1fr; column-gap: .5rem; }
+/* One grid for every stop, so the time column fits its widest time. */
+.queue { list-style: none; margin: 0; padding: 0; display: grid;
+  grid-template-columns: max-content 1.4rem minmax(0, 1fr); column-gap: .6rem; }
+.stop { display: contents; }
 .stop .when { padding-top: .1rem; text-align: right; font-weight: 650; font-variant-numeric: tabular-nums;
   white-space: nowrap; }
 .stop .when small { display: block; font-weight: 500; font-size: .8rem; color: var(--muted); }
