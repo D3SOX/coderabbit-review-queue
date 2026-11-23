@@ -11,8 +11,11 @@ import zlib
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
-from PySide6.QtCore import QObject, QProcess, QRectF, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QImageReader, QPainter, QPixmap
+from PySide6.QtCore import QObject, QPointF, QProcess, QRectF, Qt, Signal
+from PySide6.QtGui import (
+    QAction, QActionGroup, QColor, QFont, QIcon, QImageReader, QPainter, QPainterPath,
+    QPainterPathStroker, QPixmap, QPolygonF,
+)
 from PySide6.QtWidgets import QFileDialog, QMenu, QMessageBox, QPushButton
 
 import queue_gui_common
@@ -135,19 +138,23 @@ def initials_icon(repo: str) -> QIcon:
 
 
 def running_icon(icon: QIcon) -> QIcon:
-    """ICON with a green dot in its lower right corner."""
+    """ICON with a green play triangle in its lower right corner."""
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
     icon.paint(painter, pixmap.rect())
-    painter.setPen(Qt.NoPen)
-    # A transparent ring keeps the dot apart from the icon behind it.
+    play = QPainterPath()
+    play.addPolygon(QPolygonF([QPointF(41, 38), QPointF(62, 50), QPointF(41, 62)]))
+    play.closeSubpath()
+    # The play sign cuts a gap into the icon behind it.
+    stroker = QPainterPathStroker()
+    stroker.setWidth(10)
+    stroker.setJoinStyle(Qt.RoundJoin)
     painter.setCompositionMode(QPainter.CompositionMode_Clear)
-    painter.drawEllipse(QRectF(28, 28, 36, 36))
+    painter.fillPath(stroker.createStroke(play).united(play), Qt.black)
     painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-    painter.setBrush(QColor("#2ea043"))
-    painter.drawEllipse(QRectF(33, 33, 28, 28))
+    painter.fillPath(play, QColor("#2ea043"))
     painter.end()
     return QIcon(pixmap)
 
