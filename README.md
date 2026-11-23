@@ -185,6 +185,12 @@ Before any monitor starts, the queue asks each SSH host whether it already runs
 a monitor for that repository and refuses to start a second one. Desktop
 notifications and sounds from a remote monitor appear on that device.
 
+After you rename a repository on GitHub, enter its old name in the window. It
+offers to move the repository's settings, queue, and monitor to the new name,
+on this device and on the monitor's device. Do the same in the window on each
+other device you use, or run
+`coderabbit-review-queue --repo OLD/NAME --rename-repo NEW/NAME` there.
+
 T3 Code delegations are sent through its running local server so turns also
 appear in the T3 app. If its CLI is not on `PATH`, set `T3CODE_CLI` on the
 agent host to the executable or its `bin.mjs` bundle.

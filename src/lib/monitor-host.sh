@@ -470,3 +470,45 @@ forward_to_monitor_host() {
   [[ -n $host ]] || return 3
   ssh_queue_command "$host" "$@" --local-monitor
 }
+
+# After a rename on GitHub, move OLD's monitor, settings, and queue state to the
+# new name: on the monitor's device, then on this one. A running monitor stops
+# and starts again under the new name. Running it again changes nothing.
+rename_repo() {
+  local new=$1 canonical host old_key file new_file was_running=0
+  if ! canonical=$(gh repo view "$repo" --json nameWithOwner --jq .nameWithOwner 2>/dev/null); then
+    printf 'Repository %s could not be found or accessed.\n' "$repo" >&2
+    return 1
+  fi
+  if [[ ${canonical,,} != "${new,,}" ]]; then
+    printf 'GitHub names %s as %s, not %s.\n' "$repo" "$canonical" "$new" >&2
+    return 1
+  fi
+  new=$canonical
+  host=$(monitor_host) || return 2
+  if [[ -n $host ]]; then
+    ssh_queue_command "$host" --rename-repo "$new" --local-monitor || {
+      printf 'Could not rename the monitor state on %s.\n' "$host" >&2
+      return 1
+    }
+  elif local_monitor_pid >/dev/null; then
+    was_running=1
+    stop_local_monitor >/dev/null
+  fi
+  old_key=$repo_key
+  (
+    shopt -s nullglob
+    for file in "$state_root/$old_key"-*; do
+      [[ ${file:${#state_root}+${#old_key}+2} =~ ^($repo_state_suffixes)$ ]] || continue
+      new_file="$state_root/${new//\//__}-${file:${#state_root}+${#old_key}+2}"
+      [[ $file == "$new_file" ]] || mv -f -- "$file" "$new_file"
+    done
+  )
+  rm -f -- "$monitor_pid_file" "$monitor_lock_file"
+  local old=$repo
+  configure_repo "$new"
+  if (( was_running )); then
+    start_local_monitor >/dev/null || return 1
+  fi
+  printf 'Renamed %s to %s on %s.\n' "$old" "$repo" "$(hostname)"
+}

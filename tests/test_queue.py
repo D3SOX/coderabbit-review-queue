@@ -3577,6 +3577,50 @@ main --repo example/repo --start-monitor
         self.assertNotIn('UNEXPECTED', result.stdout)
         self.assertIn('A monitor for example/repo already runs on pi (PID 20).', result.stderr)
 
+    def test_rename_moves_the_state_and_restarts_the_monitor_under_the_new_name(self):
+        result = self.run_shell(r'''
+gh() { [[ $* == 'repo view me/old --json nameWithOwner --jq .nameWithOwner' ]] && echo me/New; }
+configure_repo me/old
+printf '3\n1\n' >"$queue_order_file"
+printf 'pi-agent\n' >"$state_root/me__old-agent-host"
+printf 'keep\n' >"$state_root/me__old-pro-order.txt"
+printf 'default\n' >"$state_root/me__New-agent-host"
+local_monitor_pid() { [[ -f $state_root/running-$repo_key ]] && echo 42; }
+stop_local_monitor() { rm "$state_root/running-$repo_key"; echo "stopped $repo"; }
+start_local_monitor() { touch "$state_root/running-$repo_key"; echo "started $repo"; }
+touch "$state_root/running-me__old"
+rename_repo me/new
+ls "$state_root" | grep -v '^running' | sort | paste -sd ' '
+cat "$state_root/me__New-order.txt" "$state_root/me__New-agent-host" | paste -sd ' '
+ls "$state_root" | grep '^running' | paste -sd ' '
+# Again, as from another device whose monitor already moved.
+configure_repo me/old
+rename_repo me/New
+configure_repo me/old
+rename_repo me/other || echo refused
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Renamed me/old to me/New on ', result.stdout)
+        self.assertIn('me__New-agent-host me__New-order.txt me__old-pro-order.txt', result.stdout)
+        self.assertIn('3 1 pi-agent', result.stdout)
+        # The monitor stopped under the old name and runs under the new one.
+        self.assertIn('\nrunning-me__New\n', result.stdout)
+        self.assertEqual(result.stdout.splitlines()[-1], 'refused')
+        self.assertIn('GitHub names me/old as me/New, not me/other.', result.stderr)
+
+    def test_rename_runs_on_the_monitors_device_first(self):
+        result = self.run_shell(r'''
+gh() { echo example/renamed; }
+printf 'pi\n' >"$monitor_host_file"
+printf '5\n' >"$queue_order_file"
+ssh_queue_command() { echo "ssh $*"; }
+rename_repo example/renamed
+ls "$state_root" | sort | paste -sd ' '
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0], 'ssh pi --rename-repo example/renamed --local-monitor')
+        self.assertIn('example__renamed-monitor-host example__renamed-order.txt', result.stdout)
+
     def test_move_monitor_to_another_device_carries_its_state(self):
         result = self.run_shell(r'''
 machine_id() { echo here; }

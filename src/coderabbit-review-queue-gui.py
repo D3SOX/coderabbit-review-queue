@@ -45,10 +45,10 @@ from queue_gui_common import (
     STATUS_CACHE_MAX_AGE, app_icon, monitor_is_running, monitor_pid_files,
     process_is_running, status_belongs_to_repo,
 )
-from queue_gui_icons import RepoIconsMixin
-from queue_gui_monitor_host import MonitorHostMixin
+from queue_gui_icons import RepoIconsMixin, icon_root, repo_key
+from queue_gui_monitor_host import MONITOR_MIRROR_SUFFIXES, REMOTE_MIRROR_ROOT, MonitorHostMixin
 from queue_gui_pr_images import PrImageTooltips
-from queue_gui_repo_order import RepoOrderMixin, ordered_repos
+from queue_gui_repo_order import RepoOrderMixin, order_file, ordered_repos
 from queue_gui_settings import SettingsMixin
 from queue_gui_status import StatusMixin
 from queue_gui_tray import ANIMATED_TRAY_STATES, TRAY_FRAME_MS, render_tray_icon
@@ -208,6 +208,28 @@ def enable_column_menu(tree: QTreeWidget, name: str, stretch: int) -> None:
     header.sectionMoved.connect(save_order)
 
 
+def rename_gui_state(old: str, new: str) -> None:
+    """Point this window's own records for OLD at NEW; the CLI moved the rest."""
+    def replace_lines(path: Path) -> None:
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            return
+        renamed = list(dict.fromkeys(new if line.strip().lower() == old.lower() else line for line in lines))
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text("".join(f"{line}\n" for line in renamed))
+        os.replace(temporary, path)
+
+    for path in (order_file(), REPOSITORY_CACHE_FILE, SELECTED_REPO_FILE):
+        replace_lines(path)
+    icon_settings = icon_root() / f"{repo_key(old)}.json"
+    if icon_settings.is_file():
+        os.replace(icon_settings, icon_root() / f"{repo_key(new)}.json")
+    # The next poll of the monitor's device fills the new name's mirror.
+    for suffix in MONITOR_MIRROR_SUFFIXES:
+        (REMOTE_MIRROR_ROOT / f"{repo_key(old)}-{suffix}").unlink(missing_ok=True)
+
+
 def connect_process(process: QProcess, finished: Callable[[int], None]) -> None:
     process.finished.connect(finished)
 
@@ -264,6 +286,9 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
             self.repo_validation_process, self.repository_validation_finished
         )
         self.pending_repository = ""
+        self.rename_process = QProcess(self)
+        connect_process(self.rename_process, self.rename_finished)
+        self.rename_names = ("", "")
         self.delegate_process = QProcess(self)
         connect_process(self.delegate_process, self.delegate_finished)
         self.delegate_repo = ""
@@ -944,6 +969,10 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
         repo = self.pending_repository
         self.pending_repository = ""
         self.repo_combo.setEnabled(True)
+        renamed = re.fullmatch(r"Repository name is (\S+), not (\S+)\.", stderr)
+        if exit_code != 0 and renamed and renamed[2] == repo:
+            self.offer_rename(repo, renamed[1])
+            return
         if exit_code != 0:
             QMessageBox.warning(
                 self,
@@ -961,6 +990,44 @@ class QueueWindow(SettingsMixin, StatusMixin, MonitorHostMixin, RepoIconsMixin, 
             self.repo_combo.blockSignals(False)
             self.apply_repo_icons([repo])
         self.activate_repo(repo)
+
+    def offer_rename(self, old: str, new: str) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Repository renamed",
+            f"{old} is now {new} on GitHub.\n\nMove its settings, queue, and monitor to {new}? "
+            "A running monitor stops and starts again under the new name.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes or self.rename_process.state() != QProcess.NotRunning:
+            self.restore_selected_repo()
+            return
+        self.rename_names = (old, new)
+        self.repo_combo.setEnabled(False)
+        self.statusBar().showMessage(f"Renaming {old} to {new}…")
+        self.rename_process.setProgram(SCRIPT)
+        self.rename_process.setArguments(["--repo", old, "--rename-repo", new])
+        self.rename_process.start()
+
+    def rename_finished(self, exit_code: int) -> None:
+        stdout = bytes(self.rename_process.readAllStandardOutput()).decode(errors="replace").strip()
+        stderr = bytes(self.rename_process.readAllStandardError()).decode(errors="replace").strip()
+        old, new = self.rename_names
+        self.repo_combo.setEnabled(True)
+        if exit_code != 0:
+            QMessageBox.warning(self, "Rename failed", stderr or stdout or f"Could not rename {old}.")
+            self.restore_selected_repo()
+            return
+        rename_gui_state(old, new)
+        self.remote_monitors.pop(old, None)
+        self.remote_monitor_errors.pop(old, None)
+        repos = [new if repo == old else repo for repo in (
+            self.repo_combo.itemText(index) for index in range(self.repo_combo.count())
+        )]
+        self.set_repositories(list(dict.fromkeys(repos + [new])))
+        self.apply_repo_icons([new])
+        self.show_transient_status(stdout.splitlines()[-1] if stdout else f"Renamed {old} to {new}")
 
     def restore_selected_repo(self) -> None:
         try:

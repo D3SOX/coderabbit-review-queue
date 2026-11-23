@@ -579,6 +579,36 @@ class ReviewRequestRefreshTests(unittest.TestCase):
         self.assertEqual(icons()[0], plain[0])
         app.processEvents()
 
+    def test_rename_points_the_windows_own_records_at_the_new_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "repository-order.txt").write_text("me/a\nme/Old\n")
+            (root / "repositories.txt").write_text("me/old\nme/new\nme/a\n")
+            (root / "selected-repo").write_text("me/old\n")
+            (root / "repo-icons").mkdir()
+            (root / "repo-icons/me__old.json").write_text('{"choice": "initials"}')
+            (root / "remote-monitors").mkdir()
+            (root / "remote-monitors/me__old-order.txt").write_text("1\n")
+            with patch.object(queue_gui_common, "STATE_ROOT", root), \
+                    patch.object(queue_gui, "REPOSITORY_CACHE_FILE", root / "repositories.txt"), \
+                    patch.object(queue_gui, "SELECTED_REPO_FILE", root / "selected-repo"), \
+                    patch.object(queue_gui, "REMOTE_MIRROR_ROOT", root / "remote-monitors"):
+                queue_gui.rename_gui_state("me/old", "me/new")
+            self.assertEqual((root / "repository-order.txt").read_text(), "me/a\nme/new\n")
+            self.assertEqual((root / "repositories.txt").read_text(), "me/new\nme/a\n")
+            self.assertEqual((root / "selected-repo").read_text(), "me/new\n")
+            self.assertEqual((root / "repo-icons/me__new.json").read_text(), '{"choice": "initials"}')
+            self.assertEqual(list((root / "remote-monitors").iterdir()), [])
+
+    def test_entering_a_renamed_repository_offers_to_move_it(self):
+        window = Mock()
+        window.pending_repository = "me/old"
+        window.repo_validation_process.readAllStandardOutput.return_value = b""
+        window.repo_validation_process.readAllStandardError.return_value = (
+            b"Repository name is me/new, not me/old.\n")
+        queue_gui.QueueWindow.repository_validation_finished(window, 1)
+        window.offer_rename.assert_called_once_with("me/old", "me/new")
+
     def test_queue_shows_estimated_review_start_per_position(self):
         app = QApplication.instance() or QApplication([])
         window = Mock()
