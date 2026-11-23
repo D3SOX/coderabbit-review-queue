@@ -3585,6 +3585,9 @@ printf '3\n1\n' >"$queue_order_file"
 printf 'pi-agent\n' >"$state_root/me__old-agent-host"
 printf 'keep\n' >"$state_root/me__old-pro-order.txt"
 printf 'default\n' >"$state_root/me__New-agent-host"
+: >"$state_root/me__old-order.txt.lock"
+: >"$state_root/me__old-pending-archives.tsv.scan.lock"
+: >"$state_root/me__old-pro-order.txt.lock"
 local_monitor_pid() { [[ -f $state_root/running-$repo_key ]] && echo 42; }
 stop_local_monitor() { rm "$state_root/running-$repo_key"; echo "stopped $repo"; }
 start_local_monitor() { touch "$state_root/running-$repo_key"; echo "started $repo"; }
@@ -3601,7 +3604,8 @@ rename_repo me/other || echo refused
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('Renamed me/old to me/New on ', result.stdout)
-        self.assertIn('me__New-agent-host me__New-order.txt me__old-pro-order.txt', result.stdout)
+        self.assertIn('me__New-agent-host me__New-order.txt me__old-pro-order.txt me__old-pro-order.txt.lock',
+                      result.stdout)
         self.assertIn('3 1 pi-agent', result.stdout)
         # The monitor stopped under the old name and runs under the new one.
         self.assertIn('\nrunning-me__New\n', result.stdout)

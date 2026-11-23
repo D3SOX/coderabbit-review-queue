@@ -503,8 +503,15 @@ rename_repo() {
       new_file="$state_root/${new//\//__}-${file:${#state_root}+${#old_key}+2}"
       [[ $file == "$new_file" ]] || mv -f -- "$file" "$new_file"
     done
+    # The old name's lock files guard nothing once its monitor stopped.
+    for file in "$state_root/$old_key"-*.lock; do
+      if [[ $old_key != "${new//\//__}" &&
+        ${file:${#state_root}+${#old_key}+2} =~ ^($repo_state_suffixes)(\.[a-z]+)*\.lock$ ]]; then
+        rm -f -- "$file"
+      fi
+    done
   )
-  rm -f -- "$monitor_pid_file" "$monitor_lock_file"
+  rm -f -- "$monitor_pid_file" "$monitor_lock_file" "$runtime_root/coderabbit-review-queue-$old_key-routing.lock"
   local old=$repo
   configure_repo "$new"
   if (( was_running )); then
