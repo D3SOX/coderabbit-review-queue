@@ -3,12 +3,14 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlencode
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 WEB_PATH = Path(__file__).resolve().parents[1] / "src/coderabbit-review-queue-web.py"
 SPEC = importlib.util.spec_from_file_location("queue_web", WEB_PATH)
 assert SPEC and SPEC.loader
@@ -102,7 +104,8 @@ class WebTests(unittest.TestCase):
             response = connection.getresponse()
             return response.status, response.getheader("Location"), response.read().decode()
 
-        with patch.object(web, "SCRIPT", str(script)), patch.object(web, "STATE_ROOT", state):
+        with patch.object(web, "SCRIPT", str(script)), patch.object(web, "STATE_ROOT", state), \
+                patch.object(web.PROJECT_ICONS, "ensure"):
             status, _, body = request("GET", "/")
             self.assertEqual(status, 200)
             self.assertIn("me/repo", body)
@@ -135,6 +138,38 @@ class WebTests(unittest.TestCase):
                 "--repo me/repo --set-order 8 9",
                 "--repo other/repo --start-monitor",
             ])
+
+    def test_project_icons_are_found_like_the_gui_finds_them_and_served(self):
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory)
+        fake_gh = directory / "gh"
+        fake_gh.write_text(
+            "#!/bin/bash\n"
+            'case "$*" in\n'
+            "  *git/trees*) echo '[\"docs/logo.png\", \"assets/icon.svg\", \"tests/icon.svg\"]' ;;\n"
+            "  *contents/assets/icon.svg*) echo 'not an image' ;;\n"
+            "  *contents/docs/logo.png*) printf '\\x89PNG\\r\\n\\x1a\\nrest' ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n"
+        )
+        fake_gh.chmod(0o755)
+        state = directory / "state"
+        (state / "repo-icons").mkdir(parents=True)
+        # A choice made in the GUI stays.
+        (state / "repo-icons/me__chosen.json").write_text(
+            '{"choice": "initials", "checked": 1, "candidates": []}')
+        with patch.object(web, "STATE_ROOT", state), patch.object(web, "GH", str(fake_gh)):
+            web.PROJECT_ICONS.find("me/repo")
+            data = web.icon_settings("me/repo")
+            self.assertEqual(data["candidates"], ["assets/icon.svg", "docs/logo.png"])
+            # The SVG was not an image, so the next candidate is used.
+            self.assertEqual(data["path"], "docs/logo.png")
+            self.assertTrue(web.icon_file("me/repo").read_bytes().startswith(b"\x89PNG"))
+            self.assertIn('<img class=badge src="/icon/me/repo?v=', web.badge("me/repo"))
+            finder = web.IconFinder()
+            finder.ensure(["me/chosen"])
+            self.assertEqual(finder.pending, [])
+            self.assertIn("<span class=badge", web.badge("me/chosen"))
 
     def test_a_saved_move_reorders_the_kept_status(self):
         reordered = web.reorder_status(STATUS, ["8", "9"])

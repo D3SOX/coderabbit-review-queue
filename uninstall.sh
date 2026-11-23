@@ -34,11 +34,11 @@ rm -f \
   "$lib_dir/coderabbit-logomark-48.png" \
   "$lib_dir/coderabbit-logomark-64.png" \
   "$lib_dir/uninstall.sh"
-rm -f "$lib_dir"/queue_gui_*.py
+rm -f "$lib_dir"/queue_gui_*.py "$lib_dir/queue_icon_detection.py"
 rm -f "$lib_dir"/lib/*.sh
 rm -f "$lib_dir"/lib/*.jq
 rmdir "$lib_dir/lib" 2>/dev/null || true
-rm -f "$lib_dir"/__pycache__/queue_gui_*.pyc
+rm -f "$lib_dir"/__pycache__/queue_gui_*.pyc "$lib_dir"/__pycache__/queue_icon_detection.*.pyc
 rmdir "$lib_dir/__pycache__" 2>/dev/null || true
 for size in 16 22 24 32 48 64; do
   rm -f "$icons_dir/${size}x${size}/apps/coderabbit-review-queue.png"

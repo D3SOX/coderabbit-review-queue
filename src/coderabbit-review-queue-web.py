@@ -24,6 +24,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
+from queue_icon_detection import (
+    DETECTION_MAX_AGE, GH, MAX_ICON_BYTES, TREE_FILTER, icon_candidates, initials, repo_key,
+)
+
 SCRIPT = str(Path(__file__).with_name("coderabbit-review-queue"))
 STATE_ROOT = (
     Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
@@ -117,6 +121,121 @@ def parse_status(status: str) -> dict:
         row["opened"] = opened.get(row["number"])
         row["start"] = next(pending, None) if row["status"] == "Queued" else None
     return {"queue": queue, "finished": finished, "expiry": expiry}
+
+
+IMAGE_TYPES = {"svg": "image/svg+xml", "png": "image/png", "ico": "image/x-icon", "webp": "image/webp"}
+
+
+def icon_root() -> Path:
+    """The GUI's icon cache; the page shares it and its format."""
+    return STATE_ROOT / "repo-icons"
+
+
+def icon_settings(repo: str) -> dict | None:
+    try:
+        data = json.loads((icon_root() / f"{repo_key(repo)}.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def icon_file(repo: str) -> Path | None:
+    image = (icon_settings(repo) or {}).get("image")
+    if not isinstance(image, str) or "/" in image or Path(image).suffix[1:].lower() not in IMAGE_TYPES:
+        return None
+    path = icon_root() / image
+    return path if path.is_file() else None
+
+
+def looks_like_image(data: bytes, extension: str) -> bool:
+    if not data or len(data) > MAX_ICON_BYTES:
+        return False
+    if extension == "png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if extension == "ico":
+        return data[:4] == b"\x00\x00\x01\x00"
+    if extension == "webp":
+        return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    return extension == "svg" and b"<svg" in data[:4096].lower()
+
+
+def gh(*args: str) -> bytes | None:
+    try:
+        result = subprocess.run([GH, *args], stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+class IconFinder:
+    """Finds project icons the way the GUI does, for devices without it, such
+    as a Raspberry Pi that only runs monitors. A choice made in the GUI stays."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.pending: list[str] = []
+        self.tried: set[str] = set()
+        self.running = False
+
+    def ensure(self, repos: list[str]) -> None:
+        with self.lock:
+            for repo in repos:
+                data = icon_settings(repo)
+                stale = data is None or (
+                    data.get("choice", "auto") == "auto"
+                    and time.time() - float(data.get("checked", 0) or 0) > DETECTION_MAX_AGE
+                )
+                # Try each repository once per run; GitHub may be unreachable.
+                if stale and repo not in self.tried:
+                    self.tried.add(repo)
+                    self.pending.append(repo)
+            if self.pending and not self.running:
+                self.running = True
+                threading.Thread(target=self.work, daemon=True).start()
+
+    def work(self) -> None:
+        while True:
+            with self.lock:
+                if not self.pending:
+                    self.running = False
+                    return
+                repo = self.pending.pop(0)
+            self.find(repo)
+
+    def find(self, repo: str) -> None:
+        tree = gh("api", f"repos/{repo}/git/trees/HEAD?recursive=1", "--jq", TREE_FILTER)
+        try:
+            paths = json.loads(tree) if tree is not None else None
+        except ValueError:
+            paths = None
+        if not isinstance(paths, list):
+            return
+        data = icon_settings(repo) or {"choice": "auto"}
+        data["candidates"] = icon_candidates(
+            [path for path in paths if isinstance(path, str)], repo.rsplit("/", 1)[-1])
+        data["checked"] = time.time()
+        if data.get("choice", "auto") == "auto":
+            data["path"] = data["image_path"] = None
+            old = data.pop("image", None)
+            for path in data["candidates"]:
+                extension = Path(path).suffix[1:].lower()
+                raw = gh("api", "-H", "Accept: application/vnd.github.raw", f"repos/{repo}/contents/{quote(path)}")
+                if raw is not None and looks_like_image(raw, extension):
+                    image = f"{repo_key(repo)}-{int(time.time() * 1000)}.{extension}"
+                    icon_root().mkdir(parents=True, exist_ok=True)
+                    (icon_root() / image).write_bytes(raw)
+                    data.update(path=path, image_path=path, image=image)
+                    break
+            if isinstance(old, str) and "/" not in old and old != data.get("image"):
+                (icon_root() / old).unlink(missing_ok=True)
+        icon_root().mkdir(parents=True, exist_ok=True)
+        target = icon_root() / f"{repo_key(repo)}.json"
+        temporary = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(data))
+        os.replace(temporary, target)
+
+
+PROJECT_ICONS = IconFinder()
 
 
 class StatusCache:
@@ -249,6 +368,7 @@ button .i { margin-right: .4rem; }
   background: hsl(var(--hue) 55% 41%); color: #fff; font-weight: 700; font-size: .95rem; letter-spacing: .01em; }
 .heading { display: flex; align-items: center; gap: .8rem; }
 .heading .badge { width: 3rem; height: 3rem; font-size: 1.15rem; }
+img.badge { display: block; object-fit: contain; background: none; border-radius: 0; }
 h1 { font-size: 1.6rem; line-height: 1.15; letter-spacing: -.015em; margin: 0; font-weight: 700;
   overflow-wrap: anywhere; }
 h1 .owner { display: block; font-size: 1rem; font-weight: 500; color: var(--muted); letter-spacing: 0; }
@@ -385,16 +505,10 @@ def icon(name: str) -> str:
     return f'<svg class=i aria-hidden=true><use href="#i-{name}"/></svg>'
 
 
-def initials(repo: str) -> str:
-    """The GUI's fallback project icon letters."""
-    name = repo.rsplit("/", 1)[-1]
-    words = [word for word in re.split(r"[-_.\s]+", name) if word]
-    if len(words) == 1:
-        words = re.findall(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])", words[0]) or words
-    return "".join(word[0] for word in words[:2]).upper() or "?"
-
-
 def badge(repo: str) -> str:
+    image = icon_file(repo)
+    if image:
+        return f'<img class=badge src="/icon/{quote(repo)}?v={quote(image.name)}" alt="" aria-hidden=true>'
     hue = zlib.crc32(repo.lower().encode()) % 360
     return f'<span class=badge style="--hue: {hue}" aria-hidden=true>{html.escape(initials(repo))}</span>'
 
@@ -441,6 +555,7 @@ def repo_name(repo: str) -> str:
 
 def home_page(flash: str) -> bytes:
     repos = known_repos()
+    PROJECT_ICONS.ensure(repos)
     with ThreadPoolExecutor(max_workers=8) as pool:
         states = list(pool.map(monitor_running, repos))
     rows = "".join(
@@ -473,6 +588,7 @@ def result_icon(result: str) -> str:
 
 
 def repo_page(repo: str, flash: str) -> bytes:
+    PROJECT_ICONS.ensure([repo])
     with ThreadPoolExecutor(max_workers=2) as pool:
         running_future = pool.submit(monitor_running, repo)
         loaded, code, status, loading = STATUS.get(repo)
@@ -576,16 +692,21 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:
         sys.stderr.write(f"{self.address_string()} {format % args}\n")
 
-    def send(self, status: int, body: bytes = b"", location: str = "") -> None:
+    def send(
+        self, status: int, body: bytes = b"", location: str = "",
+        content_type: str = "text/html; charset=utf-8", cache: str = "no-store",
+    ) -> None:
         self.send_response(status)
         if location:
             self.send_header("Location", location)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy",
                          "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; "
+                         "img-src 'self'; "
                          "form-action 'self'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
@@ -606,6 +727,14 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/":
             self.send(200, home_page(flash))
             return
+        icon = re.fullmatch(r"/icon/([^/]+)/([^/]+)", url.path)
+        if icon and REPO.fullmatch(f"{icon[1]}/{icon[2]}"):
+            path = icon_file(f"{icon[1]}/{icon[2]}")
+            if path:
+                # Each new image gets a new file name, and the page links it with ?v=.
+                self.send(200, path.read_bytes(), content_type=IMAGE_TYPES[path.suffix[1:].lower()],
+                          cache="max-age=86400")
+                return
         target = self.checked_repo(url.path)
         if target and not target[1]:
             self.send(200, repo_page(target[0], flash))

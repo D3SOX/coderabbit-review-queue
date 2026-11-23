@@ -42,6 +42,7 @@ install -m 755 \
   "$source_dir/src/coderabbit-review-queue-gui.py" \
   "$lib_dir/coderabbit-review-queue-gui.py"
 install -m 644 "$source_dir"/src/queue_gui_*.py "$lib_dir/"
+install -m 644 "$source_dir/src/queue_icon_detection.py" "$lib_dir/"
 install -m 755 \
   "$source_dir/src/coderabbit-review-queue-web.py" \
   "$lib_dir/coderabbit-review-queue-web.py"
