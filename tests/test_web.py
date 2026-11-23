@@ -118,16 +118,29 @@ class WebTests(unittest.TestCase):
             status, location, _ = request("POST", "/repo/me/repo/move",
                                           {"pr": "8", "to": "top", "order": "9 8"})
             self.assertEqual((status, location), (303, "/repo/me/repo"))
+            # The move shows at once, without asking for the whole status again.
+            body = request("GET", "/repo/me/repo")[2]
+            self.assertLess(body.index("Waiting one"), body.index("Held one"))
+            loaded = web.STATUS.loaded_at("me/repo")
+            self.assertEqual(request("GET", f"/repo/me/repo/updated?since={loaded}")[0], 204)
+            self.assertEqual(request("GET", f"/repo/me/repo/updated?since={loaded - 1}")[0], 200)
             status, location, _ = request("POST", "/start", {"repo": "other/repo"})
             self.assertEqual(status, 303)
             self.assertEqual(location, "/repo/other/repo?msg=Started+the+monitor.")
             self.assertEqual(request("POST", "/repo/me/repo/stop", {}, origin=False)[0], 403)
             self.assertEqual(request("POST", "/start", {"repo": "bad repo"})[1],
                              "/?msg=Enter+a+repository+as+OWNER%2FNAME.")
-            self.assertEqual(calls.read_text().splitlines(), [
+            self.assertEqual([call for call in calls.read_text().splitlines()
+                              if not call.endswith(("--status", "--monitor-info"))], [
                 "--repo me/repo --set-order 8 9",
                 "--repo other/repo --start-monitor",
             ])
+
+    def test_a_saved_move_reorders_the_kept_status(self):
+        reordered = web.reorder_status(STATUS, ["8", "9"])
+        self.assertIn("  #7 Reviewing now (in progress)\n  #8 Waiting one\n"
+                      "  #9 Held one (waiting for other bots: Codex still reviewing)\n", reordered)
+        self.assertEqual(web.reorder_status("Queued PRs:\n", ["1"]), "Queued PRs:\n")
 
 
 if __name__ == "__main__":

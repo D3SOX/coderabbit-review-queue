@@ -16,6 +16,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
@@ -116,6 +117,75 @@ def parse_status(status: str) -> dict:
         row["opened"] = opened.get(row["number"])
         row["start"] = next(pending, None) if row["status"] == "Queued" else None
     return {"queue": queue, "finished": finished, "expiry": expiry}
+
+
+class StatusCache:
+    """The last --status per repository. It can take seconds, for example when an
+    agent host is asked about tasks, so pages show the last one while a newer
+    one loads."""
+
+    fresh_seconds = 10
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.entries: dict[str, tuple[float, int, str]] = {}
+        self.loading: set[str] = set()
+
+    def get(self, repo: str) -> tuple[float, int, str, bool]:
+        """(loaded at, exit code, status, newer one loading); waits only for a first load."""
+        with self.lock:
+            entry = self.entries.get(repo)
+        if entry is None:
+            self.load(repo)
+        elif time.time() - entry[0] > self.fresh_seconds:
+            self.refresh(repo)
+        with self.lock:
+            return (*self.entries[repo], repo in self.loading)
+
+    def loaded_at(self, repo: str) -> float:
+        with self.lock:
+            return self.entries.get(repo, (0.0,))[0]
+
+    def load(self, repo: str) -> None:
+        code, status = run(repo, "--status")
+        with self.lock:
+            self.entries[repo] = (time.time(), code, status)
+            self.loading.discard(repo)
+
+    def refresh(self, repo: str) -> None:
+        with self.lock:
+            if repo in self.loading:
+                return
+            self.loading.add(repo)
+        threading.Thread(target=self.load, args=(repo,), daemon=True).start()
+
+    def reorder(self, repo: str, order: list[str]) -> None:
+        """Show a saved move at once; GitHub has nothing new to say about it."""
+        with self.lock:
+            if repo in self.entries:
+                loaded, code, status = self.entries[repo]
+                self.entries[repo] = (loaded, code, reorder_status(status, order))
+
+
+STATUS = StatusCache()
+
+
+def reorder_status(status: str, order: list[str]) -> str:
+    """STATUS with the queued PRs in ORDER taking their slots in that order."""
+    lines = status.splitlines()
+    try:
+        start = lines.index("Queued PRs:") + 1
+    except ValueError:
+        return status
+    end = start
+    while end < len(lines) and lines[end].startswith("  #"):
+        end += 1
+    rows = {line.split()[0][1:]: line for line in lines[start:end]}
+    pending = iter([rows[number] for number in order if number in rows])
+    lines[start:end] = [
+        next(pending) if line.split()[0][1:] in order else line for line in lines[start:end]
+    ]
+    return "\n".join(lines) + ("\n" if status.endswith("\n") else "")
 
 
 def move(order: list[str], number: str, direction: str) -> list[str]:
@@ -220,6 +290,10 @@ button:disabled { opacity: .3; cursor: default; }
   white-space: nowrap; }
 .stop .when small { display: block; font-weight: 500; font-size: .8rem; color: var(--muted); }
 .stop .rail { position: relative; }
+h2 .updated { float: right; font-size: .85rem; font-weight: 500; color: var(--muted); }
+h2 .updated .i { width: .9em; height: .9em; margin-right: .3rem; animation: spin 1.2s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { h2 .updated .i { animation: none; } }
 .stop .rail::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px;
   margin-left: -1px; background: var(--track); }
 .stop:first-child .rail::before { top: .55rem; }
@@ -253,17 +327,27 @@ SCRIPT_JS = """
 const now = Date.now();
 const rel = ms => {
   const m = Math.round(Math.abs(ms) / 60000);
-  return m < 1 ? 'now' : m < 60 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`;
+  return m < 1 ? 'just now' : m < 60 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`;
 };
 for (const el of document.querySelectorAll('[data-epoch]')) {
   const date = new Date(el.dataset.epoch * 1000);
   const time = date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
   const today = date.toDateString() === new Date().toDateString();
   el.title = date.toLocaleString();
-  if (el.dataset.kind === 'ago') el.textContent = `${rel(now - date)} ago`;
+  if (el.dataset.kind === 'ago') el.textContent = now - date < 60000 ? 'just now' : `${rel(now - date)} ago`;
   else if (el.dataset.kind === 'in') el.textContent = date <= now ? 'available now' : `in ${rel(date - now)}`;
   else if (el.dataset.kind === 'day') el.textContent = today ? '' : date.toLocaleDateString([], {weekday: 'short'});
   else el.textContent = date <= now ? 'now' : time;
+}
+// Reload once the newer status that is loading has arrived.
+const loading = document.querySelector('[data-loading]');
+if (loading) {
+  const poll = async () => {
+    const response = await fetch(`${location.pathname}/updated?since=${loading.dataset.since}`).catch(() => null);
+    if (response && response.status === 200) location.replace(location.pathname);
+    else setTimeout(poll, 2000);
+  };
+  setTimeout(poll, 2000);
 }
 """
 
@@ -391,7 +475,7 @@ def result_icon(result: str) -> str:
 def repo_page(repo: str, flash: str) -> bytes:
     with ThreadPoolExecutor(max_workers=2) as pool:
         running_future = pool.submit(monitor_running, repo)
-        code, status = run(repo, "--status")
+        loaded, code, status, loading = STATUS.get(repo)
         running = running_future.result()
     base = f"/repo/{quote(repo)}"
     controls = state_label(running)
@@ -417,7 +501,10 @@ def repo_page(repo: str, flash: str) -> bytes:
     queue = data["queue"]
     movable = [row["number"] for row in queue if row["status"] != "In progress"]
     order = " ".join(movable)
-    parts.append(f"<h2>Queue <span class=count>{len(queue)}</span></h2>")
+    updated = (f'<span class=updated{" data-loading" if loading else ""} data-since="{loaded}">'
+               f'{icon("refresh") if loading else ""}updated <span data-kind=ago data-epoch="{int(loaded)}"></span>'
+               "</span>")
+    parts.append(f"<h2>Queue <span class=count>{len(queue)}</span>{updated}</h2>")
     if not queue:
         parts.append("<p class=empty>No PR is waiting for a CodeRabbit review.</p>")
     stops = []
@@ -498,7 +585,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy",
-                         "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+                         "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; "
                          "form-action 'self'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
@@ -522,6 +609,14 @@ class Handler(BaseHTTPRequestHandler):
         target = self.checked_repo(url.path)
         if target and not target[1]:
             self.send(200, repo_page(target[0], flash))
+            return
+        if target and target[1] == "updated":
+            since = parse_qs(url.query).get("since", ["0"])[0]
+            try:
+                newer = STATUS.loaded_at(target[0]) > float(since)
+            except ValueError:
+                newer = False
+            self.send(200 if newer else 204)
             return
         self.send(404, page("Not found", "<p>Not found. <a href=/>Back</a></p>"))
 
@@ -560,7 +655,12 @@ class Handler(BaseHTTPRequestHandler):
             order = [n for n in form.get("order", "").split() if n.isdigit()]
             new_order = move(order, form.get("pr", ""), form.get("to", ""))
             code, output = run(repo, "--set-order", *new_order)
+            if code == 0:
+                STATUS.reorder(repo, new_order)
             output = output if code != 0 else ""
+        if action != "move":
+            # Estimates and the queue depend on the monitor; load them anew.
+            STATUS.refresh(repo)
         self.redirect(back, output)
 
     def redirect(self, location: str, message: str = "") -> None:
