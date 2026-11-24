@@ -221,6 +221,37 @@ matching_claude_session target-branch unrelated-head
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertTrue(result.stdout.startswith('session-1\t'), result.stdout)
 
+    def test_task_matching_falls_back_to_the_worktree_that_last_had_the_branch(self):
+        # One agent works on stacked PRs in one worktree and switches branches.
+        for provider in ('claude', 'codex'):
+            with self.subTest(provider=provider):
+                result = self.run_shell(r'''
+claude_projects_root="$state_root/claude"
+codex_sessions_root="$state_root/sessions"
+mkdir -p "$claude_projects_root/project" "$codex_sessions_root"
+for number in 1 2; do
+  worktree="$state_root/worktree-$number"
+  git -C "$state_root" init -q -b main "worktree-$number"
+  git -C "$worktree" remote add origin git@github.com:example/repo.git
+  git -C "$worktree" -c user.name=Test -c user.email=test@example.com -c commit.gpgSign=false \
+    commit -q --allow-empty -m initial
+  git -C "$worktree" checkout -q -b target-branch
+  git -C "$worktree" checkout -q -b other-branch
+  session="session-$number"
+  printf '%s\n' "{\"cwd\":\"$worktree\",\"gitBranch\":\"main\",\"sessionId\":\"$session\",\"timestamp\":\"2026-10-21T12:0$number:00Z\"}" \
+    >"$claude_projects_root/project/$session.jsonl"
+  printf '%s\n' "{\"timestamp\":\"2026-10-21T12:0$number:00Z\",\"type\":\"session_meta\",\"payload\":{\"originator\":\"T3 Code\",\"id\":\"$session\",\"cwd\":\"$worktree\",\"git\":{\"repository_url\":\"git@github.com:example/repo.git\",\"branch\":\"main\"}}}" \
+    >"$codex_sessions_root/rollout-$session.jsonl"
+done
+# Worktree 1 left the branch last, so it is the agent working on that PR.
+git -C "$state_root/worktree-2" reflog expire --expire=all --all
+git -C "$state_root/worktree-2" checkout -q target-branch
+GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' git -C "$state_root/worktree-2" checkout -q other-branch
+matching_''' + provider + r'''_session target-branch unrelated-head
+''')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(result.stdout.startswith('session-1\t'), result.stdout)
+
     def test_large_commit_status_does_not_block_review_acceptance(self):
         result = self.run_shell(r'''
 wait_for_github_quota() { :; }

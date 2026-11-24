@@ -113,7 +113,8 @@ PY
   # One rg pass and one Python process for the whole history: a head, jq,
   # and git pipeline per rollout took most of the remote status budget once
   # hundreds of tasks existed.
-  python3 - "$codex_sessions_root" "$repo_lower" "$branch_name" "$head_sha" "$excluded_sessions" <<'PY'
+  local output status=0
+  output=$(python3 - "$codex_sessions_root" "$repo_lower" "$branch_name" "$head_sha" "$excluded_sessions" <<'PY'
 import json
 import subprocess
 import sys
@@ -163,6 +164,7 @@ for start in range(0, len(files), 500):
 
 # Each group maps a worktree to the newest matching (timestamp, session).
 groups = {name: {} for name in ('branch', 'head', 'metadata_branch', 'metadata_head')}
+checkouts = {}
 
 
 def record(name, cwd, timestamp, session):
@@ -195,6 +197,8 @@ for path in files:
         continue
     for checkout in [cwd, *sorted(event_cwds.get(path, set()) - {cwd})]:
         current = worktree(checkout)
+        if current and timestamp > checkouts.get(checkout, ('',))[0]:
+            checkouts[checkout] = (timestamp, session)
         if current and current[0] == branch:
             record('branch', checkout, timestamp, session)
         if current and current[1] == head:
@@ -207,6 +211,61 @@ for group in groups.values():
         sys.exit(0)
     if sessions:
         sys.exit(1)
+for cwd, (_timestamp, session) in checkouts.items():
+    print(session, cwd, sep='\t')
+sys.exit(2)
+PY
+  ) || status=$?
+  finish_session_match "$1" "$2" "$status" "$output"
+}
+
+# The fallback when no worktree is on the PR now: one agent may work on
+# stacked PRs in one worktree and switch between their branches.
+finish_session_match() {
+  local status=$3 output=$4
+  if (( status == 0 )); then
+    printf '%s\n' "$output"
+  elif (( status == 2 )); then
+    reflog_matching_session "$1" "$2" "$output"
+  else
+    return 1
+  fi
+}
+
+# Picks the candidate ("session<TAB>worktree" lines) whose worktree had the
+# branch or head checked out most recently, according to its HEAD reflog.
+reflog_matching_session() {
+  [[ -n $3 ]] || return 1
+  python3 - "$@" <<'PY'
+import re
+import subprocess
+import sys
+
+branch, head, candidates = sys.argv[1:]
+moves = re.compile(r'checkout: moving from (\S+) to (\S+)$|returning to refs/heads/(\S+)$')
+latest = {}
+for line in candidates.splitlines():
+    session, _, cwd = line.partition('\t')
+    try:
+        log = subprocess.run(['git', '-C', cwd, 'log', '-g', '-n', '1000', '--date=unix',
+                              '--format=%H%x09%gd%x09%gs', 'HEAD'],
+                             capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        continue
+    for entry in log.splitlines():
+        sha, selector, subject = (entry.split('\t', 2) + ['', ''])[:3]
+        move = moves.search(subject)
+        if sha == head or (move and branch in move.groups()):
+            stamp = re.search(r'@\{(\d+)\}$', selector)
+            if stamp:
+                latest[cwd] = (int(stamp.group(1)), session)
+            break
+if latest:
+    newest = max(stamp for stamp, _session in latest.values())
+    winners = [(session, cwd) for cwd, (stamp, session) in latest.items() if stamp == newest]
+    if len(winners) == 1:
+        print(*winners[0], sep='\t')
+        sys.exit(0)
 sys.exit(1)
 PY
 }
@@ -227,7 +286,8 @@ matching_claude_session() {
   excluded_sessions=$(python3 "$script_dir/t3-delegate.py" --subagent-sessions --provider claudeAgent 2>/dev/null) || return 1
   # A shell/jq/git pipeline per transcript exceeded the SSH status budget.
   # Parse history in one process and inspect each worktree only once.
-  python3 - "$claude_projects_root" "$repo" "$1" "$2" "$excluded_sessions" <<'PY'
+  local output status=0
+  output=$(python3 - "$claude_projects_root" "$repo" "$1" "$2" "$excluded_sessions" <<'PY'
 import json
 from pathlib import Path
 import re
@@ -239,6 +299,7 @@ excluded = set(json.loads(excluded))
 repo = repo.lower()
 worktrees = {}
 matches = [{}, {}, {}]
+checkouts = {}
 
 def git(cwd, *args):
     try:
@@ -283,6 +344,8 @@ for file in Path(projects).glob('*/*.jsonl'):
     timestamp = entry.get('timestamp') or '1970-01-01T00:00:00.000Z'
     if not isinstance(timestamp, str):
         continue
+    if timestamp > checkouts.get(cwd, ('',))[0]:
+        checkouts[cwd] = (timestamp, session)
     for group, matched in zip(matches, (current[0] == branch, current[1] == head,
                                        entry.get('gitBranch') == branch)):
         if matched and (cwd not in group or timestamp > group[cwd][0]):
@@ -294,9 +357,13 @@ for group in matches:
         print(session, cwd, sep='\t')
         sys.exit(0)
     if group:
-        break
-sys.exit(1)
+        sys.exit(1)
+for cwd, (_timestamp, session) in checkouts.items():
+    print(session, cwd, sep='\t')
+sys.exit(2)
 PY
+  ) || status=$?
+  finish_session_match "$1" "$2" "$status" "$output"
 }
 
 claude_session_file() {
