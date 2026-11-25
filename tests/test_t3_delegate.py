@@ -188,6 +188,28 @@ class T3DelegateTests(unittest.TestCase):
                                            ('v2-thread', status, json.dumps(payload)))
                     self.assertEqual(t3_delegate.thread_state('codex-session'), expected)
 
+    def test_running_subagents_keep_a_finished_turn_busy(self):
+        database = self.create_v2_database()
+        with sqlite3.connect(database) as connection:
+            connection.execute("INSERT INTO orchestration_v2_projection_runs (thread_id,status) VALUES ('v2-thread','completed')")
+            connection.executemany('INSERT INTO orchestration_v2_projection_subagents VALUES (?,?,?)', [
+                ('v2-thread', 'old-child', 'completed'),
+                ('v2-thread', 'delegated', 'completed'),
+                ('delegated', 'native', 'completed'),
+            ])
+        with patch.object(t3_delegate, 't3_home', return_value=self.home):
+            self.assertEqual(t3_delegate.thread_state('codex-session'), 'idle')
+            for change in (
+                "INSERT INTO orchestration_v2_projection_runs (thread_id,status) VALUES ('delegated','running')",
+                "UPDATE orchestration_v2_projection_subagents SET status='running' WHERE child_thread_id='native'",
+            ):
+                with self.subTest(change=change):
+                    with sqlite3.connect(database) as connection:
+                        connection.execute("DELETE FROM orchestration_v2_projection_runs WHERE thread_id='delegated'")
+                        connection.execute("UPDATE orchestration_v2_projection_subagents SET status='completed'")
+                        connection.execute(change)
+                    self.assertEqual(t3_delegate.thread_state('codex-session'), 'running')
+
     def test_idle_only_dispatch_ignores_held_queue_but_defers_for_actual_work(self):
         database = self.create_v2_database()
         with sqlite3.connect(database) as connection:
@@ -352,6 +374,8 @@ class T3DelegateTests(unittest.TestCase):
                   (provider_thread_id TEXT, thread_id TEXT, provider TEXT, payload_json TEXT);
                 CREATE TABLE orchestration_v2_projection_runs
                   (thread_id TEXT, status TEXT, payload_json TEXT NOT NULL DEFAULT '{}');
+                CREATE TABLE orchestration_v2_projection_subagents
+                  (thread_id TEXT, child_thread_id TEXT, status TEXT);
                 INSERT INTO orchestration_v2_projection_threads VALUES
                   ('v2-thread', 'Review task', 'full-access', 'default', 'provider-thread',
                    '{"modelSelection":{"instanceId":"codex_second","model":"gpt-6-sol","options":[{"id":"reasoningEffort","value":"high"}]}}', NULL, NULL);

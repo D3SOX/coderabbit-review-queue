@@ -213,11 +213,24 @@ def has_active_run(connection, thread_id):
     # T3's `waiting` is a completed provider turn awaiting checkpoint capture,
     # not agent execution. PR-watch background work must not block delegation.
     # Held queued messages also wait for user action rather than executing.
+    # A turn that ended while its subagents (and theirs) still work is busy too.
     return connection.execute('''
-        SELECT 1 FROM orchestration_v2_projection_runs
-        WHERE thread_id = ? AND (
-          status IN ('preparing', 'starting', 'running')
-          OR (status = 'queued' AND json_extract(payload_json, '$.queueHeld') IS NOT 1)
+        WITH RECURSIVE tree(thread_id) AS (
+          SELECT ?
+          UNION
+          SELECT s.child_thread_id FROM orchestration_v2_projection_subagents s
+          JOIN tree ON s.thread_id = tree.thread_id
+          WHERE s.child_thread_id IS NOT NULL
+        )
+        SELECT 1 FROM tree WHERE EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_runs r
+          WHERE r.thread_id = tree.thread_id AND (
+            r.status IN ('preparing', 'starting', 'running')
+            OR (r.status = 'queued' AND json_extract(r.payload_json, '$.queueHeld') IS NOT 1)
+          )
+        ) OR EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_subagents s
+          WHERE s.thread_id = tree.thread_id AND s.status = 'running'
         ) LIMIT 1
     ''', (thread_id,)).fetchone() is not None
 
